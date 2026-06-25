@@ -21,7 +21,6 @@ const CONFIG = {
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
-  healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST1DAY',
 };
 
 const httpsAgent = new https.Agent({
@@ -49,11 +48,6 @@ function num(v) {
 
 function sumBy(arr, fn) {
   return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0);
-}
-
-function avg(arr) {
-  const vals = toArray(arr).map(num).filter(Number.isFinite);
-  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
 }
 
 function safeJson(text) {
@@ -177,10 +171,10 @@ async function graphql(query, variables = null, retry = true) {
   }
 
   if (json.errors) {
-    return { data: json.data || null, errors: json.errors };
+    throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
   }
 
-  return { data: json.data || null, errors: null };
+  return json.data || null;
 }
 
 const QUERY_SCHEMA = `
@@ -191,15 +185,6 @@ query {
       kind
       enumValues { name }
     }
-  }
-}
-`;
-
-const QUERY_CAMERAS = `
-query {
-  allCameras {
-    uuid
-    name
   }
 }
 `;
@@ -223,32 +208,25 @@ query {
         name
         tags
         coordinates
-        created_at
-        updated_at
-      }
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-        created_at
-        updated_at
       }
     }
   }
 }
 `;
 
-const QUERY_LINE_COUNTS = `
-query($app: ID!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]) {
+const QUERY_ONE_APP_COUNTS = `
+query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
   getApplication(application: { uuid: $app }) {
     __typename
     ... on ObjectFlow {
       uuid
       name
+      camera { uuid name }
       lines {
         uuid
         name
+        tags
+        coordinates
         count_data(time_range: $range, object_classes: $classes) {
           time_bucket
           number_of_samples
@@ -262,27 +240,6 @@ query($app: ID!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]) {
       }
     }
   }
-}
-`;
-
-const QUERY_SYSTEM_HEALTH = `
-query($healthRange: TimeRangeInput!) {
-  getSystemHealth {
-    perception_camera_count
-    perception_camera_online_count
-    perception_camera_offline_count
-    perception_app_count
-    perception_app_online_count
-    perception_app_offline_count
-    perception_camera_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_app_counts_history(time_range: $healthRange) { points { timestamp value } }
-  }
-}
-`;
-
-const QUERY_FEATURE_FLAGS = `
-query($featureflags: [FeatureFlags!]!) {
-  getFeatureFlags(featureflags: $featureflags)
 }
 `;
 
@@ -312,28 +269,23 @@ function parseClasses(input) {
   return raw.length ? raw : CONFIG.defaultClasses;
 }
 
-function classesToInputs(classes) {
-  return toArray(classes).map((name) => ({ name }));
+function classInputs(classes) {
+  return classes.map((name) => ({ name }));
 }
 
-function featureFlagNamesFromSchema(schema) {
-  return getEnumValues(schema, 'FeatureFlags');
-}
-
-function summarizeLineBuckets(rows) {
+function summarizeBuckets(rows) {
   const raw = toArray(rows);
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
     last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    samples: sumBy(raw, (x) => x?.number_of_samples),
     total_in: sumBy(raw, (x) => x?.count_in),
     total_out: sumBy(raw, (x) => x?.count_out),
     raw,
   };
 }
 
-function summarizeLineLive(rows) {
+function summarizeLive(rows) {
   const raw = toArray(rows);
   return {
     total_in: sumBy(raw, (x) => x?.count_in),
@@ -342,56 +294,63 @@ function summarizeLineLive(rows) {
   };
 }
 
-function filterObjectFlowApps(apps, filters) {
-  let result = toArray(apps);
+function pickFilters(url) {
+  return {
+    preset: url.searchParams.get('preset') || '',
+    class: url.searchParams.get('class') || '',
+    app: url.searchParams.get('app') || '',
+    camera: url.searchParams.get('camera') || '',
+    line: url.searchParams.get('line') || '',
+  };
+}
+
+async function collectData(filters = {}) {
+  const schemaData = await graphql(QUERY_SCHEMA);
+  const schema = schemaData?.__schema || null;
+  const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
+
+  const preset = normalizePreset(filters.preset, allowedPresets);
+  const classes = parseClasses(filters.class);
+
+  const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
+  let apps = toArray(appsData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
 
   if (filters.app) {
-    result = result.filter((a) => lower(a.name).includes(lower(filters.app)));
+    apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
   }
 
   if (filters.camera) {
-    result = result.filter((a) => lower(a.camera?.name).includes(lower(filters.camera)));
+    apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
   }
-
-  return result;
-}
-
-function filterLines(lines, filters) {
-  let result = toArray(lines);
-
-  if (filters.line) {
-    result = result.filter((l) => lower(l.name).includes(lower(filters.line)));
-  }
-
-  return result;
-}
-
-async function fetchObjectFlowAppsWithCounts(filters, preset, classes) {
-  const appsRes = await graphql(QUERY_OBJECTFLOW_APPS);
-  const rawApps = toArray(appsRes.data?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
-  const filteredApps = filterObjectFlowApps(rawApps, filters);
 
   const range = { time_range_preset: preset };
-  const classInputs = classesToInputs(classes);
+  const classesVar = classInputs(classes);
 
   const detailedApps = [];
-
-  for (const app of filteredApps) {
-    const countsRes = await graphql(QUERY_LINE_COUNTS, {
+  for (const app of apps) {
+    const one = await graphql(QUERY_ONE_APP_COUNTS, {
       app: app.uuid,
       range,
-      classes: classInputs,
+      classes: classesVar,
     });
 
-    const countedApp = countsRes.data?.getApplication;
-    const countedLines = filterLines(toArray(countedApp?.lines), filters);
+    const objectFlow = one?.getApplication;
+    if (!objectFlow || objectFlow.__typename !== 'ObjectFlow') continue;
 
-    const lines = countedLines.map((line) => {
-      const data = summarizeLineBuckets(line.count_data);
-      const live = summarizeLineLive(line.count_live);
+    let lines = toArray(objectFlow.lines);
+
+    if (filters.line) {
+      lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
+    }
+
+    const mappedLines = lines.map((line) => {
+      const data = summarizeBuckets(line.count_data);
+      const live = summarizeLive(line.count_live);
       return {
         uuid: line.uuid,
         name: line.name,
+        tags: toArray(line.tags),
+        coordinates: toArray(line.coordinates),
         totals: {
           in: data.total_in,
           out: data.total_out,
@@ -402,125 +361,67 @@ async function fetchObjectFlowAppsWithCounts(filters, preset, classes) {
     });
 
     detailedApps.push({
-      type: 'ObjectFlow',
       uuid: app.uuid,
       name: app.name,
-      tags: toArray(app.tags),
-      created_at: app.created_at || null,
-      updated_at: app.updated_at || null,
       status: app.status || null,
       last_online: app.last_online || null,
       camera: app.camera || null,
       model: app.model || null,
-      lines,
+      lines: mappedLines,
       totals: {
-        in: sumBy(lines, (x) => x.totals.in),
-        out: sumBy(lines, (x) => x.totals.out),
-      },
-      debug: {
-        requested_classes: classes,
-        requested_preset: preset,
-        line_count: lines.length,
-        graphql_errors: countsRes.errors,
+        in: sumBy(mappedLines, (x) => x.totals.in),
+        out: sumBy(mappedLines, (x) => x.totals.out),
       },
     });
   }
 
-  return {
-    apps: detailedApps,
-    query_errors: appsRes.errors,
-  };
-}
+  const lineRows = detailedApps.flatMap((app) =>
+    app.lines.map((line) => ({
+      application_uuid: app.uuid,
+      application_name: app.name,
+      camera_name: app.camera?.name || null,
+      line_uuid: line.uuid,
+      line_name: line.name,
+      total_in: line.totals.in,
+      total_out: line.totals.out,
+      live_in: line.live.total_in,
+      live_out: line.live.total_out,
+      buckets: line.data.buckets,
+      first_bucket: line.data.first_bucket,
+      last_bucket: line.data.last_bucket,
+    }))
+  );
 
-function buildTotalsFromApps(apps) {
-  return {
-    objectflow_apps: toArray(apps).length,
-    selected_in: sumBy(apps, (a) => a.totals.in),
-    selected_out: sumBy(apps, (a) => a.totals.out),
-  };
-}
-
-async function collectData(filters = {}) {
-  const schemaRes = await graphql(QUERY_SCHEMA);
-  const schema = schemaRes.data?.__schema || null;
-
-  const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
-  const preset = normalizePreset(filters.preset, allowedPresets);
-  const classes = parseClasses(filters.class);
-  const featureflags = featureFlagNamesFromSchema(schema);
-
-  const [camerasRes, flowRes, healthRes, flagsRes] = await Promise.all([
-    graphql(QUERY_CAMERAS),
-    fetchObjectFlowAppsWithCounts(filters, preset, classes),
-    graphql(QUERY_SYSTEM_HEALTH, {
-      healthRange: {
-        time_range_preset: normalizePreset(CONFIG.healthPreset, allowedPresets),
-      },
-    }),
-    graphql(QUERY_FEATURE_FLAGS, { featureflags }),
-  ]);
-
-  const cameras = toArray(camerasRes.data?.allCameras);
-  const applications = flowRes.apps;
-  const totals = buildTotalsFromApps(applications);
+  lineRows.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
 
   return {
     ok: true,
     generated_at: nowIso(),
     filters: {
+      preset,
+      class: classes.join(','),
       app: filters.app || '',
       camera: filters.camera || '',
       line: filters.line || '',
-      class: classes.join(','),
-      preset,
     },
     available_presets: allowedPresets,
-    config: {
-      baseUrl: CONFIG.baseUrl,
-      graphqlPath: CONFIG.graphqlPath,
-      verifyTls: CONFIG.verifyTls,
-      defaultPreset: CONFIG.defaultPreset,
-      defaultClasses: CONFIG.defaultClasses,
+    totals: {
+      objectflow_apps: detailedApps.length,
+      selected_in: sumBy(detailedApps, (x) => x.totals.in),
+      selected_out: sumBy(detailedApps, (x) => x.totals.out),
     },
-    totals,
-    inventory: {
-      cameras,
-      applications,
-      application_count: applications.length,
-    },
-    operations: {
-      system_health: healthRes.data?.getSystemHealth || null,
-      feature_flags_requested: featureflags,
-      feature_flags_result: flagsRes.data?.getFeatureFlags || null,
-    },
-    schema,
-    errors: {
-      schema: schemaRes.errors,
-      cameras: camerasRes.errors,
-      applications: flowRes.query_errors,
-      system_health: healthRes.errors,
-      feature_flags: flagsRes.errors,
-    },
+    applications: detailedApps,
+    lines: lineRows,
   };
 }
 
-function sendJson(res, code, payload) {
+function sendJson(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
-  res.writeHead(code, {
+  res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
-}
-
-function pickFilters(url) {
-  return {
-    app: url.searchParams.get('app') || '',
-    camera: url.searchParams.get('camera') || '',
-    line: url.searchParams.get('line') || '',
-    class: url.searchParams.get('class') || '',
-    preset: url.searchParams.get('preset') || '',
-  };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -529,16 +430,13 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
       ok: true,
-      service: 'isarsoft-node-server',
-      time: nowIso(),
       examples: [
         '/summary?preset=THISYEAR',
         '/summary?preset=THISYEAR&class=HEAD',
         '/summary?preset=THISYEAR&class=HEAD&line=walk',
-        '/summary?preset=LAST1DAY&class=PERSON,HEAD',
         '/debug/lines?preset=THISYEAR&class=HEAD',
-        '/debug/lines?preset=THISYEAR&class=HEAD&line=walk',
       ],
+      time: nowIso(),
     });
   }
 
@@ -548,8 +446,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/summary') {
     try {
-      const filters = pickFilters(url);
-      const data = await collectData(filters);
+      const data = await collectData(pickFilters(url));
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
@@ -558,89 +455,35 @@ const server = http.createServer(async (req, res) => {
         totals: data.totals,
       });
     } catch (err) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: err.message,
-        time: nowIso(),
-      });
+      return sendJson(res, 500, { ok: false, error: err.message });
     }
   }
 
   if (req.method === 'GET' && url.pathname === '/data') {
     try {
-      const filters = pickFilters(url);
-      const data = await collectData(filters);
+      const data = await collectData(pickFilters(url));
       return sendJson(res, 200, data);
     } catch (err) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: err.message,
-        time: nowIso(),
-      });
+      return sendJson(res, 500, { ok: false, error: err.message });
     }
   }
 
   if (req.method === 'GET' && url.pathname === '/debug/lines') {
     try {
-      const filters = pickFilters(url);
-      const data = await collectData(filters);
-      const flattened = toArray(data.inventory.applications).flatMap((app) =>
-        toArray(app.lines).map((line) => ({
-          application_uuid: app.uuid,
-          application_name: app.name,
-          camera_name: app.camera?.name || null,
-          line_uuid: line.uuid,
-          line_name: line.name,
-          total_in: line.totals.in,
-          total_out: line.totals.out,
-          live_in: line.live.total_in,
-          live_out: line.live.total_out,
-          buckets: line.data.buckets,
-          first_bucket: line.data.first_bucket,
-          last_bucket: line.data.last_bucket,
-        }))
-      );
-
-      flattened.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
-
+      const data = await collectData(pickFilters(url));
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
         filters: data.filters,
         totals: data.totals,
-        lines: flattened,
+        lines: data.lines,
       });
     } catch (err) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: err.message,
-        time: nowIso(),
-      });
+      return sendJson(res, 500, { ok: false, error: err.message });
     }
   }
 
-  if (req.method === 'GET' && url.pathname === '/cameras') {
-    try {
-      const data = await collectData({});
-      return sendJson(res, 200, {
-        ok: true,
-        generated_at: data.generated_at,
-        cameras: data.inventory.cameras,
-      });
-    } catch (err) {
-      return sendJson(res, 500, {
-        ok: false,
-        error: err.message,
-        time: nowIso(),
-      });
-    }
-  }
-
-  return sendJson(res, 404, {
-    ok: false,
-    error: 'Not found',
-    path: url.pathname,
-  });
+  return sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
 server.listen(CONFIG.port, () => {
