@@ -16,11 +16,11 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
+  defaultPreset: process.env.ISARSOFT_PRESET || 'THISYEAR',
   defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
-    .map((x) => x.trim())
+    .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
-  defaultPreset: process.env.ISARSOFT_PRESET || 'THISYEAR',
   healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST1DAY',
 };
 
@@ -42,14 +42,6 @@ function lower(v) {
   return String(v || '').toLowerCase();
 }
 
-function safeJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -62,6 +54,14 @@ function sumBy(arr, fn) {
 function avg(arr) {
   const vals = toArray(arr).map(num).filter(Number.isFinite);
   return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function safeJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }
 
 function requestRaw(urlString, options = {}, body = null) {
@@ -204,65 +204,10 @@ query {
 }
 `;
 
-const QUERY_FEATURE_FLAGS = `
-query($featureflags: [FeatureFlags!]!) {
-  getFeatureFlags(featureflags: $featureflags)
-}
-`;
-
-const QUERY_SYSTEM_HEALTH = `
-query($healthRange: TimeRangeInput!) {
-  getSystemHealth {
-    perception_camera_count
-    perception_camera_initializing_count
-    perception_camera_offline_count
-    perception_camera_online_count
-    perception_camera_paused_count
-    perception_camera_pending_count
-    perception_app_count
-    perception_app_initializing_count
-    perception_app_offline_count
-    perception_app_online_count
-    perception_app_paused_count
-    perception_app_pending_count
-
-    perception_camera_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_camera_online_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_camera_offline_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_app_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_app_online_counts_history(time_range: $healthRange) { points { timestamp value } }
-    perception_app_offline_counts_history(time_range: $healthRange) { points { timestamp value } }
-  }
-}
-`;
-
-const QUERY_MISC = `
+const QUERY_OBJECTFLOW_APPS = `
 query {
-  getMachineFingerprint
-  getLicense { __typename }
-  getLicenseStatus { __typename }
-  allExports { __typename }
-  getDeviceSettings { __typename }
-  getMQTTSettings { __typename }
-  getKafkaSettings { __typename }
-  getKinesisSettings { __typename }
-  getCayugaSettings { __typename }
-  getGenetecSettings { __typename }
-  getMilestoneSettings { __typename }
-  getObjectFlowSettings { __typename }
-}
-`;
-
-const QUERY_APPLICATIONS = `
-query(
-  $selectedClasses: [ObjectClassInput!]!,
-  $personOnly: [ObjectClassInput!]!,
-  $headOnly: [ObjectClassInput!]!,
-  $timeRange: TimeRangeInput!
-) {
   allApplications {
     __typename
-
     ... on ObjectFlow {
       uuid
       name
@@ -271,18 +216,8 @@ query(
       updated_at
       status
       last_online
-      default_model_settings
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
+      camera { uuid name }
+      model { uuid name }
       lines {
         uuid
         name
@@ -290,53 +225,7 @@ query(
         coordinates
         created_at
         updated_at
-
-        live_selected: count_live(object_classes: $selectedClasses) {
-          count_in
-          count_out
-        }
-
-        live_person: count_live(object_classes: $personOnly) {
-          count_in
-          count_out
-        }
-
-        live_head: count_live(object_classes: $headOnly) {
-          count_in
-          count_out
-        }
-
-        selected_data: count_data(
-          time_range: $timeRange
-          object_classes: $selectedClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        person_data: count_data(
-          time_range: $timeRange
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        head_data: count_data(
-          time_range: $timeRange
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
       }
-
       areas {
         uuid
         name
@@ -344,99 +233,56 @@ query(
         coordinates
         created_at
         updated_at
-
-        live_selected: count_live(object_classes: $selectedClasses) {
-          count
-        }
-
-        selected_data: count_data(
-          time_range: $timeRange
-          object_classes: $selectedClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-      }
-    }
-
-    ... on ObjectCount {
-      uuid
-      name
-      tags
-      created_at
-      updated_at
-      status
-      last_online
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-
-        live_selected: count_live(object_classes: $selectedClasses) {
-          count
-        }
-
-        selected_data: count_data(
-          time_range: $timeRange
-          object_classes: $selectedClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-      }
-    }
-
-    ... on CrowdCount {
-      uuid
-      name
-      tags
-      created_at
-      updated_at
-      status
-      last_online
-      current_count
-      box_u1
-      box_v1
-      box_u2
-      box_v2
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
-      selected_data: count_data(time_range: $timeRange) {
-        time_bucket
-        number_of_samples
-        count_min
-        count_avg
-        count_max
       }
     }
   }
+}
+`;
+
+const QUERY_LINE_COUNTS = `
+query($app: ID!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]) {
+  getApplication(application: { uuid: $app }) {
+    __typename
+    ... on ObjectFlow {
+      uuid
+      name
+      lines {
+        uuid
+        name
+        count_data(time_range: $range, object_classes: $classes) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+        count_live(object_classes: $classes) {
+          count_in
+          count_out
+        }
+      }
+    }
+  }
+}
+`;
+
+const QUERY_SYSTEM_HEALTH = `
+query($healthRange: TimeRangeInput!) {
+  getSystemHealth {
+    perception_camera_count
+    perception_camera_online_count
+    perception_camera_offline_count
+    perception_app_count
+    perception_app_online_count
+    perception_app_offline_count
+    perception_camera_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_app_counts_history(time_range: $healthRange) { points { timestamp value } }
+  }
+}
+`;
+
+const QUERY_FEATURE_FLAGS = `
+query($featureflags: [FeatureFlags!]!) {
+  getFeatureFlags(featureflags: $featureflags)
 }
 `;
 
@@ -458,19 +304,23 @@ function normalizePreset(input, allowed) {
 }
 
 function parseClasses(input) {
-  const list = (input || CONFIG.defaultClasses.join(','))
+  const raw = (input || CONFIG.defaultClasses.join(','))
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean);
 
-  return list.length ? list : CONFIG.defaultClasses;
+  return raw.length ? raw : CONFIG.defaultClasses;
+}
+
+function classesToInputs(classes) {
+  return toArray(classes).map((name) => ({ name }));
 }
 
 function featureFlagNamesFromSchema(schema) {
   return getEnumValues(schema, 'FeatureFlags');
 }
 
-function summarizeLineSeries(rows) {
+function summarizeLineBuckets(rows) {
   const raw = toArray(rows);
   return {
     buckets: raw.length,
@@ -479,20 +329,6 @@ function summarizeLineSeries(rows) {
     samples: sumBy(raw, (x) => x?.number_of_samples),
     total_in: sumBy(raw, (x) => x?.count_in),
     total_out: sumBy(raw, (x) => x?.count_out),
-    raw,
-  };
-}
-
-function summarizeAreaSeries(rows) {
-  const raw = toArray(rows);
-  return {
-    buckets: raw.length,
-    first_bucket: raw[0]?.time_bucket || null,
-    last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    samples: sumBy(raw, (x) => x?.number_of_samples),
-    min_of_mins: raw.length ? Math.min(...raw.map((x) => num(x?.count_min))) : null,
-    avg_of_avgs: raw.length ? avg(raw.map((x) => num(x?.count_avg))) : null,
-    max_of_maxs: raw.length ? Math.max(...raw.map((x) => num(x?.count_max))) : null,
     raw,
   };
 }
@@ -506,142 +342,8 @@ function summarizeLineLive(rows) {
   };
 }
 
-function summarizeAreaLive(rows) {
-  const raw = toArray(rows);
-  return {
-    count: sumBy(raw, (x) => x?.count),
-    raw,
-  };
-}
-
-function mapObjectFlowLine(line) {
-  const selected = summarizeLineSeries(line.selected_data);
-  const person = summarizeLineSeries(line.person_data);
-  const head = summarizeLineSeries(line.head_data);
-
-  return {
-    uuid: line.uuid,
-    name: line.name,
-    tags: toArray(line.tags),
-    coordinates: toArray(line.coordinates),
-    created_at: line.created_at || null,
-    updated_at: line.updated_at || null,
-    selected: {
-      live: summarizeLineLive(line.live_selected),
-      data: selected,
-    },
-    person: {
-      live: summarizeLineLive(line.live_person),
-      data: person,
-    },
-    head: {
-      live: summarizeLineLive(line.live_head),
-      data: head,
-    },
-    totals: {
-      selected_in: selected.total_in,
-      selected_out: selected.total_out,
-      person_in: person.total_in,
-      person_out: person.total_out,
-      head_in: head.total_in,
-      head_out: head.total_out,
-    },
-  };
-}
-
-function mapObjectFlowArea(area) {
-  return {
-    uuid: area.uuid,
-    name: area.name,
-    tags: toArray(area.tags),
-    coordinates: toArray(area.coordinates),
-    created_at: area.created_at || null,
-    updated_at: area.updated_at || null,
-    selected: {
-      live: summarizeAreaLive(area.live_selected),
-      data: summarizeAreaSeries(area.selected_data),
-    },
-  };
-}
-
-function mapApplication(app) {
-  if (app.__typename === 'ObjectFlow') {
-    const lines = toArray(app.lines).map(mapObjectFlowLine);
-    const areas = toArray(app.areas).map(mapObjectFlowArea);
-
-    return {
-      type: 'ObjectFlow',
-      uuid: app.uuid,
-      name: app.name,
-      tags: toArray(app.tags),
-      created_at: app.created_at || null,
-      updated_at: app.updated_at || null,
-      status: app.status || null,
-      last_online: app.last_online || null,
-      default_model_settings: app.default_model_settings,
-      camera: app.camera || null,
-      model: app.model || null,
-      lines,
-      areas,
-      totals: {
-        selected_in: sumBy(lines, (x) => x.totals.selected_in),
-        selected_out: sumBy(lines, (x) => x.totals.selected_out),
-        person_in: sumBy(lines, (x) => x.totals.person_in),
-        person_out: sumBy(lines, (x) => x.totals.person_out),
-        head_in: sumBy(lines, (x) => x.totals.head_in),
-        head_out: sumBy(lines, (x) => x.totals.head_out),
-      },
-    };
-  }
-
-  if (app.__typename === 'ObjectCount') {
-    return {
-      type: 'ObjectCount',
-      uuid: app.uuid,
-      name: app.name,
-      tags: toArray(app.tags),
-      created_at: app.created_at || null,
-      updated_at: app.updated_at || null,
-      status: app.status || null,
-      last_online: app.last_online || null,
-      camera: app.camera || null,
-      model: app.model || null,
-      areas: toArray(app.areas).map(mapObjectFlowArea),
-    };
-  }
-
-  if (app.__typename === 'CrowdCount') {
-    return {
-      type: 'CrowdCount',
-      uuid: app.uuid,
-      name: app.name,
-      tags: toArray(app.tags),
-      created_at: app.created_at || null,
-      updated_at: app.updated_at || null,
-      status: app.status || null,
-      last_online: app.last_online || null,
-      current_count: app.current_count ?? null,
-      box: {
-        box_u1: app.box_u1,
-        box_v1: app.box_v1,
-        box_u2: app.box_u2,
-        box_v2: app.box_v2,
-      },
-      camera: app.camera || null,
-      model: app.model || null,
-      selected: summarizeAreaSeries(app.selected_data),
-    };
-  }
-
-  return { type: app.__typename || 'Unknown', raw: app };
-}
-
-function filterApplications(applications, filters = {}) {
-  let result = toArray(applications);
-
-  if (filters.type) {
-    result = result.filter((a) => lower(a.type) === lower(filters.type));
-  }
+function filterObjectFlowApps(apps, filters) {
+  let result = toArray(apps);
 
   if (filters.app) {
     result = result.filter((a) => lower(a.name).includes(lower(filters.app)));
@@ -651,44 +353,90 @@ function filterApplications(applications, filters = {}) {
     result = result.filter((a) => lower(a.camera?.name).includes(lower(filters.camera)));
   }
 
-  if (filters.line) {
-    result = result
-      .map((app) => {
-        if (app.type !== 'ObjectFlow') return null;
-        const matchedLines = toArray(app.lines).filter((l) =>
-          lower(l.name).includes(lower(filters.line))
-        );
-        if (!matchedLines.length) return null;
+  return result;
+}
 
-        return {
-          ...app,
-          lines: matchedLines,
-          totals: {
-            selected_in: sumBy(matchedLines, (x) => x.totals.selected_in),
-            selected_out: sumBy(matchedLines, (x) => x.totals.selected_out),
-            person_in: sumBy(matchedLines, (x) => x.totals.person_in),
-            person_out: sumBy(matchedLines, (x) => x.totals.person_out),
-            head_in: sumBy(matchedLines, (x) => x.totals.head_in),
-            head_out: sumBy(matchedLines, (x) => x.totals.head_out),
-          },
-        };
-      })
-      .filter(Boolean);
+function filterLines(lines, filters) {
+  let result = toArray(lines);
+
+  if (filters.line) {
+    result = result.filter((l) => lower(l.name).includes(lower(filters.line)));
   }
 
   return result;
 }
 
-function buildTotals(applications) {
-  const flowApps = toArray(applications).filter((a) => a.type === 'ObjectFlow');
+async function fetchObjectFlowAppsWithCounts(filters, preset, classes) {
+  const appsRes = await graphql(QUERY_OBJECTFLOW_APPS);
+  const rawApps = toArray(appsRes.data?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
+  const filteredApps = filterObjectFlowApps(rawApps, filters);
+
+  const range = { time_range_preset: preset };
+  const classInputs = classesToInputs(classes);
+
+  const detailedApps = [];
+
+  for (const app of filteredApps) {
+    const countsRes = await graphql(QUERY_LINE_COUNTS, {
+      app: app.uuid,
+      range,
+      classes: classInputs,
+    });
+
+    const countedApp = countsRes.data?.getApplication;
+    const countedLines = filterLines(toArray(countedApp?.lines), filters);
+
+    const lines = countedLines.map((line) => {
+      const data = summarizeLineBuckets(line.count_data);
+      const live = summarizeLineLive(line.count_live);
+      return {
+        uuid: line.uuid,
+        name: line.name,
+        totals: {
+          in: data.total_in,
+          out: data.total_out,
+        },
+        live,
+        data,
+      };
+    });
+
+    detailedApps.push({
+      type: 'ObjectFlow',
+      uuid: app.uuid,
+      name: app.name,
+      tags: toArray(app.tags),
+      created_at: app.created_at || null,
+      updated_at: app.updated_at || null,
+      status: app.status || null,
+      last_online: app.last_online || null,
+      camera: app.camera || null,
+      model: app.model || null,
+      lines,
+      totals: {
+        in: sumBy(lines, (x) => x.totals.in),
+        out: sumBy(lines, (x) => x.totals.out),
+      },
+      debug: {
+        requested_classes: classes,
+        requested_preset: preset,
+        line_count: lines.length,
+        graphql_errors: countsRes.errors,
+      },
+    });
+  }
+
   return {
-    objectflow_apps: flowApps.length,
-    selected_in: sumBy(flowApps, (a) => a.totals.selected_in),
-    selected_out: sumBy(flowApps, (a) => a.totals.selected_out),
-    person_in: sumBy(flowApps, (a) => a.totals.person_in),
-    person_out: sumBy(flowApps, (a) => a.totals.person_out),
-    head_in: sumBy(flowApps, (a) => a.totals.head_in),
-    head_out: sumBy(flowApps, (a) => a.totals.head_out),
+    apps: detailedApps,
+    query_errors: appsRes.errors,
+  };
+}
+
+function buildTotalsFromApps(apps) {
+  return {
+    objectflow_apps: toArray(apps).length,
+    selected_in: sumBy(apps, (a) => a.totals.in),
+    selected_out: sumBy(apps, (a) => a.totals.out),
   };
 }
 
@@ -699,43 +447,27 @@ async function collectData(filters = {}) {
   const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
   const preset = normalizePreset(filters.preset, allowedPresets);
   const classes = parseClasses(filters.class);
-  const selectedClasses = classes.map((name) => ({ name }));
-
   const featureflags = featureFlagNamesFromSchema(schema);
 
-  const variablesApps = {
-    selectedClasses,
-    personOnly: [{ name: 'PERSON' }],
-    headOnly: [{ name: 'HEAD' }],
-    timeRange: {
-      time_range_preset: preset,
-    },
-  };
-
-  const variablesHealth = {
-    healthRange: {
-      time_range_preset: normalizePreset(CONFIG.healthPreset, allowedPresets),
-    },
-  };
-
-  const [camerasRes, appsRes, healthRes, flagsRes, miscRes] = await Promise.all([
+  const [camerasRes, flowRes, healthRes, flagsRes] = await Promise.all([
     graphql(QUERY_CAMERAS),
-    graphql(QUERY_APPLICATIONS, variablesApps),
-    graphql(QUERY_SYSTEM_HEALTH, variablesHealth),
+    fetchObjectFlowAppsWithCounts(filters, preset, classes),
+    graphql(QUERY_SYSTEM_HEALTH, {
+      healthRange: {
+        time_range_preset: normalizePreset(CONFIG.healthPreset, allowedPresets),
+      },
+    }),
     graphql(QUERY_FEATURE_FLAGS, { featureflags }),
-    graphql(QUERY_MISC),
   ]);
 
   const cameras = toArray(camerasRes.data?.allCameras);
-  const applicationsRaw = toArray(appsRes.data?.allApplications).map(mapApplication);
-  const applications = filterApplications(applicationsRaw, filters);
-  const totals = buildTotals(applications);
+  const applications = flowRes.apps;
+  const totals = buildTotalsFromApps(applications);
 
   return {
     ok: true,
     generated_at: nowIso(),
     filters: {
-      type: filters.type || '',
       app: filters.app || '',
       camera: filters.camera || '',
       line: filters.line || '',
@@ -747,9 +479,8 @@ async function collectData(filters = {}) {
       baseUrl: CONFIG.baseUrl,
       graphqlPath: CONFIG.graphqlPath,
       verifyTls: CONFIG.verifyTls,
-      defaultClasses: CONFIG.defaultClasses,
       defaultPreset: CONFIG.defaultPreset,
-      healthPreset: CONFIG.healthPreset,
+      defaultClasses: CONFIG.defaultClasses,
     },
     totals,
     inventory: {
@@ -761,16 +492,14 @@ async function collectData(filters = {}) {
       system_health: healthRes.data?.getSystemHealth || null,
       feature_flags_requested: featureflags,
       feature_flags_result: flagsRes.data?.getFeatureFlags || null,
-      misc: miscRes.data || null,
     },
     schema,
     errors: {
       schema: schemaRes.errors,
       cameras: camerasRes.errors,
-      applications: appsRes.errors,
+      applications: flowRes.query_errors,
       system_health: healthRes.errors,
       feature_flags: flagsRes.errors,
-      misc: miscRes.errors,
     },
   };
 }
@@ -786,7 +515,6 @@ function sendJson(res, code, payload) {
 
 function pickFilters(url) {
   return {
-    type: url.searchParams.get('type') || '',
     app: url.searchParams.get('app') || '',
     camera: url.searchParams.get('camera') || '',
     line: url.searchParams.get('line') || '',
@@ -804,11 +532,12 @@ const server = http.createServer(async (req, res) => {
       service: 'isarsoft-node-server',
       time: nowIso(),
       examples: [
-        '/summary?preset=LAST1DAY',
-        '/summary?preset=LAST1MONTH',
         '/summary?preset=THISYEAR',
-        '/summary?preset=THISYEARSOFAR&class=HEAD&line=walk',
-        '/data?type=objectflow&class=HEAD&line=walk&preset=THISYEAR',
+        '/summary?preset=THISYEAR&class=HEAD',
+        '/summary?preset=THISYEAR&class=HEAD&line=walk',
+        '/summary?preset=LAST1DAY&class=PERSON,HEAD',
+        '/debug/lines?preset=THISYEAR&class=HEAD',
+        '/debug/lines?preset=THISYEAR&class=HEAD&line=walk',
       ],
     });
   }
@@ -851,16 +580,35 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method === 'GET' && url.pathname === '/applications') {
+  if (req.method === 'GET' && url.pathname === '/debug/lines') {
     try {
       const filters = pickFilters(url);
       const data = await collectData(filters);
+      const flattened = toArray(data.inventory.applications).flatMap((app) =>
+        toArray(app.lines).map((line) => ({
+          application_uuid: app.uuid,
+          application_name: app.name,
+          camera_name: app.camera?.name || null,
+          line_uuid: line.uuid,
+          line_name: line.name,
+          total_in: line.totals.in,
+          total_out: line.totals.out,
+          live_in: line.live.total_in,
+          live_out: line.live.total_out,
+          buckets: line.data.buckets,
+          first_bucket: line.data.first_bucket,
+          last_bucket: line.data.last_bucket,
+        }))
+      );
+
+      flattened.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
+
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
         filters: data.filters,
         totals: data.totals,
-        applications: data.inventory.applications,
+        lines: flattened,
       });
     } catch (err) {
       return sendJson(res, 500, {
