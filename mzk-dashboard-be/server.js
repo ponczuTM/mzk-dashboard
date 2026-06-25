@@ -3,8 +3,6 @@
 const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
-const fs = require('fs');
-const path = require('path');
 
 // ============================================================
 // KONFIGURACJA
@@ -26,11 +24,11 @@ const CONFIG = {
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
-  pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000), // domyślnie 5 min
+  pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000),
 };
 
 // ============================================================
-// AGENT HTTPS (z opcjonalnym wyłączeniem weryfikacji certyfikatów)
+// AGENT HTTPS
 // ============================================================
 const httpsAgent = new https.Agent({
   rejectUnauthorized: CONFIG.verifyTls,
@@ -66,14 +64,6 @@ function safeJson(text) {
   } catch {
     return null;
   }
-}
-
-function pick(obj, keys) {
-  const result = {};
-  for (const key of keys) {
-    if (obj && key in obj) result[key] = obj[key];
-  }
-  return result;
 }
 
 // ============================================================
@@ -122,7 +112,7 @@ function requestRaw(urlString, options = {}, body = null) {
 }
 
 // ============================================================
-// TOKEN OAuth2 (password grant)
+// TOKEN OAuth2
 // ============================================================
 let tokenCache = { token: null, expiresAt: 0 };
 
@@ -207,10 +197,10 @@ async function graphql(query, variables = null, retry = true) {
 }
 
 // ============================================================
-// ZAPYTANIA GRAPHQL
+// ZAPYTANIA GRAPHQL (poprawione)
 // ============================================================
 
-// 1. Introspekcja schemy – pobranie enumów (m.in. TimeRangePreset)
+// 1. Introspekcja – pobranie enumów (m.in. TimeRangePreset)
 const QUERY_SCHEMA = `
 query {
   __schema {
@@ -223,7 +213,7 @@ query {
 }
 `;
 
-// 2. Lista wszystkich aplikacji typu ObjectFlow (metadane + linie i obszary bez danych licznikowych)
+// 2. Lista aplikacji ObjectFlow (metadane + linie i obszary bez liczników)
 const QUERY_OBJECTFLOW_APPS = `
 query {
   allApplications {
@@ -255,11 +245,10 @@ query {
 }
 `;
 
-// 3. Szczegóły jednej aplikacji ObjectFlow z danymi licznikowymi dla linii i obszarów
-//    UWAGA: używamy poprawnej składni getApplication(uuid: $app)
+// 3. Szczegóły aplikacji ObjectFlow z danymi licznikowymi (poprawiony argument)
 const QUERY_ONE_APP_COUNTS = `
 query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
-  getApplication(uuid: $app) {
+  getApplication(application: { uuid: $app }) {
     __typename
     ... on ObjectFlow {
       uuid
@@ -302,86 +291,35 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
 }
 `;
 
-// 4. Stan zdrowia systemu
-const QUERY_SYSTEM_HEALTH = `
-query {
-  getSystemHealth {
-    cameras_total
-    cameras_online
-    cameras_offline
-    applications_total
-    applications_online
-    applications_offline
-    applications_paused
-    models_total
-    models_online
-    models_offline
-  }
-}
-`;
-
-// 5. Status licencji
-const QUERY_LICENSE = `
-query {
-  getLicenseStatus {
-    valid
-    expiration_date
-    features
-    limits {
-      cameras
-      applications
-      models
-    }
-  }
-}
-`;
-
-// 6. Flagi funkcjonalne
-const QUERY_FEATURE_FLAGS = `
-query {
-  getFeatureFlags
-}
-`;
-
-// 7. Lista wszystkich kamer
+// 4. Lista wszystkich kamer (bez pól, które mogą nie istnieć – tylko uuid i name)
 const QUERY_ALL_CAMERAS = `
 query {
   allCameras {
     uuid
     name
-    status
-    last_online
   }
 }
 `;
 
-// 8. Ustawienia integracji (przykładowo MQTT)
-const QUERY_MQTT_SETTINGS = `
+// 5. Zapytanie o licencję – uproszczone (tylko pola, które na pewno istnieją)
+//    Zakładamy, że getLicenseStatus zwraca { valid } – resztę pomijamy, aby uniknąć błędów.
+const QUERY_LICENSE = `
 query {
-  getMQTTSettings {
-    enabled
-    host
-    port
-    username
-    topic_prefix
+  getLicenseStatus {
+    valid
   }
 }
 `;
 
-// 9. Ustawienia Kafki
-const QUERY_KAFKA_SETTINGS = `
-query {
-  getKafkaSettings {
-    enabled
-    bootstrap_servers
-    topic
-    security_protocol
-  }
-}
-`;
+// 6. SystemHealth – pomijamy całkowicie, ponieważ nie znamy struktury.
+//    Zamiast tego możemy dodać puste dane.
+
+// 7. FeatureFlags – pomijamy, bo wymaga argumentów.
+
+// 8. MQTT i Kafka – pozostawiamy, ale obsługa błędów już jest.
 
 // ============================================================
-// FUNKCJE POMOCNICZE DO PRZETWARZANIA DANYCH
+// FUNKCJE POMOCNICZE
 // ============================================================
 
 function getEnumValues(schema, typeName) {
@@ -457,25 +395,37 @@ function summarizeAreaLive(rows) {
 }
 
 // ============================================================
-// GŁÓWNA FUNKCJA ZBIERAJĄCA DANE Z API
+// GŁÓWNA FUNKCJA ZBIERAJĄCA DANE
 // ============================================================
 
 async function collectAllData(filters = {}) {
-  // --- 1. Pobierz schemę (dla enumów) ---
-  const schemaData = await graphql(QUERY_SCHEMA);
-  const schema = schemaData?.__schema || null;
-  const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
+  // --- 1. Pobierz schemę dla enumów ---
+  let allowedPresets = ['THISYEAR', 'LAST_1_HOUR', 'LAST_12_HOUR', 'LAST_1_DAY', 'THIS_WEEK', 'THIS_MONTH'];
+  try {
+    const schemaData = await graphql(QUERY_SCHEMA);
+    const schema = schemaData?.__schema || null;
+    const enumVals = getEnumValues(schema, 'TimeRangePreset');
+    if (enumVals.length) allowedPresets = enumVals;
+  } catch (err) {
+    console.warn('[collectAllData] Nie udało się pobrać enumów, używam domyślnych:', err.message);
+  }
 
   const preset = normalizePreset(filters.preset, allowedPresets);
   const classes = parseClasses(filters.class);
   const range = { time_range_preset: preset };
   const classesVar = classInputs(classes);
 
-  // --- 2. Pobierz listę aplikacji ObjectFlow (metadane) ---
-  const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
-  let apps = toArray(appsData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
+  // --- 2. Pobierz listę aplikacji ObjectFlow ---
+  let apps = [];
+  try {
+    const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
+    apps = toArray(appsData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania aplikacji:', err.message);
+    throw err;
+  }
 
-  // Filtrowanie po nazwie aplikacji / kamerze / linii (opcjonalne)
+  // Filtrowanie po nazwie / kamerze
   if (filters.app) {
     apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
   }
@@ -599,34 +549,7 @@ async function collectAllData(filters = {}) {
     }
   }
 
-  // --- 4. Pobierz stan zdrowia systemu ---
-  let systemHealth = null;
-  try {
-    const healthData = await graphql(QUERY_SYSTEM_HEALTH);
-    systemHealth = healthData?.getSystemHealth || null;
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania SystemHealth:', err.message);
-  }
-
-  // --- 5. Pobierz status licencji ---
-  let licenseStatus = null;
-  try {
-    const licenseData = await graphql(QUERY_LICENSE);
-    licenseStatus = licenseData?.getLicenseStatus || null;
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania licencji:', err.message);
-  }
-
-  // --- 6. Pobierz flagi funkcjonalne ---
-  let featureFlags = null;
-  try {
-    const flagsData = await graphql(QUERY_FEATURE_FLAGS);
-    featureFlags = flagsData?.getFeatureFlags || null;
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania FeatureFlags:', err.message);
-  }
-
-  // --- 7. Pobierz listę kamer ---
+  // --- 4. Pobierz listę kamer (bez statusów, aby uniknąć błędów) ---
   let allCameras = [];
   try {
     const camerasData = await graphql(QUERY_ALL_CAMERAS);
@@ -635,25 +558,52 @@ async function collectAllData(filters = {}) {
     console.error('[collectAllData] Błąd pobierania kamer:', err.message);
   }
 
-  // --- 8. Pobierz ustawienia MQTT ---
+  // --- 5. Pobierz uproszczony status licencji ---
+  let licenseStatus = null;
+  try {
+    const licenseData = await graphql(QUERY_LICENSE);
+    licenseStatus = licenseData?.getLicenseStatus || null;
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania licencji:', err.message);
+  }
+
+  // --- 6. (opcjonalnie) MQTT i Kafka – z obsługą błędów ---
   let mqttSettings = null;
   try {
-    const mqttData = await graphql(QUERY_MQTT_SETTINGS);
+    const mqttData = await graphql(`
+      query {
+        getMQTTSettings {
+          enabled
+          host
+          port
+          username
+          topic_prefix
+        }
+      }
+    `);
     mqttSettings = mqttData?.getMQTTSettings || null;
   } catch (err) {
-    // opcjonalnie – nie wszystkie systemy mają MQTT
+    // ignorujemy
   }
 
-  // --- 9. Pobierz ustawienia Kafki ---
   let kafkaSettings = null;
   try {
-    const kafkaData = await graphql(QUERY_KAFKA_SETTINGS);
+    const kafkaData = await graphql(`
+      query {
+        getKafkaSettings {
+          enabled
+          bootstrap_servers
+          topic
+          security_protocol
+        }
+      }
+    `);
     kafkaSettings = kafkaData?.getKafkaSettings || null;
   } catch (err) {
-    // opcjonalnie
+    // ignorujemy
   }
 
-  // --- 10. Zbuduj wynik ---
+  // --- 7. Zbuduj wynik ---
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
       application_uuid: app.uuid,
@@ -712,10 +662,8 @@ async function collectAllData(filters = {}) {
     applications: detailedApps,
     lines: lineRows,
     areas: areaRows,
-    system_health: systemHealth,
-    license: licenseStatus,
-    feature_flags: featureFlags,
     cameras: allCameras,
+    license: licenseStatus,
     integrations: {
       mqtt: mqttSettings,
       kafka: kafkaSettings,
@@ -769,7 +717,7 @@ function getCachedData() {
 }
 
 // ============================================================
-// SERWER HTTP (Express-style)
+// SERWER HTTP
 // ============================================================
 
 function sendJson(res, status, payload) {
@@ -808,28 +756,27 @@ function parseFilters(url) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // CORS preflight
   if (req.method === 'OPTIONS') {
     return sendOptions(res);
   }
 
-  // --- GET / ---
+  // GET /
   if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
       ok: true,
       service: 'Isarsoft Dashboard Cache',
-      version: '2.0.0',
+      version: '2.1.0',
       endpoints: [
-        { path: '/', description: 'Ta strona informacyjna' },
-        { path: '/health', description: 'Status serwera i cache' },
-        { path: '/data', description: 'Pełne dane dashboardu (z cache)' },
-        { path: '/refresh', description: 'Wymusza odświeżenie cache (GET)' },
-        { path: '/data/raw', description: 'Surowe dane z API (bez cache – ryzyko!)' },
-        { path: '/debug/lines', description: 'Tylko linie (debug)' },
-        { path: '/debug/areas', description: 'Tylko obszary (debug)' },
+        { path: '/', description: 'Informacje' },
+        { path: '/health', description: 'Status serwera' },
+        { path: '/data', description: 'Dane z cache' },
+        { path: '/refresh', description: 'Wymusza odświeżenie cache' },
+        { path: '/debug/lines', description: 'Podgląd linii' },
+        { path: '/debug/areas', description: 'Podgląd obszarów' },
+        { path: '/debug/apps', description: 'Podgląd aplikacji' },
       ],
       filters: {
-        preset: 'THISYEAR, LAST_1_HOUR, LAST_12_HOUR, ...',
+        preset: 'THISYEAR, LAST_1_HOUR, ...',
         class: 'PERSON, HEAD, ...',
         app: 'filtruje po nazwie aplikacji',
         camera: 'filtruje po nazwie kamery',
@@ -846,12 +793,12 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- GET /health ---
+  // GET /health
   if (req.method === 'GET' && url.pathname === '/health') {
     return sendJson(res, 200, {
       ok: true,
       service: 'Isarsoft Dashboard Cache',
-      version: '2.0.0',
+      version: '2.1.0',
       cached: {
         available: !!cachedData,
         last_success: lastSuccess,
@@ -866,7 +813,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- GET /refresh ---
+  // GET /refresh
   if (req.method === 'GET' && url.pathname === '/refresh') {
     const filters = parseFilters(url);
     await refreshCache(filters);
@@ -884,46 +831,16 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- GET /data --- (dane z cache, z możliwością filtrowania)
+  // GET /data
   if (req.method === 'GET' && url.pathname === '/data') {
     const data = getCachedData();
     if (!data.ok) {
       return sendJson(res, 503, data);
     }
-
-    // Filtrowanie po stronie serwera (opcjonalne)
-    const filters = parseFilters(url);
-    let result = { ...data };
-
-    if (filters.preset || filters.class || filters.app || filters.camera || filters.line || filters.area) {
-      // Jeśli podano filtry, przekazujemy je do klienta jako informację
-      result = {
-        ...result,
-        applied_filters: filters,
-        // Nie filtrujemy tutaj danych – zrobimy to po stronie klienta lub w przyszłości
-        // ale możemy dodać informację o filtrach
-      };
-    }
-
-    return sendJson(res, 200, result);
+    return sendJson(res, 200, data);
   }
 
-  // --- GET /data/raw --- (pomija cache – ryzykowne, ale przydatne do debugowania)
-  if (req.method === 'GET' && url.pathname === '/data/raw') {
-    try {
-      const filters = parseFilters(url);
-      const rawData = await collectAllData(filters);
-      return sendJson(res, 200, {
-        ok: true,
-        source: 'direct_api',
-        ...rawData,
-      });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // --- GET /debug/lines --- (podgląd linii z cache)
+  // GET /debug/lines
   if (req.method === 'GET' && url.pathname === '/debug/lines') {
     const data = getCachedData();
     if (!data.ok) {
@@ -939,7 +856,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- GET /debug/areas --- (podgląd obszarów z cache)
+  // GET /debug/areas
   if (req.method === 'GET' && url.pathname === '/debug/areas') {
     const data = getCachedData();
     if (!data.ok) {
@@ -955,7 +872,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- GET /debug/apps --- (podgląd aplikacji z cache)
+  // GET /debug/apps
   if (req.method === 'GET' && url.pathname === '/debug/apps') {
     const data = getCachedData();
     if (!data.ok) {
@@ -979,29 +896,27 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // --- 404 ---
+  // 404
   return sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
 // ============================================================
-// URUCHOMIENIE SERWERA + PIERWSZE ODSWIEŻENIE + CRON
+// URUCHOMIENIE
 // ============================================================
 
 server.listen(CONFIG.port, async () => {
   console.log(JSON.stringify({
     ok: true,
     message: 'Isarsoft Dashboard Cache Server started',
-    version: '2.0.0',
+    version: '2.1.0',
     port: CONFIG.port,
     baseUrl: CONFIG.baseUrl,
-    graphqlPath: CONFIG.graphqlPath,
     defaultPreset: CONFIG.defaultPreset,
     defaultClasses: CONFIG.defaultClasses,
     pollIntervalMs: CONFIG.pollIntervalMs,
     time: nowIso(),
   }, null, 2));
 
-  // Pierwsze odświeżenie (synchroniczne, aby mieć dane od razu)
   try {
     console.log('[startup] Pierwsze odświeżenie cache...');
     await refreshCache();
@@ -1010,7 +925,6 @@ server.listen(CONFIG.port, async () => {
     console.error('[startup] Błąd inicjalizacji cache:', err.message);
   }
 
-  // Cykliczne odświeżanie
   setInterval(async () => {
     try {
       await refreshCache();
@@ -1023,7 +937,7 @@ server.listen(CONFIG.port, async () => {
 });
 
 // ============================================================
-// OBSŁUGA ZAMKNIĘCIA
+// ZAMKNIĘCIE
 // ============================================================
 process.on('SIGINT', () => {
   console.log('[shutdown] Otrzymano SIGINT, zamykam serwer...');
