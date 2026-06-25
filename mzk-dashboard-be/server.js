@@ -272,17 +272,20 @@ async function refreshCache() {
     cache.lastSuccess = new Date().toISOString();
     cache.error = null;
 
-    console.log(`[${new Date().toISOString()}] Cache odświeżony pomyślnie.`);
+    console.log(`[${new Date().toISOString()}] ✅ Cache odświeżony pomyślnie.`);
     console.log(`  → Kamery: ${aggregated.stats.totalCameras}`);
     console.log(`  → Aplikacje ObjectFlow: ${aggregated.stats.totalObjectFlowApps}`);
     console.log(`  → Aktywne: ${aggregated.stats.activeApps}, Offline: ${aggregated.stats.offlineApps}`);
+    
+    return true;
   } catch (error) {
-    console.error(`[${new Date().toISOString()}] Błąd odświeżania cache:`, error.message);
+    console.error(`[${new Date().toISOString()}] ❌ Błąd odświeżania cache:`, error.message);
     cache.error = {
       message: error.message,
       timestamp: new Date().toISOString(),
     };
     // Jeśli mamy stare dane, pozostają one w cache
+    return false;
   }
 }
 
@@ -396,7 +399,7 @@ app.get('/api/dashboard-data', (req, res) => {
 // Endpoint zdrowia samego backendu
 app.get('/api/health', (req, res) => {
   res.json({
-    status: 'ok',
+    status: cache.data ? 'ok' : 'initializing',
     uptime: process.uptime(),
     lastSuccess: cache.lastSuccess,
     lastAttempt: cache.lastAttempt,
@@ -405,27 +408,55 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ===== URUCHOMIENIE =====
+// ===== URUCHOMIENIE Z CZEKANIEM NA PIERWSZE DANE =====
 
-app.listen(PORT, '0.0.0.0', () => {
+async function startServer() {
   console.log(`========================================`);
-  console.log(`🚀 Backend cache uruchomiony`);
-  console.log(`📡 Nasłuchuje na: http://0.0.0.0:${PORT}`);
-  console.log(`📊 Endpoint: http://192.168.77.212:${PORT}/api/dashboard-data`);
-  console.log(`🔄 Interwał odświeżania: ${CONFIG.POLL_INTERVAL_MS / 1000 / 60} min`);
+  console.log(`🚀 Uruchamianie backend cache...`);
+  console.log(`📡 Adres API: ${CONFIG.GRAPHQL_URL}`);
   console.log(`========================================`);
 
-  // Pierwsze odświeżenie od razu po starcie
-  refreshCache().then(() => {
-    console.log('✅ Inicjalne wypełnienie cache zakończone.');
+  // KROK 1: Pobierz dane przy starcie (SYNCHRONICZNIE - czekamy!)
+  console.log(`⏳ Pobieranie danych inicjalnych...`);
+  const success = await refreshCache();
+
+  if (success) {
+    console.log(`✅ Inicjalne dane pobrane pomyślnie!`);
+  } else {
+    console.log(`⚠️  Nie udało się pobrać danych inicjalnych.`);
+    console.log(`   Serwer wystartuje, ale zwróci błąd 503 do momentu pierwszego udanego odświeżenia.`);
+  }
+
+  // KROK 2: Uruchom serwer
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`========================================`);
+    console.log(`🚀 Backend cache uruchomiony`);
+    console.log(`📡 Nasłuchuje na: http://0.0.0.0:${PORT}`);
+    console.log(`📊 Endpoint: http://192.168.77.212:${PORT}/api/dashboard-data`);
+    console.log(`🔄 Interwał odświeżania: ${CONFIG.POLL_INTERVAL_MS / 1000 / 60} min`);
+    console.log(`📦 Stan cache: ${cache.data ? 'DANE DOSTĘPNE ✅' : 'BRAK DANYCH ⚠️'}`);
+    console.log(`========================================`);
   });
 
-  // Cykliczne odświeżanie
-  setInterval(refreshCache, CONFIG.POLL_INTERVAL_MS);
+  // KROK 3: Uruchom cykliczne odświeżanie
+  setInterval(async () => {
+    await refreshCache();
+  }, CONFIG.POLL_INTERVAL_MS);
+}
+
+// ===== URUCHOM =====
+startServer().catch((error) => {
+  console.error(`❌ Krytyczny błąd podczas uruchamiania:`, error);
+  process.exit(1);
 });
 
 // Obsługa wyłączenia
 process.on('SIGTERM', () => {
   console.log('🛑 Otrzymano SIGTERM, zamykam serwer...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('🛑 Otrzymano SIGINT, zamykam serwer...');
   process.exit(0);
 });
