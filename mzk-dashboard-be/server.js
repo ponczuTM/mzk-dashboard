@@ -388,7 +388,7 @@ async function startServer() {
     console.log(`🔄 Interwał odświeżania: ${CONFIG.POLL_INTERVAL_MS / 1000 / 60} min`);
     console.log(`📦 Stan cache: ${cache.data ? 'DANE DOSTĘPNE ✅' : 'BRAK DANYCH ⚠️'}`);
     console.log(`========================================`);
-  });
+  });;
 
   // KROK 4: Uruchom cykliczne odświeżanie
   setInterval(async () => {
@@ -411,4 +411,4 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('🛑 Otrzymano SIGINT, zamykam serwer...');
   process.exit(0);
-});
+}); 
