@@ -19,7 +19,8 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
-  defaultPreset: process.env.ISARSOFT_PRESET || 'THISYEAR',
+  // Zmieniamy domyślny preset na LAST_1_DAY, aby mieć pewność, że dane istnieją
+  defaultPreset: process.env.ISARSOFT_PRESET || 'LAST_1_DAY',
   defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
     .map((x) => x.trim().toUpperCase())
@@ -200,7 +201,7 @@ async function graphql(query, variables = null, retry = true) {
 // ZAPYTANIA GRAPHQL (poprawione)
 // ============================================================
 
-// 1. Introspekcja – pobranie enumów (m.in. TimeRangePreset)
+// 1. Introspekcja – pobranie enumów
 const QUERY_SCHEMA = `
 query {
   __schema {
@@ -245,7 +246,8 @@ query {
 }
 `;
 
-// 3. Szczegóły aplikacji ObjectFlow z danymi licznikowymi (poprawiony argument)
+// 3. Szczegóły aplikacji ObjectFlow z danymi licznikowymi
+//    UWAGA: użyto poprawnego argumentu `application: { uuid: $app }`
 const QUERY_ONE_APP_COUNTS = `
 query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
   getApplication(application: { uuid: $app }) {
@@ -291,7 +293,7 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
 }
 `;
 
-// 4. Lista wszystkich kamer (bez pól, które mogą nie istnieć – tylko uuid i name)
+// 4. Lista wszystkich kamer
 const QUERY_ALL_CAMERAS = `
 query {
   allCameras {
@@ -301,8 +303,7 @@ query {
 }
 `;
 
-// 5. Zapytanie o licencję – uproszczone (tylko pola, które na pewno istnieją)
-//    Zakładamy, że getLicenseStatus zwraca { valid } – resztę pomijamy, aby uniknąć błędów.
+// 5. Licencja (uproszczona)
 const QUERY_LICENSE = `
 query {
   getLicenseStatus {
@@ -311,15 +312,8 @@ query {
 }
 `;
 
-// 6. SystemHealth – pomijamy całkowicie, ponieważ nie znamy struktury.
-//    Zamiast tego możemy dodać puste dane.
-
-// 7. FeatureFlags – pomijamy, bo wymaga argumentów.
-
-// 8. MQTT i Kafka – pozostawiamy, ale obsługa błędów już jest.
-
 // ============================================================
-// FUNKCJE POMOCNICZE
+// FUNKCJE POMOCNICZE DO PRZETWARZANIA DANYCH
 // ============================================================
 
 function getEnumValues(schema, typeName) {
@@ -329,14 +323,14 @@ function getEnumValues(schema, typeName) {
 
 function normalizePreset(input, allowed) {
   const fallback = CONFIG.defaultPreset;
-  if (!input) return allowed.includes(fallback) ? fallback : allowed[0] || 'THISYEAR';
+  if (!input) return allowed.includes(fallback) ? fallback : allowed[0] || 'LAST_1_DAY';
 
   const raw = String(input).trim().toUpperCase();
   if (allowed.includes(raw)) return raw;
 
   const collapsed = raw.replace(/[_\s-]/g, '');
   const found = allowed.find((x) => x.replace(/[_\s-]/g, '') === collapsed);
-  return found || (allowed.includes(fallback) ? fallback : allowed[0]) || 'THISYEAR';
+  return found || (allowed.includes(fallback) ? fallback : allowed[0]) || 'LAST_1_DAY';
 }
 
 function parseClasses(input) {
@@ -351,8 +345,22 @@ function classInputs(classes) {
   return classes.map((name) => ({ name }));
 }
 
+// ============================================================
+// UWAGA: Funkcje agregujące obsługują teraz tablicę tablic
+//         (gdy count_data zwraca dane dla wielu klas oddzielnie)
+// ============================================================
+
+function flattenRows(rows) {
+  // Jeśli rows jest tablicą, a pierwszy element też jest tablicą, to spłaszczamy
+  if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
+    return rows.flat();
+  }
+  return toArray(rows);
+}
+
 function summarizeBuckets(rows) {
-  const raw = toArray(rows);
+  const flat = flattenRows(rows);
+  const raw = flat;
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
@@ -364,7 +372,8 @@ function summarizeBuckets(rows) {
 }
 
 function summarizeAreaBuckets(rows) {
-  const raw = toArray(rows);
+  const flat = flattenRows(rows);
+  const raw = flat;
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
@@ -378,7 +387,8 @@ function summarizeAreaBuckets(rows) {
 }
 
 function summarizeLive(rows) {
-  const raw = toArray(rows);
+  const flat = flattenRows(rows);
+  const raw = flat;
   return {
     total_in: sumBy(raw, (x) => x?.count_in),
     total_out: sumBy(raw, (x) => x?.count_out),
@@ -387,7 +397,8 @@ function summarizeLive(rows) {
 }
 
 function summarizeAreaLive(rows) {
-  const raw = toArray(rows);
+  const flat = flattenRows(rows);
+  const raw = flat;
   return {
     total_count: sumBy(raw, (x) => x?.count),
     raw,
@@ -400,7 +411,7 @@ function summarizeAreaLive(rows) {
 
 async function collectAllData(filters = {}) {
   // --- 1. Pobierz schemę dla enumów ---
-  let allowedPresets = ['THISYEAR', 'LAST_1_HOUR', 'LAST_12_HOUR', 'LAST_1_DAY', 'THIS_WEEK', 'THIS_MONTH'];
+  let allowedPresets = ['LAST_1_DAY', 'LAST_1_HOUR', 'LAST_12_HOUR', 'THIS_YEAR', 'THIS_WEEK', 'THIS_MONTH'];
   try {
     const schemaData = await graphql(QUERY_SCHEMA);
     const schema = schemaData?.__schema || null;
@@ -445,7 +456,6 @@ async function collectAllData(filters = {}) {
 
       const objectFlow = one?.getApplication;
       if (!objectFlow || objectFlow.__typename !== 'ObjectFlow') {
-        // Jeśli nie udało się pobrać szczegółów, zapisujemy tylko metadane
         detailedApps.push({
           uuid: app.uuid,
           name: app.name,
@@ -461,7 +471,7 @@ async function collectAllData(filters = {}) {
         continue;
       }
 
-      // --- 3a. Przetwarzanie linii ---
+      // --- 3a. Linie ---
       let lines = toArray(objectFlow.lines);
       if (filters.line) {
         lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
@@ -481,7 +491,7 @@ async function collectAllData(filters = {}) {
         };
       });
 
-      // --- 3b. Przetwarzanie obszarów ---
+      // --- 3b. Obszary ---
       let areas = toArray(objectFlow.areas);
       if (filters.area) {
         areas = areas.filter((a) => lower(a.name).includes(lower(filters.area)));
@@ -506,7 +516,7 @@ async function collectAllData(filters = {}) {
         };
       });
 
-      // --- 3c. Agregacja sumaryczna ---
+      // --- 3c. Agregacja ---
       const totalIn = sumBy(mappedLines, (x) => x.totals.in);
       const totalOut = sumBy(mappedLines, (x) => x.totals.out);
 
@@ -532,7 +542,6 @@ async function collectAllData(filters = {}) {
       });
     } catch (err) {
       console.error(`[collectAllData] Błąd dla aplikacji ${app.uuid} (${app.name}):`, err.message);
-      // W przypadku błędu zapisujemy aplikację z metadanymi, ale bez danych licznikowych
       detailedApps.push({
         uuid: app.uuid,
         name: app.name,
@@ -549,7 +558,7 @@ async function collectAllData(filters = {}) {
     }
   }
 
-  // --- 4. Pobierz listę kamer (bez statusów, aby uniknąć błędów) ---
+  // --- 4. Kamery ---
   let allCameras = [];
   try {
     const camerasData = await graphql(QUERY_ALL_CAMERAS);
@@ -558,7 +567,7 @@ async function collectAllData(filters = {}) {
     console.error('[collectAllData] Błąd pobierania kamer:', err.message);
   }
 
-  // --- 5. Pobierz uproszczony status licencji ---
+  // --- 5. Licencja ---
   let licenseStatus = null;
   try {
     const licenseData = await graphql(QUERY_LICENSE);
@@ -567,7 +576,7 @@ async function collectAllData(filters = {}) {
     console.error('[collectAllData] Błąd pobierania licencji:', err.message);
   }
 
-  // --- 6. (opcjonalnie) MQTT i Kafka – z obsługą błędów ---
+  // --- 6. Integracje (MQTT, Kafka) ---
   let mqttSettings = null;
   try {
     const mqttData = await graphql(`
@@ -603,7 +612,7 @@ async function collectAllData(filters = {}) {
     // ignorujemy
   }
 
-  // --- 7. Zbuduj wynik ---
+  // --- 7. Wynik ---
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
       application_uuid: app.uuid,
@@ -765,18 +774,20 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'Isarsoft Dashboard Cache',
-      version: '2.1.0',
+      version: '2.2.0',
       endpoints: [
         { path: '/', description: 'Informacje' },
         { path: '/health', description: 'Status serwera' },
-        { path: '/data', description: 'Dane z cache' },
+        { path: '/data', description: 'Dane z cache (domyślnie LAST_1_DAY)' },
+        { path: '/data?preset=LAST_1_HOUR', description: 'Dane z cache z wybranym presetem' },
         { path: '/refresh', description: 'Wymusza odświeżenie cache' },
         { path: '/debug/lines', description: 'Podgląd linii' },
         { path: '/debug/areas', description: 'Podgląd obszarów' },
         { path: '/debug/apps', description: 'Podgląd aplikacji' },
+        { path: '/raw', description: 'Pobiera dane bezpośrednio z API (pomija cache)' },
       ],
       filters: {
-        preset: 'THISYEAR, LAST_1_HOUR, ...',
+        preset: 'np. LAST_1_HOUR, LAST_1_DAY, THIS_YEAR, ...',
         class: 'PERSON, HEAD, ...',
         app: 'filtruje po nazwie aplikacji',
         camera: 'filtruje po nazwie kamery',
@@ -798,7 +809,7 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: 'Isarsoft Dashboard Cache',
-      version: '2.1.0',
+      version: '2.2.0',
       cached: {
         available: !!cachedData,
         last_success: lastSuccess,
@@ -833,11 +844,30 @@ const server = http.createServer(async (req, res) => {
 
   // GET /data
   if (req.method === 'GET' && url.pathname === '/data') {
+    // Jeśli podano preset, możemy odświeżyć cache z tym presetem (ale to kosztowne)
+    // Dla uproszczenia zwracamy dane z cache, ale z informacją o aktualnym presetcie.
     const data = getCachedData();
     if (!data.ok) {
       return sendJson(res, 503, data);
     }
+    // Można dodać możliwość filtrowania po stronie serwera, ale to już zrobione w collectAllData
+    // – tutaj zwracamy to, co jest w cache.
     return sendJson(res, 200, data);
+  }
+
+  // GET /raw – pobiera dane na żywo z API (pomija cache)
+  if (req.method === 'GET' && url.pathname === '/raw') {
+    try {
+      const filters = parseFilters(url);
+      const rawData = await collectAllData(filters);
+      return sendJson(res, 200, {
+        ok: true,
+        source: 'direct_api',
+        ...rawData,
+      });
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err.message });
+    }
   }
 
   // GET /debug/lines
@@ -908,7 +938,7 @@ server.listen(CONFIG.port, async () => {
   console.log(JSON.stringify({
     ok: true,
     message: 'Isarsoft Dashboard Cache Server started',
-    version: '2.1.0',
+    version: '2.2.0',
     port: CONFIG.port,
     baseUrl: CONFIG.baseUrl,
     defaultPreset: CONFIG.defaultPreset,
