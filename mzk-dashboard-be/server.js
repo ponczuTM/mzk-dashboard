@@ -15,49 +15,47 @@ const CONFIG = {
   username: process.env.ISARSOFT_USERNAME || 'perception',
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
-  defaultPersonClassName: process.env.ISARSOFT_PERSON_CLASS || 'PERSON',
-  defaultTimePresets: (
-    process.env.ISARSOFT_TIME_PRESETS || 'LAST_1_HOUR,LAST_12_HOUR,LAST_1_DAY'
-  )
+  requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
+  classNames: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean),
-  requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
+  historyPresetShort: process.env.ISARSOFT_PRESET_SHORT || 'LAST_1_HOUR',
+  historyPresetMedium: process.env.ISARSOFT_PRESET_MEDIUM || 'LAST_12_HOUR',
+  historyPresetLong: process.env.ISARSOFT_PRESET_LONG || 'THIS_YEAR',
+  healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST_1_DAY',
 };
 
-const insecureHttpsAgent = new https.Agent({
+const httpsAgent = new https.Agent({
   rejectUnauthorized: CONFIG.verifyTls,
 });
 
-let cachedToken = null;
-let cachedTokenExpiresAt = 0;
+let tokenCache = { token: null, expiresAt: 0 };
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function safeJsonParse(text) {
+function toArray(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function sumBy(arr, fn) {
+  return toArray(arr).reduce((acc, item) => acc + (Number(fn(item)) || 0), 0);
+}
+
+function avg(arr) {
+  const values = arr.filter((x) => Number.isFinite(x));
+  if (!values.length) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function safeJson(text) {
   try {
     return JSON.parse(text);
   } catch {
     return null;
   }
-}
-
-function toArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function sumBy(arr, mapper) {
-  return toArray(arr).reduce((acc, item) => acc + (Number(mapper(item)) || 0), 0);
-}
-
-function pick(obj, keys) {
-  const out = {};
-  for (const key of keys) {
-    if (obj && Object.prototype.hasOwnProperty.call(obj, key)) out[key] = obj[key];
-  }
-  return out;
 }
 
 function requestRaw(urlString, options = {}, body = null) {
@@ -73,42 +71,37 @@ function requestRaw(urlString, options = {}, body = null) {
         path: `${url.pathname}${url.search}`,
         method: options.method || 'GET',
         headers: options.headers || {},
-        agent: url.protocol === 'https:' ? insecureHttpsAgent : undefined,
+        agent: url.protocol === 'https:' ? httpsAgent : undefined,
         timeout: CONFIG.requestTimeoutMs,
       },
       (res) => {
-        let data = '';
+        let raw = '';
         res.setEncoding('utf8');
         res.on('data', (chunk) => {
-          data += chunk;
+          raw += chunk;
         });
         res.on('end', () => {
           resolve({
             ok: res.statusCode >= 200 && res.statusCode < 300,
             status: res.statusCode,
             statusText: res.statusMessage,
-            headers: res.headers,
-            text: data,
-            json: () => safeJsonParse(data),
+            text: raw,
+            json: () => safeJson(raw),
           });
         });
       }
     );
 
-    req.on('timeout', () => {
-      req.destroy(new Error(`Request timeout after ${CONFIG.requestTimeoutMs}ms`));
-    });
-
+    req.on('timeout', () => req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`)));
     req.on('error', reject);
-
     if (body) req.write(body);
     req.end();
   });
 }
 
-async function getAccessToken(forceRefresh = false) {
-  if (!forceRefresh && cachedToken && Date.now() < cachedTokenExpiresAt - 15000) {
-    return cachedToken;
+async function getToken(force = false) {
+  if (!force && tokenCache.token && Date.now() < tokenCache.expiresAt - 15000) {
+    return tokenCache.token;
   }
 
   const body = new URLSearchParams({
@@ -118,9 +111,8 @@ async function getAccessToken(forceRefresh = false) {
     password: CONFIG.password,
   }).toString();
 
-  const tokenUrl = `${CONFIG.baseUrl}${CONFIG.tokenPath}`;
   const res = await requestRaw(
-    tokenUrl,
+    `${CONFIG.baseUrl}${CONFIG.tokenPath}`,
     {
       method: 'POST',
       headers: {
@@ -133,86 +125,58 @@ async function getAccessToken(forceRefresh = false) {
 
   const json = res.json();
   if (!res.ok || !json?.access_token) {
-    throw new Error(
-      `Token request failed: ${res.status} ${res.statusText} ${res.text || ''}`.trim()
-    );
+    throw new Error(`Token request failed: ${res.status} ${res.statusText} ${res.text}`);
   }
 
-  cachedToken = json.access_token;
-  cachedTokenExpiresAt = Date.now() + (Number(json.expires_in) || 300) * 1000;
-  return cachedToken;
+  tokenCache = {
+    token: json.access_token,
+    expiresAt: Date.now() + (Number(json.expires_in) || 300) * 1000,
+  };
+
+  return tokenCache.token;
 }
 
-async function graphqlRequest(query, variables = null, forceRefreshToken = false) {
-  const token = await getAccessToken(forceRefreshToken);
-  const body = JSON.stringify({ query, variables });
+async function graphql(query, variables = null, retry = true) {
+  const token = await getToken(false);
+  const payload = JSON.stringify({ query, variables });
 
-  const graphqlUrl = `${CONFIG.baseUrl}${CONFIG.graphqlPath}`;
   const res = await requestRaw(
-    graphqlUrl,
+    `${CONFIG.baseUrl}${CONFIG.graphqlPath}`,
     {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        'Content-Length': Buffer.byteLength(body),
+        'Content-Length': Buffer.byteLength(payload),
       },
     },
-    body
+    payload
   );
 
   const json = res.json();
-  if (res.status === 401 && !forceRefreshToken) {
-    return graphqlRequest(query, variables, true);
+
+  if (res.status === 401 && retry) {
+    await getToken(true);
+    return graphql(query, variables, false);
   }
 
   if (!res.ok) {
-    throw new Error(
-      `GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text || ''}`.trim()
-    );
+    throw new Error(`GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text}`);
   }
 
   if (!json) {
-    throw new Error(`GraphQL returned non-JSON response: ${res.text || ''}`.trim());
+    throw new Error(`GraphQL returned invalid JSON: ${res.text}`);
   }
 
-  return json;
-}
-
-async function graphqlData(query, variables = null) {
-  const result = await graphqlRequest(query, variables);
-  if (result.errors) {
-    return { data: result.data || null, errors: result.errors };
+  if (json.errors) {
+    return { data: json.data || null, errors: json.errors };
   }
-  return { data: result.data || null, errors: null };
+
+  return { data: json.data || null, errors: null };
 }
 
-const Q_SCHEMA_ROOT = `
-query {
-  __schema {
-    queryType { name fields { name } }
-    mutationType { name fields { name } }
-    subscriptionType { name }
-  }
-}
-`;
-
-const Q_SCHEMA_TYPES = `
-query {
-  __schema {
-    types {
-      name
-      kind
-      fields { name }
-      enumValues { name }
-      inputFields { name }
-    }
-  }
-}
-`;
-
-const Q_CAMERAS = `
+const QUERY_CAMERAS = `
 query {
   allCameras {
     uuid
@@ -221,8 +185,15 @@ query {
 }
 `;
 
-const Q_APPLICATIONS_FULL = `
-query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2: TimeRangePreset!, $preset3: TimeRangePreset!) {
+const QUERY_APPS = `
+query(
+  $personAndHead: [ObjectClassInput!]!,
+  $personOnly: [ObjectClassInput!]!,
+  $headOnly: [ObjectClassInput!]!,
+  $presetShort: TimeRangePreset!,
+  $presetMedium: TimeRangePreset!,
+  $presetLong: TimeRangePreset!
+) {
   allApplications {
     __typename
 
@@ -246,17 +217,17 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         name
       }
 
+      alarms {
+        uuid
+        name
+      }
+
       output_stream {
         __typename
       }
 
       tracks_live {
         __typename
-      }
-
-      alarms {
-        uuid
-        name
       }
 
       lines {
@@ -267,14 +238,24 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         created_at
         updated_at
 
-        count_live(object_classes: $personClasses) {
+        live_person: count_live(object_classes: $personOnly) {
           count_in
           count_out
         }
 
-        last1h: count_data(
-          time_range: { time_range_preset: $preset1 }
-          object_classes: $personClasses
+        live_head: count_live(object_classes: $headOnly) {
+          count_in
+          count_out
+        }
+
+        live_all: count_live(object_classes: $personAndHead) {
+          count_in
+          count_out
+        }
+
+        short_person: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personOnly
         ) {
           time_bucket
           number_of_samples
@@ -282,9 +263,9 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_out
         }
 
-        last12h: count_data(
-          time_range: { time_range_preset: $preset2 }
-          object_classes: $personClasses
+        short_head: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $headOnly
         ) {
           time_bucket
           number_of_samples
@@ -292,9 +273,69 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_out
         }
 
-        last1d: count_data(
-          time_range: { time_range_preset: $preset3 }
-          object_classes: $personClasses
+        short_all: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_person: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_head: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_all: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personAndHead
         ) {
           time_bucket
           number_of_samples
@@ -311,13 +352,21 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         created_at
         updated_at
 
-        count_live(object_classes: $personClasses) {
+        live_person: count_live(object_classes: $personOnly) {
           count
         }
 
-        last1h: count_data(
-          time_range: { time_range_preset: $preset1 }
-          object_classes: $personClasses
+        live_head: count_live(object_classes: $headOnly) {
+          count
+        }
+
+        live_all: count_live(object_classes: $personAndHead) {
+          count
+        }
+
+        short_person: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personOnly
         ) {
           time_bucket
           number_of_samples
@@ -326,9 +375,9 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_max
         }
 
-        last12h: count_data(
-          time_range: { time_range_preset: $preset2 }
-          object_classes: $personClasses
+        short_head: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $headOnly
         ) {
           time_bucket
           number_of_samples
@@ -337,9 +386,75 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_max
         }
 
-        last1d: count_data(
-          time_range: { time_range_preset: $preset3 }
-          object_classes: $personClasses
+        short_all: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_person: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_head: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_all: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personAndHead
         ) {
           time_bucket
           number_of_samples
@@ -370,17 +485,17 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         name
       }
 
+      alarms {
+        uuid
+        name
+      }
+
       output_stream {
         __typename
       }
 
       detections_live {
         __typename
-      }
-
-      alarms {
-        uuid
-        name
       }
 
       areas {
@@ -391,13 +506,21 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         created_at
         updated_at
 
-        count_live(object_classes: $personClasses) {
+        live_person: count_live(object_classes: $personOnly) {
           count
         }
 
-        last1h: count_data(
-          time_range: { time_range_preset: $preset1 }
-          object_classes: $personClasses
+        live_head: count_live(object_classes: $headOnly) {
+          count
+        }
+
+        live_all: count_live(object_classes: $personAndHead) {
+          count
+        }
+
+        short_person: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personOnly
         ) {
           time_bucket
           number_of_samples
@@ -406,9 +529,9 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_max
         }
 
-        last12h: count_data(
-          time_range: { time_range_preset: $preset2 }
-          object_classes: $personClasses
+        short_head: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $headOnly
         ) {
           time_bucket
           number_of_samples
@@ -417,9 +540,75 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
           count_max
         }
 
-        last1d: count_data(
-          time_range: { time_range_preset: $preset3 }
-          object_classes: $personClasses
+        short_all: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_person: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_head: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_all: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personAndHead
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personAndHead
         ) {
           time_bucket
           number_of_samples
@@ -454,16 +643,16 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         name
       }
 
-      output_stream {
-        __typename
-      }
-
       alarms {
         uuid
         name
       }
 
-      last1h: count_data(time_range: { time_range_preset: $preset1 }) {
+      output_stream {
+        __typename
+      }
+
+      short_data: count_data(time_range: { time_range_preset: $presetShort }) {
         time_bucket
         number_of_samples
         count_min
@@ -471,7 +660,7 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         count_max
       }
 
-      last12h: count_data(time_range: { time_range_preset: $preset2 }) {
+      medium_data: count_data(time_range: { time_range_preset: $presetMedium }) {
         time_bucket
         number_of_samples
         count_min
@@ -479,7 +668,7 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
         count_max
       }
 
-      last1d: count_data(time_range: { time_range_preset: $preset3 }) {
+      long_data: count_data(time_range: { time_range_preset: $presetLong }) {
         time_bucket
         number_of_samples
         count_min
@@ -491,8 +680,8 @@ query($personClasses: [ObjectClassInput!]!, $preset1: TimeRangePreset!, $preset2
 }
 `;
 
-const Q_SYSTEM_HEALTH = `
-query {
+const QUERY_SYSTEM_HEALTH = `
+query($healthRange: TimeRangeInput!) {
   getSystemHealth {
     perception_camera_count
     perception_camera_initializing_count
@@ -508,80 +697,59 @@ query {
     perception_app_paused_count
     perception_app_pending_count
 
-    perception_camera_counts_history {
+    perception_camera_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_camera_initializing_counts_history {
+    perception_camera_initializing_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_camera_offline_counts_history {
+    perception_camera_offline_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_camera_online_counts_history {
+    perception_camera_online_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_camera_paused_counts_history {
+    perception_camera_paused_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_camera_pending_counts_history {
+    perception_camera_pending_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
 
-    perception_app_counts_history {
+    perception_app_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_app_initializing_counts_history {
+    perception_app_initializing_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_app_offline_counts_history {
+    perception_app_offline_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_app_online_counts_history {
+    perception_app_online_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_app_paused_counts_history {
+    perception_app_paused_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
-    perception_app_pending_counts_history {
+    perception_app_pending_counts_history(time_range: $healthRange) {
       points { timestamp value }
     }
   }
 }
 `;
 
-const Q_FEATURE_FLAGS = `
-query {
-  getFeatureFlags
+const QUERY_FEATURE_FLAGS = `
+query($featureflags: [FeatureFlags!]!) {
+  getFeatureFlags(featureflags: $featureflags)
 }
 `;
 
-const Q_LICENSE = `
-query {
-  getLicense {
-    __typename
-  }
-  getLicenseStatus {
-    __typename
-  }
-}
-`;
-
-const Q_MACHINE_FINGERPRINT = `
+const QUERY_MISC = `
 query {
   getMachineFingerprint
-}
-`;
-
-const Q_EXPORTS = `
-query {
-  allExports {
-    __typename
-  }
-}
-`;
-
-const Q_SETTINGS = `
-query {
+  getLicense { __typename }
+  getLicenseStatus { __typename }
+  allExports { __typename }
   getDeviceSettings { __typename }
   getMQTTSettings { __typename }
   getKafkaSettings { __typename }
@@ -590,11 +758,6 @@ query {
   getGenetecSettings { __typename }
   getMilestoneSettings { __typename }
   getObjectFlowSettings { __typename }
-}
-`;
-
-const Q_VMS = `
-query {
   checkCayugaConnection
   checkMilestoneConnection
   checkGenetecConnection
@@ -604,310 +767,380 @@ query {
 }
 `;
 
-function summarizeLineSeries(series) {
-  const rows = toArray(series);
+const QUERY_SCHEMA = `
+query {
+  __schema {
+    queryType { name fields { name } }
+    mutationType { name fields { name } }
+    subscriptionType { name }
+    types {
+      name
+      kind
+      fields { name }
+      inputFields { name }
+      enumValues { name }
+    }
+  }
+}
+`;
+
+function summarizeLineBuckets(rows) {
+  const list = toArray(rows);
   return {
-    buckets: rows.length,
-    total_in: sumBy(rows, (x) => x?.count_in),
-    total_out: sumBy(rows, (x) => x?.count_out),
-    samples: sumBy(rows, (x) => x?.number_of_samples),
-    first_bucket: rows[0]?.time_bucket || null,
-    last_bucket: rows[rows.length - 1]?.time_bucket || null,
-    raw: rows,
+    buckets: list.length,
+    samples: sumBy(list, (x) => x?.number_of_samples),
+    total_in: sumBy(list, (x) => x?.count_in),
+    total_out: sumBy(list, (x) => x?.count_out),
+    first_bucket: list[0]?.time_bucket || null,
+    last_bucket: list[list.length - 1]?.time_bucket || null,
+    raw: list,
   };
 }
 
-function summarizeAreaSeries(series) {
-  const rows = toArray(series);
-  const avgValues = rows
-    .map((x) => (x?.count_avg == null ? null : Number(x.count_avg)))
-    .filter((x) => Number.isFinite(x));
+function summarizeAreaBuckets(rows) {
+  const list = toArray(rows);
+  const mins = list.map((x) => Number(x?.count_min)).filter(Number.isFinite);
+  const avgs = list.map((x) => Number(x?.count_avg)).filter(Number.isFinite);
+  const maxs = list.map((x) => Number(x?.count_max)).filter(Number.isFinite);
 
   return {
-    buckets: rows.length,
-    min_of_mins: rows.length ? Math.min(...rows.map((x) => Number(x?.count_min ?? Infinity))) : null,
-    max_of_maxs: rows.length ? Math.max(...rows.map((x) => Number(x?.count_max ?? -Infinity))) : null,
-    avg_of_avgs: avgValues.length
-      ? avgValues.reduce((a, b) => a + b, 0) / avgValues.length
-      : null,
-    samples: sumBy(rows, (x) => x?.number_of_samples),
-    first_bucket: rows[0]?.time_bucket || null,
-    last_bucket: rows[rows.length - 1]?.time_bucket || null,
-    raw: rows,
+    buckets: list.length,
+    samples: sumBy(list, (x) => x?.number_of_samples),
+    min_of_mins: mins.length ? Math.min(...mins) : null,
+    avg_of_avgs: avg(avgs),
+    max_of_maxs: maxs.length ? Math.max(...maxs) : null,
+    first_bucket: list[0]?.time_bucket || null,
+    last_bucket: list[list.length - 1]?.time_bucket || null,
+    raw: list,
   };
 }
 
-function summarizeObjectFlowApp(app) {
-  const lines = toArray(app.lines).map((line) => {
-    const live = toArray(line.count_live);
-    const liveIn = sumBy(live, (x) => x?.count_in);
-    const liveOut = sumBy(live, (x) => x?.count_out);
+function summarizeLineLive(rows) {
+  const list = toArray(rows);
+  return {
+    total_in: sumBy(list, (x) => x?.count_in),
+    total_out: sumBy(list, (x) => x?.count_out),
+    raw: list,
+  };
+}
+
+function summarizeAreaLive(rows) {
+  const list = toArray(rows);
+  return {
+    count: sumBy(list, (x) => x?.count),
+    raw: list,
+  };
+}
+
+function mapLine(line) {
+  const personLive = summarizeLineLive(line.live_person);
+  const headLive = summarizeLineLive(line.live_head);
+  const allLive = summarizeLineLive(line.live_all);
+
+  return {
+    uuid: line.uuid,
+    name: line.name,
+    tags: toArray(line.tags),
+    coordinates: toArray(line.coordinates),
+    created_at: line.created_at || null,
+    updated_at: line.updated_at || null,
+
+    classes: {
+      PERSON: {
+        live: personLive,
+        short: summarizeLineBuckets(line.short_person),
+        medium: summarizeLineBuckets(line.medium_person),
+        long: summarizeLineBuckets(line.long_person),
+      },
+      HEAD: {
+        live: headLive,
+        short: summarizeLineBuckets(line.short_head),
+        medium: summarizeLineBuckets(line.medium_head),
+        long: summarizeLineBuckets(line.long_head),
+      },
+      ALL: {
+        live: allLive,
+        short: summarizeLineBuckets(line.short_all),
+        medium: summarizeLineBuckets(line.medium_all),
+        long: summarizeLineBuckets(line.long_all),
+      },
+    },
+
+    always_report: {
+      people_in_out_live: {
+        person_in: personLive.total_in,
+        person_out: personLive.total_out,
+        head_in: headLive.total_in,
+        head_out: headLive.total_out,
+        all_in: allLive.total_in,
+        all_out: allLive.total_out,
+      },
+      people_in_out_short: {
+        person_in: sumBy(line.short_person, (x) => x?.count_in),
+        person_out: sumBy(line.short_person, (x) => x?.count_out),
+        head_in: sumBy(line.short_head, (x) => x?.count_in),
+        head_out: sumBy(line.short_head, (x) => x?.count_out),
+        all_in: sumBy(line.short_all, (x) => x?.count_in),
+        all_out: sumBy(line.short_all, (x) => x?.count_out),
+      },
+      people_in_out_medium: {
+        person_in: sumBy(line.medium_person, (x) => x?.count_in),
+        person_out: sumBy(line.medium_person, (x) => x?.count_out),
+        head_in: sumBy(line.medium_head, (x) => x?.count_in),
+        head_out: sumBy(line.medium_head, (x) => x?.count_out),
+        all_in: sumBy(line.medium_all, (x) => x?.count_in),
+        all_out: sumBy(line.medium_all, (x) => x?.count_out),
+      },
+      people_in_out_long: {
+        person_in: sumBy(line.long_person, (x) => x?.count_in),
+        person_out: sumBy(line.long_person, (x) => x?.count_out),
+        head_in: sumBy(line.long_head, (x) => x?.count_in),
+        head_out: sumBy(line.long_head, (x) => x?.count_out),
+        all_in: sumBy(line.long_all, (x) => x?.count_in),
+        all_out: sumBy(line.long_all, (x) => x?.count_out),
+      },
+    },
+  };
+}
+
+function mapArea(area) {
+  return {
+    uuid: area.uuid,
+    name: area.name,
+    tags: toArray(area.tags),
+    coordinates: toArray(area.coordinates),
+    created_at: area.created_at || null,
+    updated_at: area.updated_at || null,
+    classes: {
+      PERSON: {
+        live: summarizeAreaLive(area.live_person),
+        short: summarizeAreaBuckets(area.short_person),
+        medium: summarizeAreaBuckets(area.medium_person),
+        long: summarizeAreaBuckets(area.long_person),
+      },
+      HEAD: {
+        live: summarizeAreaLive(area.live_head),
+        short: summarizeAreaBuckets(area.short_head),
+        medium: summarizeAreaBuckets(area.medium_head),
+        long: summarizeAreaBuckets(area.long_head),
+      },
+      ALL: {
+        live: summarizeAreaLive(area.live_all),
+        short: summarizeAreaBuckets(area.short_all),
+        medium: summarizeAreaBuckets(area.medium_all),
+        long: summarizeAreaBuckets(area.long_all),
+      },
+    },
+  };
+}
+
+function mapApplication(app) {
+  if (app.__typename === 'ObjectFlow') {
+    const lines = toArray(app.lines).map(mapLine);
+    const areas = toArray(app.areas).map(mapArea);
 
     return {
-      uuid: line.uuid,
-      name: line.name,
-      tags: toArray(line.tags),
-      coordinates: toArray(line.coordinates),
-      created_at: line.created_at || null,
-      updated_at: line.updated_at || null,
+      type: 'ObjectFlow',
+      uuid: app.uuid,
+      name: app.name,
+      tags: toArray(app.tags),
+      created_at: app.created_at || null,
+      updated_at: app.updated_at || null,
+      status: app.status || null,
+      last_online: app.last_online || null,
+      default_model_settings: app.default_model_settings,
+      camera: app.camera || null,
+      model: app.model || null,
+      alarms: toArray(app.alarms),
+      output_stream: app.output_stream || null,
+      tracks_live: toArray(app.tracks_live),
+      lines,
+      areas,
 
-      people_live: {
-        entered: liveIn,
-        exited: liveOut,
-        raw: live,
+      always_report: {
+        person_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.person_in),
+        person_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.person_out),
+        head_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.head_in),
+        head_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.head_out),
+        all_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.all_in),
+        all_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.all_out),
+
+        person_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.person_in),
+        person_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.person_out),
+        head_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.head_in),
+        head_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.head_out),
+        all_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.all_in),
+        all_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.all_out),
+
+        person_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.person_in),
+        person_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.person_out),
+        head_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.head_in),
+        head_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.head_out),
+        all_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.all_in),
+        all_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.all_out),
+
+        person_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.person_in),
+        person_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.person_out),
+        head_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.head_in),
+        head_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.head_out),
+        all_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.all_in),
+        all_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.all_out),
       },
-
-      people_last_1_hour: summarizeLineSeries(line.last1h),
-      people_last_12_hours: summarizeLineSeries(line.last12h),
-      people_last_1_day: summarizeLineSeries(line.last1d),
     };
-  });
+  }
 
-  const areas = toArray(app.areas).map((area) => {
-    const live = toArray(area.count_live);
-    const liveCount = sumBy(live, (x) => x?.count);
+  if (app.__typename === 'ObjectCount') {
+    const areas = toArray(app.areas).map(mapArea);
 
     return {
-      uuid: area.uuid,
-      name: area.name,
-      tags: toArray(area.tags),
-      coordinates: toArray(area.coordinates),
-      created_at: area.created_at || null,
-      updated_at: area.updated_at || null,
-
-      people_live: {
-        count: liveCount,
-        raw: live,
+      type: 'ObjectCount',
+      uuid: app.uuid,
+      name: app.name,
+      tags: toArray(app.tags),
+      created_at: app.created_at || null,
+      updated_at: app.updated_at || null,
+      status: app.status || null,
+      last_online: app.last_online || null,
+      default_model_settings: app.default_model_settings,
+      camera: app.camera || null,
+      model: app.model || null,
+      alarms: toArray(app.alarms),
+      output_stream: app.output_stream || null,
+      detections_live: toArray(app.detections_live),
+      areas,
+      always_report: {
+        person_live_count: sumBy(areas, (x) => x.classes.PERSON.live.count),
+        head_live_count: sumBy(areas, (x) => x.classes.HEAD.live.count),
+        all_live_count: sumBy(areas, (x) => x.classes.ALL.live.count),
+        note: 'ObjectCount exposes area occupancy/count, not directional IN/OUT.',
       },
-
-      people_last_1_hour: summarizeAreaSeries(area.last1h),
-      people_last_12_hours: summarizeAreaSeries(area.last12h),
-      people_last_1_day: summarizeAreaSeries(area.last1d),
     };
-  });
+  }
 
-  const totals = {
-    lines_live_entered: sumBy(lines, (x) => x.people_live.entered),
-    lines_live_exited: sumBy(lines, (x) => x.people_live.exited),
-    lines_last_1_hour_entered: sumBy(lines, (x) => x.people_last_1_hour.total_in),
-    lines_last_1_hour_exited: sumBy(lines, (x) => x.people_last_1_hour.total_out),
-    lines_last_12_hours_entered: sumBy(lines, (x) => x.people_last_12_hours.total_in),
-    lines_last_12_hours_exited: sumBy(lines, (x) => x.people_last_12_hours.total_out),
-    lines_last_1_day_entered: sumBy(lines, (x) => x.people_last_1_day.total_in),
-    lines_last_1_day_exited: sumBy(lines, (x) => x.people_last_1_day.total_out),
-    areas_live_people: sumBy(areas, (x) => x.people_live.count),
-  };
-
-  return {
-    type: 'ObjectFlow',
-    uuid: app.uuid,
-    name: app.name,
-    tags: toArray(app.tags),
-    status: app.status || null,
-    last_online: app.last_online || null,
-    created_at: app.created_at || null,
-    updated_at: app.updated_at || null,
-    default_model_settings: app.default_model_settings,
-    camera: app.camera || null,
-    model: app.model || null,
-    output_stream: app.output_stream || null,
-    tracks_live: toArray(app.tracks_live),
-    alarms: toArray(app.alarms),
-    totals,
-    lines,
-    areas,
-    always_report_people_entered_exited: {
-      live_entered: totals.lines_live_entered,
-      live_exited: totals.lines_live_exited,
-      last_1_hour_entered: totals.lines_last_1_hour_entered,
-      last_1_hour_exited: totals.lines_last_1_hour_exited,
-      last_12_hours_entered: totals.lines_last_12_hours_entered,
-      last_12_hours_exited: totals.lines_last_12_hours_exited,
-      last_1_day_entered: totals.lines_last_1_day_entered,
-      last_1_day_exited: totals.lines_last_1_day_exited,
-    },
-  };
-}
-
-function summarizeObjectCountApp(app) {
-  const areas = toArray(app.areas).map((area) => {
-    const live = toArray(area.count_live);
-    const liveCount = sumBy(live, (x) => x?.count);
-
+  if (app.__typename === 'CrowdCount') {
     return {
-      uuid: area.uuid,
-      name: area.name,
-      tags: toArray(area.tags),
-      coordinates: toArray(area.coordinates),
-      created_at: area.created_at || null,
-      updated_at: area.updated_at || null,
-
-      people_live: {
-        count: liveCount,
-        raw: live,
+      type: 'CrowdCount',
+      uuid: app.uuid,
+      name: app.name,
+      tags: toArray(app.tags),
+      created_at: app.created_at || null,
+      updated_at: app.updated_at || null,
+      status: app.status || null,
+      last_online: app.last_online || null,
+      current_count: app.current_count ?? null,
+      box: {
+        box_u1: app.box_u1,
+        box_v1: app.box_v1,
+        box_u2: app.box_u2,
+        box_v2: app.box_v2,
       },
-
-      people_last_1_hour: summarizeAreaSeries(area.last1h),
-      people_last_12_hours: summarizeAreaSeries(area.last12h),
-      people_last_1_day: summarizeAreaSeries(area.last1d),
+      camera: app.camera || null,
+      model: app.model || null,
+      alarms: toArray(app.alarms),
+      output_stream: app.output_stream || null,
+      short: summarizeAreaBuckets(app.short_data),
+      medium: summarizeAreaBuckets(app.medium_data),
+      long: summarizeAreaBuckets(app.long_data),
+      always_report: {
+        current_count: app.current_count ?? null,
+        note: 'CrowdCount exposes occupancy/current_count, not directional IN/OUT.',
+      },
     };
-  });
+  }
 
-  const totals = {
-    areas_live_people: sumBy(areas, (x) => x.people_live.count),
-  };
-
-  return {
-    type: 'ObjectCount',
-    uuid: app.uuid,
-    name: app.name,
-    tags: toArray(app.tags),
-    status: app.status || null,
-    last_online: app.last_online || null,
-    created_at: app.created_at || null,
-    updated_at: app.updated_at || null,
-    default_model_settings: app.default_model_settings,
-    camera: app.camera || null,
-    model: app.model || null,
-    output_stream: app.output_stream || null,
-    detections_live: toArray(app.detections_live),
-    alarms: toArray(app.alarms),
-    totals,
-    areas,
-    always_report_people_entered_exited: {
-      live_entered: 0,
-      live_exited: 0,
-      last_1_hour_entered: 0,
-      last_1_hour_exited: 0,
-      last_12_hours_entered: 0,
-      last_12_hours_exited: 0,
-      last_1_day_entered: 0,
-      last_1_day_exited: 0,
-      note: 'ObjectCount does not expose line-based in/out in the discovered schema.',
-    },
-  };
+  return { type: app.__typename || 'Unknown', raw: app };
 }
 
-function summarizeCrowdCountApp(app) {
-  return {
-    type: 'CrowdCount',
-    uuid: app.uuid,
-    name: app.name,
-    tags: toArray(app.tags),
-    status: app.status || null,
-    last_online: app.last_online || null,
-    created_at: app.created_at || null,
-    updated_at: app.updated_at || null,
-    current_count: app.current_count ?? null,
-    box: pick(app, ['box_u1', 'box_v1', 'box_u2', 'box_v2']),
-    camera: app.camera || null,
-    model: app.model || null,
-    output_stream: app.output_stream || null,
-    alarms: toArray(app.alarms),
-    people_last_1_hour: summarizeAreaSeries(app.last1h),
-    people_last_12_hours: summarizeAreaSeries(app.last12h),
-    people_last_1_day: summarizeAreaSeries(app.last1d),
-    always_report_people_entered_exited: {
-      live_entered: 0,
-      live_exited: 0,
-      last_1_hour_entered: 0,
-      last_1_hour_exited: 0,
-      last_12_hours_entered: 0,
-      last_12_hours_exited: 0,
-      last_1_day_entered: 0,
-      last_1_day_exited: 0,
-      note: 'CrowdCount exposes occupancy/current_count, not directional in/out in the discovered schema.',
-    },
-  };
+function featureFlagNamesFromSchema(schemaTypes) {
+  const enumType = toArray(schemaTypes).find((x) => x.name === 'FeatureFlags');
+  return toArray(enumType?.enumValues).map((x) => x.name).filter(Boolean);
 }
 
-function buildTopLevelSummary(apps, cameras) {
-  const objectFlowApps = apps.filter((x) => x.type === 'ObjectFlow');
-  const objectCountApps = apps.filter((x) => x.type === 'ObjectCount');
-  const crowdCountApps = apps.filter((x) => x.type === 'CrowdCount');
+async function collectData() {
+  const schemaRes = await graphql(QUERY_SCHEMA);
+  const schema = schemaRes.data?.__schema || null;
 
-  return {
-    generated_at: nowIso(),
-    counts: {
-      cameras: toArray(cameras).length,
-      applications_total: apps.length,
-      objectflow_applications: objectFlowApps.length,
-      objectcount_applications: objectCountApps.length,
-      crowdcount_applications: crowdCountApps.length,
-    },
-    people: {
-      live_entered_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.live_entered),
-      live_exited_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.live_exited),
-      last_1_hour_entered_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_1_hour_entered),
-      last_1_hour_exited_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_1_hour_exited),
-      last_12_hours_entered_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_12_hours_entered),
-      last_12_hours_exited_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_12_hours_exited),
-      last_1_day_entered_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_1_day_entered),
-      last_1_day_exited_total: sumBy(objectFlowApps, (x) => x.always_report_people_entered_exited.last_1_day_exited),
-      live_people_in_objectcount_areas: sumBy(objectCountApps, (x) => x.totals.areas_live_people),
-      live_people_in_objectflow_areas: sumBy(objectFlowApps, (x) => x.totals.areas_live_people),
-      live_people_in_crowdcount: sumBy(crowdCountApps, (x) => x.current_count),
-    },
-  };
-}
+  const featureFlagsList = featureFlagNamesFromSchema(schema?.types);
 
-async function collectAllData() {
-  const variables = {
-    personClasses: [{ name: CONFIG.defaultPersonClassName }],
-    preset1: CONFIG.defaultTimePresets[0] || 'LAST_1_HOUR',
-    preset2: CONFIG.defaultTimePresets[1] || 'LAST_12_HOUR',
-    preset3: CONFIG.defaultTimePresets[2] || 'LAST_1_DAY',
+  const variablesApps = {
+    personAndHead: CONFIG.classNames.map((name) => ({ name })),
+    personOnly: [{ name: 'PERSON' }],
+    headOnly: [{ name: 'HEAD' }],
+    presetShort: CONFIG.historyPresetShort,
+    presetMedium: CONFIG.historyPresetMedium,
+    presetLong: CONFIG.historyPresetLong,
   };
 
-  const [
-    schemaRootRes,
-    schemaTypesRes,
-    camerasRes,
-    appsRes,
-    healthRes,
-    flagsRes,
-    licenseRes,
-    fingerprintRes,
-    exportsRes,
-    settingsRes,
-    vmsRes,
-  ] = await Promise.all([
-    graphqlData(Q_SCHEMA_ROOT),
-    graphqlData(Q_SCHEMA_TYPES),
-    graphqlData(Q_CAMERAS),
-    graphqlData(Q_APPLICATIONS_FULL, variables),
-    graphqlData(Q_SYSTEM_HEALTH),
-    graphqlData(Q_FEATURE_FLAGS),
-    graphqlData(Q_LICENSE),
-    graphqlData(Q_MACHINE_FINGERPRINT),
-    graphqlData(Q_EXPORTS),
-    graphqlData(Q_SETTINGS),
-    graphqlData(Q_VMS),
+  const variablesHealth = {
+    healthRange: {
+      time_range_preset: CONFIG.healthPreset,
+    },
+  };
+
+  const variablesFlags = {
+    featureflags: featureFlagsList,
+  };
+
+  const [camerasRes, appsRes, healthRes, flagsRes, miscRes] = await Promise.all([
+    graphql(QUERY_CAMERAS),
+    graphql(QUERY_APPS, variablesApps),
+    graphql(QUERY_SYSTEM_HEALTH, variablesHealth),
+    graphql(QUERY_FEATURE_FLAGS, variablesFlags),
+    graphql(QUERY_MISC),
   ]);
 
-  const rawApps = toArray(appsRes.data?.allApplications);
-  const applications = rawApps.map((app) => {
-    if (app.__typename === 'ObjectFlow') return summarizeObjectFlowApp(app);
-    if (app.__typename === 'ObjectCount') return summarizeObjectCountApp(app);
-    if (app.__typename === 'CrowdCount') return summarizeCrowdCountApp(app);
-    return {
-      type: app.__typename || 'Unknown',
-      raw: app,
-      always_report_people_entered_exited: {
-        live_entered: 0,
-        live_exited: 0,
-        last_1_hour_entered: 0,
-        last_1_hour_exited: 0,
-        last_12_hours_entered: 0,
-        last_12_hours_exited: 0,
-        last_1_day_entered: 0,
-        last_1_day_exited: 0,
-      },
-    };
-  });
-
   const cameras = toArray(camerasRes.data?.allCameras);
-  const summary = buildTopLevelSummary(applications, cameras);
+  const applications = toArray(appsRes.data?.allApplications).map(mapApplication);
+
+  const objectFlowApps = applications.filter((x) => x.type === 'ObjectFlow');
+  const objectCountApps = applications.filter((x) => x.type === 'ObjectCount');
+  const crowdApps = applications.filter((x) => x.type === 'CrowdCount');
+
+  const summary = {
+    generated_at: nowIso(),
+    totals: {
+      cameras: cameras.length,
+      applications: applications.length,
+      objectflow: objectFlowApps.length,
+      objectcount: objectCountApps.length,
+      crowdcount: crowdApps.length,
+    },
+    in_out: {
+      person_live_in: sumBy(objectFlowApps, (x) => x.always_report.person_live_in),
+      person_live_out: sumBy(objectFlowApps, (x) => x.always_report.person_live_out),
+      head_live_in: sumBy(objectFlowApps, (x) => x.always_report.head_live_in),
+      head_live_out: sumBy(objectFlowApps, (x) => x.always_report.head_live_out),
+      all_live_in: sumBy(objectFlowApps, (x) => x.always_report.all_live_in),
+      all_live_out: sumBy(objectFlowApps, (x) => x.always_report.all_live_out),
+
+      person_short_in: sumBy(objectFlowApps, (x) => x.always_report.person_short_in),
+      person_short_out: sumBy(objectFlowApps, (x) => x.always_report.person_short_out),
+      head_short_in: sumBy(objectFlowApps, (x) => x.always_report.head_short_in),
+      head_short_out: sumBy(objectFlowApps, (x) => x.always_report.head_short_out),
+      all_short_in: sumBy(objectFlowApps, (x) => x.always_report.all_short_in),
+      all_short_out: sumBy(objectFlowApps, (x) => x.always_report.all_short_out),
+
+      person_medium_in: sumBy(objectFlowApps, (x) => x.always_report.person_medium_in),
+      person_medium_out: sumBy(objectFlowApps, (x) => x.always_report.person_medium_out),
+      head_medium_in: sumBy(objectFlowApps, (x) => x.always_report.head_medium_in),
+      head_medium_out: sumBy(objectFlowApps, (x) => x.always_report.head_medium_out),
+      all_medium_in: sumBy(objectFlowApps, (x) => x.always_report.all_medium_in),
+      all_medium_out: sumBy(objectFlowApps, (x) => x.always_report.all_medium_out),
+
+      person_long_in: sumBy(objectFlowApps, (x) => x.always_report.person_long_in),
+      person_long_out: sumBy(objectFlowApps, (x) => x.always_report.person_long_out),
+      head_long_in: sumBy(objectFlowApps, (x) => x.always_report.head_long_in),
+      head_long_out: sumBy(objectFlowApps, (x) => x.always_report.head_long_out),
+      all_long_in: sumBy(objectFlowApps, (x) => x.always_report.all_long_in),
+      all_long_out: sumBy(objectFlowApps, (x) => x.always_report.all_long_out),
+    },
+    occupancy: {
+      objectcount_person_live: sumBy(objectCountApps, (x) => x.always_report.person_live_count || 0),
+      objectcount_head_live: sumBy(objectCountApps, (x) => x.always_report.head_live_count || 0),
+      objectcount_all_live: sumBy(objectCountApps, (x) => x.always_report.all_live_count || 0),
+      crowdcount_current: sumBy(crowdApps, (x) => x.current_count || 0),
+    },
+  };
 
   return {
     ok: true,
@@ -915,55 +1148,41 @@ async function collectAllData() {
     config: {
       baseUrl: CONFIG.baseUrl,
       graphqlPath: CONFIG.graphqlPath,
-      personClass: CONFIG.defaultPersonClassName,
-      timePresets: variables,
       verifyTls: CONFIG.verifyTls,
+      classes: CONFIG.classNames,
+      presets: {
+        short: CONFIG.historyPresetShort,
+        medium: CONFIG.historyPresetMedium,
+        long: CONFIG.historyPresetLong,
+        health: CONFIG.healthPreset,
+      },
     },
     summary,
-    schema: {
-      root: schemaRootRes.data?.__schema || null,
-      types: schemaTypesRes.data?.__schema?.types || [],
-    },
+    schema,
     inventory: {
       cameras,
       applications,
     },
     operations: {
       system_health: healthRes.data?.getSystemHealth || null,
-      feature_flags: flagsRes.data?.getFeatureFlags || null,
-      license: {
-        getLicense: licenseRes.data?.getLicense || null,
-        getLicenseStatus: licenseRes.data?.getLicenseStatus || null,
-      },
-      machine_fingerprint: fingerprintRes.data?.getMachineFingerprint || null,
-      exports: exportsRes.data?.allExports || null,
-      settings: settingsRes.data || null,
-      vms: vmsRes.data || null,
-    },
-    people_always_reported: {
-      entered_exited_totals: summary.people,
-      note:
-        'Directional entered/exited is always computed from ObjectFlow lines where available; ObjectCount/CrowdCount do not expose directional in/out in the discovered schema.',
+      feature_flags_requested: featureFlagsList,
+      feature_flags_result: flagsRes.data?.getFeatureFlags || null,
+      misc: miscRes.data || null,
     },
     errors: {
-      schemaRoot: schemaRootRes.errors,
-      schemaTypes: schemaTypesRes.errors,
+      schema: schemaRes.errors,
       cameras: camerasRes.errors,
       applications: appsRes.errors,
-      systemHealth: healthRes.errors,
-      featureFlags: flagsRes.errors,
-      license: licenseRes.errors,
-      machineFingerprint: fingerprintRes.errors,
-      exports: exportsRes.errors,
-      settings: settingsRes.errors,
-      vms: vmsRes.errors,
+      system_health: healthRes.errors,
+      feature_flags: flagsRes.errors,
+      misc: miscRes.errors,
     },
   };
 }
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, code, payload) {
   const body = JSON.stringify(payload, null, 2);
-  res.writeHead(statusCode, {
+  res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
   });
@@ -975,15 +1194,10 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
-      service: 'isarsoft-dashboard-proxy',
-      generated_at: nowIso(),
-      endpoints: {
-        health: '/health',
-        data: '/data',
-        summary: '/summary',
-        applications: '/applications',
-        cameras: '/cameras',
-      },
+      ok: true,
+      service: 'isarsoft-node-server',
+      time: nowIso(),
+      endpoints: ['/health', '/summary', '/data', '/applications', '/cameras'],
     });
   }
 
@@ -991,32 +1205,32 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { ok: true, time: nowIso() });
   }
 
-  if (req.method === 'GET' && url.pathname === '/data') {
+  if (req.method === 'GET' && url.pathname === '/summary') {
     try {
-      const data = await collectAllData();
-      return sendJson(res, 200, data);
-    } catch (error) {
+      const data = await collectData();
+      return sendJson(res, 200, {
+        ok: true,
+        generated_at: data.generated_at,
+        config: data.config,
+        summary: data.summary,
+      });
+    } catch (err) {
       return sendJson(res, 500, {
         ok: false,
-        error: error.message,
+        error: err.message,
         time: nowIso(),
       });
     }
   }
 
-  if (req.method === 'GET' && url.pathname === '/summary') {
+  if (req.method === 'GET' && url.pathname === '/data') {
     try {
-      const data = await collectAllData();
-      return sendJson(res, 200, {
-        ok: true,
-        generated_at: data.generated_at,
-        summary: data.summary,
-        people_always_reported: data.people_always_reported,
-      });
-    } catch (error) {
+      const data = await collectData();
+      return sendJson(res, 200, data);
+    } catch (err) {
       return sendJson(res, 500, {
         ok: false,
-        error: error.message,
+        error: err.message,
         time: nowIso(),
       });
     }
@@ -1024,16 +1238,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/applications') {
     try {
-      const data = await collectAllData();
+      const data = await collectData();
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
         applications: data.inventory.applications,
       });
-    } catch (error) {
+    } catch (err) {
       return sendJson(res, 500, {
         ok: false,
-        error: error.message,
+        error: err.message,
         time: nowIso(),
       });
     }
@@ -1041,16 +1255,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/cameras') {
     try {
-      const data = await collectAllData();
+      const data = await collectData();
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
         cameras: data.inventory.cameras,
       });
-    } catch (error) {
+    } catch (err) {
       return sendJson(res, 500, {
         ok: false,
-        error: error.message,
+        error: err.message,
         time: nowIso(),
       });
     }
@@ -1072,6 +1286,13 @@ server.listen(CONFIG.port, () => {
         port: CONFIG.port,
         baseUrl: CONFIG.baseUrl,
         graphqlPath: CONFIG.graphqlPath,
+        classes: CONFIG.classNames,
+        presets: {
+          short: CONFIG.historyPresetShort,
+          medium: CONFIG.historyPresetMedium,
+          long: CONFIG.historyPresetLong,
+          health: CONFIG.healthPreset,
+        },
         time: nowIso(),
       },
       null,
