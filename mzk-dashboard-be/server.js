@@ -68,16 +68,17 @@ async function graphqlQuery(query, token) {
 }
 
 // 3. Główne zapytanie agregujące wszystkie dane dla dashboardu
+// Używam dokładnie takich samych zapytań jak w twoich przykładach curl
 function buildDashboardQuery() {
   return `
     query DashboardQuery {
-      # 1. Wszystkie kamery
+      # 1. Wszystkie kamery (działa)
       allCameras {
         uuid
         name
       }
 
-      # 2. Wszystkie aplikacje (z inline fragmentami dla ObjectFlow)
+      # 2. Wszystkie aplikacje z podstawowymi danymi (działa)
       allApplications {
         __typename
         ... on ObjectFlow {
@@ -136,16 +137,6 @@ function buildDashboardQuery() {
               count_max
             }
           }
-          alarms {
-            uuid
-            name
-            enabled
-            condition
-          }
-          output_stream {
-            enabled
-            format
-          }
         }
         ... on ObjectCount {
           uuid
@@ -190,11 +181,6 @@ function buildDashboardQuery() {
         application_count
         online_cameras
         online_applications
-        errors {
-          component
-          message
-          timestamp
-        }
       }
 
       # 4. Status licencji
@@ -206,39 +192,6 @@ function buildDashboardQuery() {
         max_applications
         used_cameras
         used_applications
-      }
-
-      # 5. Ustawienia integracji (VMS / MQTT / Kafka / Kinesis)
-      getVMSIntegrationStatus {
-        vms_type
-        connected
-        last_checked
-        cameras_synced
-      }
-
-      getMQTTSettings {
-        enabled
-        broker_url
-        connected
-      }
-
-      getKafkaSettings {
-        enabled
-        bootstrap_servers
-        connected
-      }
-
-      getKinesisSettings {
-        enabled
-        stream_name
-        connected
-      }
-
-      # 6. Feature Flags (aktywne moduły)
-      getFeatureFlags {
-        name
-        enabled
-        description
       }
     }
   `;
@@ -253,6 +206,7 @@ async function refreshCache() {
     // Krok 1: Pobierz token
     const token = await fetchToken();
     cache.token = token;
+    console.log(`[${new Date().toISOString()}] Token pobrany pomyślnie`);
 
     // Krok 2: Wykonaj zapytanie GraphQL
     const query = buildDashboardQuery();
@@ -260,7 +214,8 @@ async function refreshCache() {
 
     // Sprawdź błędy GraphQL
     if (result.errors && result.errors.length > 0) {
-      throw new Error(`GraphQL errors: ${JSON.stringify(result.errors)}`);
+      console.error(`[${new Date().toISOString()}] GraphQL errors:`, JSON.stringify(result.errors, null, 2));
+      throw new Error(`GraphQL errors: ${result.errors.map(e => e.message).join(', ')}`);
     }
 
     // Krok 3: Agreguj dane
@@ -280,6 +235,10 @@ async function refreshCache() {
     return true;
   } catch (error) {
     console.error(`[${new Date().toISOString()}] ❌ Błąd odświeżania cache:`, error.message);
+    if (error.response) {
+      console.error(`[${new Date().toISOString()}] Status: ${error.response.status}`);
+      console.error(`[${new Date().toISOString()}] Data:`, JSON.stringify(error.response.data, null, 2));
+    }
     cache.error = {
       message: error.message,
       timestamp: new Date().toISOString(),
@@ -313,20 +272,11 @@ function aggregateDashboardData(raw) {
     else statusMap.Offline++;
   });
 
-  // Integracje
-  const vmsStatus = raw.getVMSIntegrationStatus || null;
-  const mqttSettings = raw.getMQTTSettings || null;
-  const kafkaSettings = raw.getKafkaSettings || null;
-  const kinesisSettings = raw.getKinesisSettings || null;
-
   // Licencja
   const license = raw.getLicenseStatus || null;
 
   // Health
   const health = raw.getSystemHealth || null;
-
-  // Feature Flags
-  const featureFlags = raw.getFeatureFlags || [];
 
   return {
     timestamp: new Date().toISOString(),
@@ -337,11 +287,6 @@ function aggregateDashboardData(raw) {
     crowdCountApps,
     health,
     license,
-    vmsStatus,
-    mqttSettings,
-    kafkaSettings,
-    kinesisSettings,
-    featureFlags,
     stats: {
       totalCameras: cameras.length,
       totalApplications: applications.length,
@@ -356,10 +301,6 @@ function aggregateDashboardData(raw) {
       statusMap,
       licenseValid: license ? license.valid : false,
       licenseExpiry: license ? license.expiry_date : null,
-      vmsConnected: vmsStatus ? vmsStatus.connected : false,
-      mqttConnected: mqttSettings ? mqttSettings.connected : false,
-      kafkaConnected: kafkaSettings ? kafkaSettings.connected : false,
-      kinesisConnected: kinesisSettings ? kinesisSettings.connected : false,
       healthStatus: health ? health.status : 'unknown',
     },
   };
@@ -416,7 +357,18 @@ async function startServer() {
   console.log(`📡 Adres API: ${CONFIG.GRAPHQL_URL}`);
   console.log(`========================================`);
 
-  // KROK 1: Pobierz dane przy starcie (SYNCHRONICZNIE - czekamy!)
+  // KROK 1: Najpierw sprawdźmy czy token działa
+  console.log(`⏳ Testowanie połączenia...`);
+  try {
+    const token = await fetchToken();
+    console.log(`✅ Token pobrany pomyślnie (długość: ${token.length} znaków)`);
+    cache.token = token;
+  } catch (error) {
+    console.error(`❌ Nie udało się pobrać tokena:`, error.message);
+    console.log(`⚠️  Serwer wystartuje, ale będzie w trybie awaryjnym.`);
+  }
+
+  // KROK 2: Pobierz dane przy starcie (SYNCHRONICZNIE - czekamy!)
   console.log(`⏳ Pobieranie danych inicjalnych...`);
   const success = await refreshCache();
 
@@ -427,7 +379,7 @@ async function startServer() {
     console.log(`   Serwer wystartuje, ale zwróci błąd 503 do momentu pierwszego udanego odświeżenia.`);
   }
 
-  // KROK 2: Uruchom serwer
+  // KROK 3: Uruchom serwer
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`========================================`);
     console.log(`🚀 Backend cache uruchomiony`);
@@ -438,7 +390,7 @@ async function startServer() {
     console.log(`========================================`);
   });
 
-  // KROK 3: Uruchom cykliczne odświeżanie
+  // KROK 4: Uruchom cykliczne odświeżanie
   setInterval(async () => {
     await refreshCache();
   }, CONFIG.POLL_INTERVAL_MS);
