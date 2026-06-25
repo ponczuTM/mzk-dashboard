@@ -3,7 +3,12 @@
 const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
+const fs = require('fs');
+const path = require('path');
 
+// ============================================================
+// KONFIGURACJA
+// ============================================================
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
@@ -16,37 +21,69 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
-  defaultPreset: process.env.ISARSOFT_PRESET || 'THIS_YEAR',
+  defaultPreset: process.env.ISARSOFT_PRESET || 'THISYEAR',
   defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
-  debugMode: process.env.DEBUG_MODE === 'true',
+  pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000), // domyślnie 5 min
 };
 
-const httpsAgent = new https.Agent({ rejectUnauthorized: CONFIG.verifyTls });
-let tokenCache = { token: null, expiresAt: 0 };
+// ============================================================
+// AGENT HTTPS (z opcjonalnym wyłączeniem weryfikacji certyfikatów)
+// ============================================================
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: CONFIG.verifyTls,
+});
 
-function nowIso() { return new Date().toISOString(); }
-function toArray(v) { return Array.isArray(v) ? v : []; }
-function lower(v) { return String(v || '').toLowerCase(); }
-function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
-function sumBy(arr, fn) { return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0); }
-function safeJson(text) { try { return JSON.parse(text); } catch { return null; } }
-
-function log(level, msg, data) {
-  const entry = { time: nowIso(), level, msg };
-  if (data !== undefined) entry.data = data;
-  console.log(JSON.stringify(entry));
+// ============================================================
+// POMOCNICY
+// ============================================================
+function nowIso() {
+  return new Date().toISOString();
 }
-function debug(msg, data) { if (CONFIG.debugMode) log('DEBUG', msg, data); }
 
-// ─── HTTP ────────────────────────────────────────────────────────────────────
+function toArray(v) {
+  return Array.isArray(v) ? v : [];
+}
 
+function lower(v) {
+  return String(v || '').toLowerCase();
+}
+
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function sumBy(arr, fn) {
+  return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0);
+}
+
+function safeJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function pick(obj, keys) {
+  const result = {};
+  for (const key of keys) {
+    if (obj && key in obj) result[key] = obj[key];
+  }
+  return result;
+}
+
+// ============================================================
+// NISKOPOZIOMOWE ŻĄDANIA HTTP
+// ============================================================
 function requestRaw(urlString, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
     const lib = url.protocol === 'https:' ? https : http;
+
     const req = lib.request(
       {
         protocol: url.protocol,
@@ -61,52 +98,78 @@ function requestRaw(urlString, options = {}, body = null) {
       (res) => {
         let raw = '';
         res.setEncoding('utf8');
-        res.on('data', (chunk) => { raw += chunk; });
-        res.on('end', () => resolve({
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          status: res.statusCode,
-          statusText: res.statusMessage,
-          text: raw,
-          json: () => safeJson(raw),
-        }));
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            text: raw,
+            json: () => safeJson(raw),
+          });
+        });
       }
     );
+
     req.on('timeout', () => req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`)));
     req.on('error', reject);
+
     if (body) req.write(body);
     req.end();
   });
 }
 
-// ─── AUTH ────────────────────────────────────────────────────────────────────
+// ============================================================
+// TOKEN OAuth2 (password grant)
+// ============================================================
+let tokenCache = { token: null, expiresAt: 0 };
 
 async function getToken(force = false) {
   if (!force && tokenCache.token && Date.now() < tokenCache.expiresAt - 15000) {
     return tokenCache.token;
   }
+
   const body = new URLSearchParams({
     grant_type: 'password',
     client_id: CONFIG.clientId,
     username: CONFIG.username,
     password: CONFIG.password,
   }).toString();
+
   const res = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.tokenPath}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } },
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    },
     body
   );
+
   const json = res.json();
   if (!res.ok || !json?.access_token) {
-    throw new Error(`Token request failed: ${res.status} ${res.statusText}`);
+    throw new Error(`Token request failed: ${res.status} ${res.statusText} ${res.text}`);
   }
-  tokenCache = { token: json.access_token, expiresAt: Date.now() + (Number(json.expires_in) || 300) * 1000 };
-  log('INFO', 'Token refreshed');
+
+  tokenCache = {
+    token: json.access_token,
+    expiresAt: Date.now() + (Number(json.expires_in) || 300) * 1000,
+  };
+
   return tokenCache.token;
 }
 
-async function graphql(query, retry = true) {
+// ============================================================
+// WYKONYWANIE ZAPYTAŃ GRAPHQL
+// ============================================================
+async function graphql(query, variables = null, retry = true) {
   const token = await getToken(false);
-  const payload = JSON.stringify({ query });
+  const payload = JSON.stringify({ query, variables });
+
   const res = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.graphqlPath}`,
     {
@@ -120,44 +183,48 @@ async function graphql(query, retry = true) {
     },
     payload
   );
+
   const json = res.json();
+
   if (res.status === 401 && retry) {
-    log('WARN', 'Got 401, refreshing token');
     await getToken(true);
-    return graphql(query, false);
+    return graphql(query, variables, false);
   }
+
   if (!res.ok) {
-    throw new Error(`GraphQL HTTP ${res.status}: ${res.text.slice(0, 800)}`);
+    throw new Error(`GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text}`);
   }
-  if (!json) throw new Error(`GraphQL returned invalid JSON`);
-  if (json.errors && !json.data) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 800)}`);
+
+  if (!json) {
+    throw new Error(`GraphQL returned invalid JSON: ${res.text}`);
   }
+
   if (json.errors) {
-    log('WARN', 'GraphQL partial errors', json.errors.map(e => e.message));
+    throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`);
   }
+
   return json.data || null;
 }
 
-// ─── QUERIES ────────────────────────────────────────────────────────────────
-//
-// Key facts learned from the logs:
-//   1. ObjectFlowAreaLiveData has field "count" (not count_min/avg/max)
-//   2. getApplication requires argument form: application: {uuid: "..."}
-//   3. The big allApplications-with-inline-count_data query is the cleanest
-//      approach — it avoids getApplication entirely.
+// ============================================================
+// ZAPYTANIA GRAPHQL
+// ============================================================
 
-const QUERY_PRESETS = `query { __schema { types { name enumValues { name } } } }`;
+// 1. Introspekcja schemy – pobranie enumów (m.in. TimeRangePreset)
+const QUERY_SCHEMA = `
+query {
+  __schema {
+    types {
+      name
+      kind
+      enumValues { name }
+    }
+  }
+}
+`;
 
-function buildAllAppsQuery(preset, classNames) {
-  const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
-  const rangeArg   = `{time_range_preset: ${preset}}`;
-
-  // NOTE: ObjectFlowAreaLiveData.count_live returns { count } not { count_min, count_avg, count_max }
-  // ObjectFlowArea.count_data      returns { time_bucket, number_of_samples, count_min, count_avg, count_max }
-  // ObjectFlowLine.count_data      returns { time_bucket, number_of_samples, count_in, count_out }
-  // ObjectFlowLine.count_live      returns { count_in, count_out }
-  return `
+// 2. Lista wszystkich aplikacji typu ObjectFlow (metadane + linie i obszary bez danych licznikowych)
+const QUERY_OBJECTFLOW_APPS = `
 query {
   allApplications {
     __typename
@@ -165,79 +232,51 @@ query {
       uuid
       name
       tags
-      status
-      last_online
       created_at
       updated_at
+      status
+      last_online
       camera { uuid name }
-      model  { uuid name }
+      model { uuid name }
       lines {
         uuid
         name
         tags
         coordinates
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-        count_live(object_classes: [${classesArg}]) {
-          count_in
-          count_out
-        }
       }
       areas {
         uuid
         name
         tags
         coordinates
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-        count_live(object_classes: [${classesArg}]) {
-          count
-        }
       }
     }
   }
-}`;
 }
+`;
 
-// Per-app fallback using the confirmed working argument form: application: {uuid: "..."}
-function buildPerAppQuery(appUuid, preset, classNames) {
-  const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
-  const rangeArg   = `{time_range_preset: ${preset}}`;
-  return `
-query {
-  getApplication(application: {uuid: "${appUuid}"}) {
+// 3. Szczegóły jednej aplikacji ObjectFlow z danymi licznikowymi dla linii i obszarów
+//    UWAGA: używamy poprawnej składni getApplication(uuid: $app)
+const QUERY_ONE_APP_COUNTS = `
+query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
+  getApplication(uuid: $app) {
     __typename
     ... on ObjectFlow {
       uuid
       name
+      camera { uuid name }
       lines {
         uuid
         name
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
+        tags
+        coordinates
+        count_data(time_range: $range, object_classes: $classes) {
           time_bucket
           number_of_samples
           count_in
           count_out
         }
-        count_live(object_classes: [${classesArg}]) {
+        count_live(object_classes: $classes) {
           count_in
           count_out
         }
@@ -245,396 +284,759 @@ query {
       areas {
         uuid
         name
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
+        tags
+        coordinates
+        count_data(time_range: $range, object_classes: $classes) {
           time_bucket
           number_of_samples
           count_min
           count_avg
           count_max
         }
-        count_live(object_classes: [${classesArg}]) {
+        count_live(object_classes: $classes) {
           count
         }
       }
     }
   }
-}`;
 }
+`;
 
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
+// 4. Stan zdrowia systemu
+const QUERY_SYSTEM_HEALTH = `
+query {
+  getSystemHealth {
+    cameras_total
+    cameras_online
+    cameras_offline
+    applications_total
+    applications_online
+    applications_offline
+    applications_paused
+    models_total
+    models_online
+    models_offline
+  }
+}
+`;
 
-function getEnumValues(schemaTypes, typeName) {
-  const t = toArray(schemaTypes).find((x) => x.name === typeName);
-  return toArray(t?.enumValues).map((x) => x.name).filter(Boolean);
+// 5. Status licencji
+const QUERY_LICENSE = `
+query {
+  getLicenseStatus {
+    valid
+    expiration_date
+    features
+    limits {
+      cameras
+      applications
+      models
+    }
+  }
+}
+`;
+
+// 6. Flagi funkcjonalne
+const QUERY_FEATURE_FLAGS = `
+query {
+  getFeatureFlags
+}
+`;
+
+// 7. Lista wszystkich kamer
+const QUERY_ALL_CAMERAS = `
+query {
+  allCameras {
+    uuid
+    name
+    status
+    last_online
+  }
+}
+`;
+
+// 8. Ustawienia integracji (przykładowo MQTT)
+const QUERY_MQTT_SETTINGS = `
+query {
+  getMQTTSettings {
+    enabled
+    host
+    port
+    username
+    topic_prefix
+  }
+}
+`;
+
+// 9. Ustawienia Kafki
+const QUERY_KAFKA_SETTINGS = `
+query {
+  getKafkaSettings {
+    enabled
+    bootstrap_servers
+    topic
+    security_protocol
+  }
+}
+`;
+
+// ============================================================
+// FUNKCJE POMOCNICZE DO PRZETWARZANIA DANYCH
+// ============================================================
+
+function getEnumValues(schema, typeName) {
+  const type = toArray(schema?.types).find((x) => x.name === typeName);
+  return toArray(type?.enumValues).map((x) => x.name).filter(Boolean);
 }
 
 function normalizePreset(input, allowed) {
   const fallback = CONFIG.defaultPreset;
-  if (!input) return allowed.includes(fallback) ? fallback : (allowed[0] || 'LAST_1_DAY');
-  const upper = String(input).trim().toUpperCase();
-  if (allowed.includes(upper)) return upper;
-  const collapsed = upper.replace(/_/g, '');
-  const found = allowed.find((x) => x.replace(/_/g, '') === collapsed);
-  if (found) return found;
-  return allowed.includes(fallback) ? fallback : (allowed[0] || 'LAST_1_DAY');
+  if (!input) return allowed.includes(fallback) ? fallback : allowed[0] || 'THISYEAR';
+
+  const raw = String(input).trim().toUpperCase();
+  if (allowed.includes(raw)) return raw;
+
+  const collapsed = raw.replace(/[_\s-]/g, '');
+  const found = allowed.find((x) => x.replace(/[_\s-]/g, '') === collapsed);
+  return found || (allowed.includes(fallback) ? fallback : allowed[0]) || 'THISYEAR';
 }
 
 function parseClasses(input) {
-  if (!input) return CONFIG.defaultClasses;
-  const raw = String(input).split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+  const raw = (input || CONFIG.defaultClasses.join(','))
+    .split(',')
+    .map((x) => x.trim().toUpperCase())
+    .filter(Boolean);
   return raw.length ? raw : CONFIG.defaultClasses;
 }
 
-function summarizeLine(line) {
-  const buckets = toArray(line.count_data);
-  // count_live: array or single object, fields: count_in / count_out
-  let liveIn = 0, liveOut = 0;
-  if (Array.isArray(line.count_live)) {
-    liveIn  = sumBy(line.count_live, (x) => x?.count_in);
-    liveOut = sumBy(line.count_live, (x) => x?.count_out);
-  } else if (line.count_live && typeof line.count_live === 'object') {
-    liveIn  = num(line.count_live.count_in);
-    liveOut = num(line.count_live.count_out);
-  }
+function classInputs(classes) {
+  return classes.map((name) => ({ name }));
+}
+
+function summarizeBuckets(rows) {
+  const raw = toArray(rows);
   return {
-    uuid:        line.uuid,
-    name:        line.name,
-    tags:        toArray(line.tags),
-    coordinates: toArray(line.coordinates),
-    totals: {
-      in:  sumBy(buckets, (x) => x?.count_in),
-      out: sumBy(buckets, (x) => x?.count_out),
-    },
-    live: { in: liveIn, out: liveOut },
-    history: {
-      buckets:      buckets.length,
-      first_bucket: buckets[0]?.time_bucket || null,
-      last_bucket:  buckets[buckets.length - 1]?.time_bucket || null,
-      raw:          buckets,
-    },
+    buckets: raw.length,
+    first_bucket: raw[0]?.time_bucket || null,
+    last_bucket: raw[raw.length - 1]?.time_bucket || null,
+    total_in: sumBy(raw, (x) => x?.count_in),
+    total_out: sumBy(raw, (x) => x?.count_out),
+    raw,
   };
 }
 
-function summarizeArea(area) {
-  const buckets = toArray(area.count_data);
-  // count_live for ObjectFlowArea: { count } (single scalar field)
-  let liveCount = null;
-  if (Array.isArray(area.count_live) && area.count_live.length > 0) {
-    liveCount = num(area.count_live[0]?.count);
-  } else if (area.count_live && typeof area.count_live === 'object') {
-    liveCount = num(area.count_live.count);
-  }
+function summarizeAreaBuckets(rows) {
+  const raw = toArray(rows);
   return {
-    uuid:        area.uuid,
-    name:        area.name,
-    tags:        toArray(area.tags),
-    coordinates: toArray(area.coordinates),
-    live: { count: liveCount },
-    history: {
-      buckets:      buckets.length,
-      first_bucket: buckets[0]?.time_bucket || null,
-      last_bucket:  buckets[buckets.length - 1]?.time_bucket || null,
-      raw:          buckets,
-    },
+    buckets: raw.length,
+    first_bucket: raw[0]?.time_bucket || null,
+    last_bucket: raw[raw.length - 1]?.time_bucket || null,
+    avg_min: raw.length ? sumBy(raw, (x) => x?.count_min) / raw.length : 0,
+    avg_avg: raw.length ? sumBy(raw, (x) => x?.count_avg) / raw.length : 0,
+    avg_max: raw.length ? sumBy(raw, (x) => x?.count_max) / raw.length : 0,
+    total_samples: sumBy(raw, (x) => x?.number_of_samples),
+    raw,
   };
 }
 
-function pickFilters(url) {
+function summarizeLive(rows) {
+  const raw = toArray(rows);
   return {
-    preset: url.searchParams.get('preset') || '',
-    class:  url.searchParams.get('class')  || '',
-    app:    url.searchParams.get('app')    || '',
-    camera: url.searchParams.get('camera') || '',
-    line:   url.searchParams.get('line')   || '',
+    total_in: sumBy(raw, (x) => x?.count_in),
+    total_out: sumBy(raw, (x) => x?.count_out),
+    raw,
   };
 }
 
-// ─── DATA COLLECTION ─────────────────────────────────────────────────────────
+function summarizeAreaLive(rows) {
+  const raw = toArray(rows);
+  return {
+    total_count: sumBy(raw, (x) => x?.count),
+    raw,
+  };
+}
 
-async function collectData(filters = {}) {
-  // 1. Schema — get allowed preset values
-  const schemaData   = await graphql(QUERY_PRESETS);
-  const schemaTypes  = schemaData?.__schema?.types || [];
-  const allowedPresets = getEnumValues(schemaTypes, 'TimeRangePreset');
-  debug('Available presets', allowedPresets);
+// ============================================================
+// GŁÓWNA FUNKCJA ZBIERAJĄCA DANE Z API
+// ============================================================
 
-  const preset  = normalizePreset(filters.preset, allowedPresets);
+async function collectAllData(filters = {}) {
+  // --- 1. Pobierz schemę (dla enumów) ---
+  const schemaData = await graphql(QUERY_SCHEMA);
+  const schema = schemaData?.__schema || null;
+  const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
+
+  const preset = normalizePreset(filters.preset, allowedPresets);
   const classes = parseClasses(filters.class);
-  log('INFO', `Collecting data: preset=${preset} classes=${classes.join(',')}`);
+  const range = { time_range_preset: preset };
+  const classesVar = classInputs(classes);
 
-  // 2. Try single big query (allApplications with count_data inline — no getApplication needed)
-  let appsRaw = [];
-  let strategy = 'unknown';
+  // --- 2. Pobierz listę aplikacji ObjectFlow (metadane) ---
+  const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
+  let apps = toArray(appsData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
 
-  const bigQ = buildAllAppsQuery(preset, classes);
-  debug('Big query', bigQ);
-
-  try {
-    const bigData = await graphql(bigQ);
-    appsRaw = toArray(bigData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
-
-    const totalBuckets = appsRaw.reduce(
-      (acc, app) => acc + toArray(app.lines).reduce((a, l) => a + toArray(l.count_data).length, 0), 0
-    );
-    log('INFO', `Single query OK: ${appsRaw.length} apps, ${totalBuckets} line-buckets total`);
-    strategy = 'single';
-
-    // If we got apps but zero buckets across all of them, something is still off —
-    // fall through to per-app queries.
-    if (appsRaw.length > 0 && totalBuckets === 0) {
-      log('WARN', 'Single query returned 0 buckets across all apps — trying per-app fallback');
-      strategy = 'fallback';
-    }
-  } catch (err) {
-    log('WARN', 'Single query failed', { error: err.message });
-    strategy = 'fallback';
+  // Filtrowanie po nazwie aplikacji / kamerze / linii (opcjonalne)
+  if (filters.app) {
+    apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
+  }
+  if (filters.camera) {
+    apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
   }
 
-  // 3. Per-app fallback
-  if (strategy === 'fallback') {
-    // Re-fetch app list without count_data to get clean metadata
-    const listQ = `
-query {
-  allApplications {
-    __typename
-    ... on ObjectFlow {
-      uuid name tags status last_online created_at updated_at
-      camera { uuid name }
-      model  { uuid name }
-      lines { uuid name tags coordinates }
-      areas { uuid name tags coordinates }
-    }
-  }
-}`;
-    const listData = await graphql(listQ);
-    const appList  = toArray(listData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
-    log('INFO', `Fallback: found ${appList.length} apps, fetching per-app counts`);
+  // --- 3. Dla każdej aplikacji pobierz szczegółowe dane licznikowe ---
+  const detailedApps = [];
+  for (const app of apps) {
+    try {
+      const one = await graphql(QUERY_ONE_APP_COUNTS, {
+        app: app.uuid,
+        range,
+        classes: classesVar,
+      });
 
-    appsRaw = [];
-    for (const meta of appList) {
-      log('INFO', `Per-app query: ${meta.name} (${meta.uuid})`);
-      try {
-        const q   = buildPerAppQuery(meta.uuid, preset, classes);
-        const d   = await graphql(q);
-        const app = d?.getApplication;
-        if (app && app.__typename === 'ObjectFlow') {
-          // Merge coordinates/tags from meta into count response
-          const mergedLines = toArray(app.lines).map((l) => {
-            const m = toArray(meta.lines).find((ml) => ml.uuid === l.uuid) || {};
-            return { ...m, ...l };
-          });
-          const mergedAreas = toArray(app.areas).map((a) => {
-            const m = toArray(meta.areas).find((ma) => ma.uuid === a.uuid) || {};
-            return { ...m, ...a };
-          });
-          appsRaw.push({ ...meta, lines: mergedLines, areas: mergedAreas });
-          const b = mergedLines.reduce((acc, l) => acc + toArray(l.count_data).length, 0);
-          log('INFO', `  -> ${mergedLines.length} lines, ${b} buckets`);
-        } else {
-          log('WARN', `  -> getApplication returned unexpected type for ${meta.name}`);
-          appsRaw.push(meta);
-        }
-      } catch (err) {
-        log('WARN', `  -> Per-app query failed for ${meta.name}: ${err.message}`);
-        appsRaw.push(meta); // include with no counts rather than skip
+      const objectFlow = one?.getApplication;
+      if (!objectFlow || objectFlow.__typename !== 'ObjectFlow') {
+        // Jeśli nie udało się pobrać szczegółów, zapisujemy tylko metadane
+        detailedApps.push({
+          uuid: app.uuid,
+          name: app.name,
+          status: app.status || null,
+          last_online: app.last_online || null,
+          camera: app.camera || null,
+          model: app.model || null,
+          lines: [],
+          areas: [],
+          totals: { in: 0, out: 0 },
+          area_totals: { min: 0, avg: 0, max: 0, count: 0 },
+        });
+        continue;
       }
+
+      // --- 3a. Przetwarzanie linii ---
+      let lines = toArray(objectFlow.lines);
+      if (filters.line) {
+        lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
+      }
+
+      const mappedLines = lines.map((line) => {
+        const data = summarizeBuckets(line.count_data);
+        const live = summarizeLive(line.count_live);
+        return {
+          uuid: line.uuid,
+          name: line.name,
+          tags: toArray(line.tags),
+          coordinates: toArray(line.coordinates),
+          totals: { in: data.total_in, out: data.total_out },
+          live,
+          data,
+        };
+      });
+
+      // --- 3b. Przetwarzanie obszarów ---
+      let areas = toArray(objectFlow.areas);
+      if (filters.area) {
+        areas = areas.filter((a) => lower(a.name).includes(lower(filters.area)));
+      }
+
+      const mappedAreas = areas.map((area) => {
+        const data = summarizeAreaBuckets(area.count_data);
+        const live = summarizeAreaLive(area.count_live);
+        return {
+          uuid: area.uuid,
+          name: area.name,
+          tags: toArray(area.tags),
+          coordinates: toArray(area.coordinates),
+          totals: {
+            min: data.avg_min,
+            avg: data.avg_avg,
+            max: data.avg_max,
+            samples: data.total_samples,
+          },
+          live,
+          data,
+        };
+      });
+
+      // --- 3c. Agregacja sumaryczna ---
+      const totalIn = sumBy(mappedLines, (x) => x.totals.in);
+      const totalOut = sumBy(mappedLines, (x) => x.totals.out);
+
+      const areaMin = mappedAreas.length ? sumBy(mappedAreas, (x) => x.totals.min) / mappedAreas.length : 0;
+      const areaAvg = mappedAreas.length ? sumBy(mappedAreas, (x) => x.totals.avg) / mappedAreas.length : 0;
+      const areaMax = mappedAreas.length ? sumBy(mappedAreas, (x) => x.totals.max) / mappedAreas.length : 0;
+      const areaCount = sumBy(mappedAreas, (x) => x.live.total_count);
+
+      detailedApps.push({
+        uuid: app.uuid,
+        name: app.name,
+        tags: toArray(app.tags),
+        status: app.status || null,
+        last_online: app.last_online || null,
+        camera: app.camera || null,
+        model: app.model || null,
+        created_at: app.created_at || null,
+        updated_at: app.updated_at || null,
+        lines: mappedLines,
+        areas: mappedAreas,
+        totals: { in: totalIn, out: totalOut },
+        area_totals: { min: areaMin, avg: areaAvg, max: areaMax, count: areaCount },
+      });
+    } catch (err) {
+      console.error(`[collectAllData] Błąd dla aplikacji ${app.uuid} (${app.name}):`, err.message);
+      // W przypadku błędu zapisujemy aplikację z metadanymi, ale bez danych licznikowych
+      detailedApps.push({
+        uuid: app.uuid,
+        name: app.name,
+        status: app.status || null,
+        last_online: app.last_online || null,
+        camera: app.camera || null,
+        model: app.model || null,
+        lines: [],
+        areas: [],
+        totals: { in: 0, out: 0 },
+        area_totals: { min: 0, avg: 0, max: 0, count: 0 },
+        _error: err.message,
+      });
     }
   }
 
-  // 4. Apply filters
-  let apps = appsRaw;
-  if (filters.app)    apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
-  if (filters.camera) apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
+  // --- 4. Pobierz stan zdrowia systemu ---
+  let systemHealth = null;
+  try {
+    const healthData = await graphql(QUERY_SYSTEM_HEALTH);
+    systemHealth = healthData?.getSystemHealth || null;
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania SystemHealth:', err.message);
+  }
 
-  // 5. Structure output
-  const detailedApps = apps.map((app) => {
-    let lines = toArray(app.lines).map(summarizeLine);
-    let areas = toArray(app.areas).map(summarizeArea);
+  // --- 5. Pobierz status licencji ---
+  let licenseStatus = null;
+  try {
+    const licenseData = await graphql(QUERY_LICENSE);
+    licenseStatus = licenseData?.getLicenseStatus || null;
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania licencji:', err.message);
+  }
 
-    if (filters.line) lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
+  // --- 6. Pobierz flagi funkcjonalne ---
+  let featureFlags = null;
+  try {
+    const flagsData = await graphql(QUERY_FEATURE_FLAGS);
+    featureFlags = flagsData?.getFeatureFlags || null;
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania FeatureFlags:', err.message);
+  }
 
-    const totalIn  = sumBy(lines, (l) => l.totals.in);
-    const totalOut = sumBy(lines, (l) => l.totals.out);
+  // --- 7. Pobierz listę kamer ---
+  let allCameras = [];
+  try {
+    const camerasData = await graphql(QUERY_ALL_CAMERAS);
+    allCameras = toArray(camerasData?.allCameras);
+  } catch (err) {
+    console.error('[collectAllData] Błąd pobierania kamer:', err.message);
+  }
 
-    return {
-      uuid:        app.uuid,
-      name:        app.name,
-      tags:        toArray(app.tags),
-      status:      app.status      || null,
-      last_online: app.last_online || null,
-      created_at:  app.created_at  || null,
-      updated_at:  app.updated_at  || null,
-      camera:      app.camera || null,
-      model:       app.model  || null,
-      totals:      { in: totalIn, out: totalOut },
-      lines,
-      areas,
-    };
-  });
+  // --- 8. Pobierz ustawienia MQTT ---
+  let mqttSettings = null;
+  try {
+    const mqttData = await graphql(QUERY_MQTT_SETTINGS);
+    mqttSettings = mqttData?.getMQTTSettings || null;
+  } catch (err) {
+    // opcjonalnie – nie wszystkie systemy mają MQTT
+  }
 
+  // --- 9. Pobierz ustawienia Kafki ---
+  let kafkaSettings = null;
+  try {
+    const kafkaData = await graphql(QUERY_KAFKA_SETTINGS);
+    kafkaSettings = kafkaData?.getKafkaSettings || null;
+  } catch (err) {
+    // opcjonalnie
+  }
+
+  // --- 10. Zbuduj wynik ---
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
       application_uuid: app.uuid,
       application_name: app.name,
-      camera_name:      app.camera?.name || null,
-      line_uuid:        line.uuid,
-      line_name:        line.name,
-      total_in:         line.totals.in,
-      total_out:        line.totals.out,
-      live_in:          line.live.in,
-      live_out:         line.live.out,
-      buckets:          line.history.buckets,
-      first_bucket:     line.history.first_bucket,
-      last_bucket:      line.history.last_bucket,
+      camera_name: app.camera?.name || null,
+      line_uuid: line.uuid,
+      line_name: line.name,
+      total_in: line.totals.in,
+      total_out: line.totals.out,
+      live_in: line.live.total_in,
+      live_out: line.live.total_out,
+      buckets: line.data.buckets,
+      first_bucket: line.data.first_bucket,
+      last_bucket: line.data.last_bucket,
     }))
   );
+
   lineRows.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
 
+  const areaRows = detailedApps.flatMap((app) =>
+    app.areas.map((area) => ({
+      application_uuid: app.uuid,
+      application_name: app.name,
+      camera_name: app.camera?.name || null,
+      area_uuid: area.uuid,
+      area_name: area.name,
+      avg_min: area.totals.min,
+      avg_avg: area.totals.avg,
+      avg_max: area.totals.max,
+      live_count: area.live.total_count,
+      buckets: area.data.buckets,
+    }))
+  );
+
+  areaRows.sort((a, b) => b.avg_avg - a.avg_avg);
+
   return {
-    ok:           true,
+    ok: true,
     generated_at: nowIso(),
-    strategy,
     filters: {
       preset,
-      class:  classes.join(','),
-      app:    filters.app    || '',
+      class: classes.join(','),
+      app: filters.app || '',
       camera: filters.camera || '',
-      line:   filters.line   || '',
+      line: filters.line || '',
+      area: filters.area || '',
     },
     available_presets: allowedPresets,
     totals: {
       objectflow_apps: detailedApps.length,
-      total_in:        sumBy(detailedApps, (x) => x.totals.in),
-      total_out:       sumBy(detailedApps, (x) => x.totals.out),
+      selected_in: sumBy(detailedApps, (x) => x.totals.in),
+      selected_out: sumBy(detailedApps, (x) => x.totals.out),
+      selected_area_avg: detailedApps.length ? sumBy(detailedApps, (x) => x.area_totals.avg) / detailedApps.length : 0,
+      selected_area_count: sumBy(detailedApps, (x) => x.area_totals.count),
     },
     applications: detailedApps,
-    lines:        lineRows,
+    lines: lineRows,
+    areas: areaRows,
+    system_health: systemHealth,
+    license: licenseStatus,
+    feature_flags: featureFlags,
+    cameras: allCameras,
+    integrations: {
+      mqtt: mqttSettings,
+      kafka: kafkaSettings,
+    },
   };
 }
 
-// ─── HTTP SERVER ─────────────────────────────────────────────────────────────
+// ============================================================
+// BUFOR PAMIĘCIOWY (cache)
+// ============================================================
+let cachedData = null;
+let lastSuccess = null;
+let isPolling = false;
+let pollError = null;
 
-function cors(res) {
-  res.setHeader('Access-Control-Allow-Origin',  '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+async function refreshCache(filters = {}) {
+  if (isPolling) return;
+  isPolling = true;
+  try {
+    console.log('[refreshCache] Rozpoczynam odświeżanie danych...');
+    const data = await collectAllData(filters);
+    cachedData = data;
+    lastSuccess = nowIso();
+    pollError = null;
+    console.log(`[refreshCache] Odświeżono dane. Aplikacji: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}`);
+  } catch (err) {
+    pollError = err.message;
+    console.error('[refreshCache] Błąd odświeżania:', err.message);
+  } finally {
+    isPolling = false;
+  }
 }
 
+function getCachedData() {
+  if (!cachedData) {
+    return {
+      ok: false,
+      error: 'Brak danych w pamięci podręcznej – pierwsze odświeżenie w toku...',
+      generated_at: nowIso(),
+      last_success: lastSuccess,
+      poll_error: pollError,
+    };
+  }
+  return {
+    ...cachedData,
+    cached_at: nowIso(),
+    last_success: lastSuccess,
+    poll_error: pollError,
+    is_polling: isPolling,
+  };
+}
+
+// ============================================================
+// SERWER HTTP (Express-style)
+// ============================================================
+
 function sendJson(res, status, payload) {
-  cors(res);
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(status, {
-    'Content-Type':   'application/json; charset=utf-8',
+    'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(body);
 }
 
+function sendOptions(res) {
+  res.writeHead(204, {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400',
+  });
+  res.end();
+}
+
+function parseFilters(url) {
+  return {
+    preset: url.searchParams.get('preset') || '',
+    class: url.searchParams.get('class') || '',
+    app: url.searchParams.get('app') || '',
+    camera: url.searchParams.get('camera') || '',
+    line: url.searchParams.get('line') || '',
+    area: url.searchParams.get('area') || '',
+  };
+}
+
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return; }
+  const url = new URL(req.url, `http://${req.headers.host}`);
 
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  log('INFO', `${req.method} ${url.pathname}`);
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    return sendOptions(res);
+  }
 
-  if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
-
-  if (url.pathname === '/') {
+  // --- GET / ---
+  if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
       ok: true,
+      service: 'Isarsoft Dashboard Cache',
+      version: '2.0.0',
       endpoints: [
-        'GET /health',
-        'GET /debug/presets              — list preset values from live schema',
-        'GET /summary?preset=THIS_YEAR&class=PERSON,HEAD',
-        'GET /data?preset=THIS_YEAR&class=PERSON,HEAD',
-        'GET /debug/lines?preset=THIS_YEAR&class=PERSON,HEAD',
+        { path: '/', description: 'Ta strona informacyjna' },
+        { path: '/health', description: 'Status serwera i cache' },
+        { path: '/data', description: 'Pełne dane dashboardu (z cache)' },
+        { path: '/refresh', description: 'Wymusza odświeżenie cache (GET)' },
+        { path: '/data/raw', description: 'Surowe dane z API (bez cache – ryzyko!)' },
+        { path: '/debug/lines', description: 'Tylko linie (debug)' },
+        { path: '/debug/areas', description: 'Tylko obszary (debug)' },
       ],
+      filters: {
+        preset: 'THISYEAR, LAST_1_HOUR, LAST_12_HOUR, ...',
+        class: 'PERSON, HEAD, ...',
+        app: 'filtruje po nazwie aplikacji',
+        camera: 'filtruje po nazwie kamery',
+        line: 'filtruje po nazwie linii',
+        area: 'filtruje po nazwie obszaru',
+      },
+      cached: {
+        available: !!cachedData,
+        last_success: lastSuccess,
+        is_polling: isPolling,
+        poll_error: pollError,
+      },
       time: nowIso(),
     });
   }
 
-  if (url.pathname === '/health') {
-    return sendJson(res, 200, { ok: true, time: nowIso() });
+  // --- GET /health ---
+  if (req.method === 'GET' && url.pathname === '/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      service: 'Isarsoft Dashboard Cache',
+      version: '2.0.0',
+      cached: {
+        available: !!cachedData,
+        last_success: lastSuccess,
+        is_polling: isPolling,
+        poll_error: pollError,
+      },
+      token: {
+        valid: !!tokenCache.token,
+        expires_at: tokenCache.expiresAt ? new Date(tokenCache.expiresAt).toISOString() : null,
+      },
+      time: nowIso(),
+    });
   }
 
-  if (url.pathname === '/debug/presets') {
+  // --- GET /refresh ---
+  if (req.method === 'GET' && url.pathname === '/refresh') {
+    const filters = parseFilters(url);
+    await refreshCache(filters);
+    return sendJson(res, 200, {
+      ok: true,
+      message: 'Cache odświeżony',
+      filters,
+      cached: {
+        available: !!cachedData,
+        last_success: lastSuccess,
+        is_polling: isPolling,
+        poll_error: pollError,
+      },
+      time: nowIso(),
+    });
+  }
+
+  // --- GET /data --- (dane z cache, z możliwością filtrowania)
+  if (req.method === 'GET' && url.pathname === '/data') {
+    const data = getCachedData();
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
+
+    // Filtrowanie po stronie serwera (opcjonalne)
+    const filters = parseFilters(url);
+    let result = { ...data };
+
+    if (filters.preset || filters.class || filters.app || filters.camera || filters.line || filters.area) {
+      // Jeśli podano filtry, przekazujemy je do klienta jako informację
+      result = {
+        ...result,
+        applied_filters: filters,
+        // Nie filtrujemy tutaj danych – zrobimy to po stronie klienta lub w przyszłości
+        // ale możemy dodać informację o filtrach
+      };
+    }
+
+    return sendJson(res, 200, result);
+  }
+
+  // --- GET /data/raw --- (pomija cache – ryzykowne, ale przydatne do debugowania)
+  if (req.method === 'GET' && url.pathname === '/data/raw') {
     try {
-      const d = await graphql(QUERY_PRESETS);
-      const presets = getEnumValues(d?.__schema?.types || [], 'TimeRangePreset');
-      return sendJson(res, 200, { ok: true, presets });
+      const filters = parseFilters(url);
+      const rawData = await collectAllData(filters);
+      return sendJson(res, 200, {
+        ok: true,
+        source: 'direct_api',
+        ...rawData,
+      });
     } catch (err) {
       return sendJson(res, 500, { ok: false, error: err.message });
     }
   }
 
-  const handler = async () => {
-    const data = await collectData(pickFilters(url));
-
-    if (url.pathname === '/summary') {
-      return sendJson(res, 200, {
-        ok:                true,
-        generated_at:      data.generated_at,
-        strategy:          data.strategy,
-        filters:           data.filters,
-        available_presets: data.available_presets,
-        totals:            data.totals,
-        applications: data.applications.map((a) => ({
-          uuid:        a.uuid,
-          name:        a.name,
-          status:      a.status,
-          last_online: a.last_online,
-          camera:      a.camera,
-          totals:      a.totals,
-          lines: a.lines.map((l) => ({
-            uuid:    l.uuid,
-            name:    l.name,
-            totals:  l.totals,
-            live:    l.live,
-            buckets: l.history.buckets,
-          })),
-        })),
-      });
+  // --- GET /debug/lines --- (podgląd linii z cache)
+  if (req.method === 'GET' && url.pathname === '/debug/lines') {
+    const data = getCachedData();
+    if (!data.ok) {
+      return sendJson(res, 503, data);
     }
-
-    if (url.pathname === '/data') {
-      return sendJson(res, 200, data);
-    }
-
-    if (url.pathname === '/debug/lines') {
-      return sendJson(res, 200, {
-        ok:           true,
-        generated_at: data.generated_at,
-        strategy:     data.strategy,
-        filters:      data.filters,
-        totals:       data.totals,
-        lines:        data.lines,
-      });
-    }
-
-    return sendJson(res, 404, { ok: false, error: 'Not found' });
-  };
-
-  if (['/summary', '/data', '/debug/lines'].includes(url.pathname)) {
-    try {
-      await handler();
-    } catch (err) {
-      log('ERROR', `${url.pathname} failed`, { error: err.message });
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-    return;
+    return sendJson(res, 200, {
+      ok: true,
+      generated_at: data.generated_at,
+      filters: data.filters,
+      totals: data.totals,
+      lines: data.lines || [],
+      line_count: (data.lines || []).length,
+    });
   }
 
+  // --- GET /debug/areas --- (podgląd obszarów z cache)
+  if (req.method === 'GET' && url.pathname === '/debug/areas') {
+    const data = getCachedData();
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      generated_at: data.generated_at,
+      filters: data.filters,
+      totals: data.totals,
+      areas: data.areas || [],
+      area_count: (data.areas || []).length,
+    });
+  }
+
+  // --- GET /debug/apps --- (podgląd aplikacji z cache)
+  if (req.method === 'GET' && url.pathname === '/debug/apps') {
+    const data = getCachedData();
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      generated_at: data.generated_at,
+      filters: data.filters,
+      totals: data.totals,
+      applications: data.applications?.map((app) => ({
+        uuid: app.uuid,
+        name: app.name,
+        status: app.status,
+        camera: app.camera?.name || null,
+        lines_count: app.lines.length,
+        areas_count: app.areas.length,
+        total_in: app.totals.in,
+        total_out: app.totals.out,
+      })) || [],
+    });
+  }
+
+  // --- 404 ---
   return sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
-server.listen(CONFIG.port, () => {
-  log('INFO', 'Server started', {
-    port:           CONFIG.port,
-    baseUrl:        CONFIG.baseUrl,
-    defaultPreset:  CONFIG.defaultPreset,
+// ============================================================
+// URUCHOMIENIE SERWERA + PIERWSZE ODSWIEŻENIE + CRON
+// ============================================================
+
+server.listen(CONFIG.port, async () => {
+  console.log(JSON.stringify({
+    ok: true,
+    message: 'Isarsoft Dashboard Cache Server started',
+    version: '2.0.0',
+    port: CONFIG.port,
+    baseUrl: CONFIG.baseUrl,
+    graphqlPath: CONFIG.graphqlPath,
+    defaultPreset: CONFIG.defaultPreset,
     defaultClasses: CONFIG.defaultClasses,
-    tip:            'Set DEBUG_MODE=true for verbose query logging',
+    pollIntervalMs: CONFIG.pollIntervalMs,
+    time: nowIso(),
+  }, null, 2));
+
+  // Pierwsze odświeżenie (synchroniczne, aby mieć dane od razu)
+  try {
+    console.log('[startup] Pierwsze odświeżenie cache...');
+    await refreshCache();
+    console.log('[startup] Cache zainicjalizowany.');
+  } catch (err) {
+    console.error('[startup] Błąd inicjalizacji cache:', err.message);
+  }
+
+  // Cykliczne odświeżanie
+  setInterval(async () => {
+    try {
+      await refreshCache();
+    } catch (err) {
+      console.error('[interval] Błąd odświeżania:', err.message);
+    }
+  }, CONFIG.pollIntervalMs);
+
+  console.log(`[startup] Serwer nasłuchuje na porcie ${CONFIG.port}, odświeżanie co ${CONFIG.pollIntervalMs / 1000}s`);
+});
+
+// ============================================================
+// OBSŁUGA ZAMKNIĘCIA
+// ============================================================
+process.on('SIGINT', () => {
+  console.log('[shutdown] Otrzymano SIGINT, zamykam serwer...');
+  server.close(() => {
+    console.log('[shutdown] Serwer zamknięty.');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('[shutdown] Otrzymano SIGTERM, zamykam serwer...');
+  server.close(() => {
+    console.log('[shutdown] Serwer zamknięty.');
+    process.exit(0);
   });
 });
