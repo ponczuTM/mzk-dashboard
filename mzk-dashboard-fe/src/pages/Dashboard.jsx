@@ -1,5 +1,4 @@
-// Dashboard.jsx — Frontend React z ciemnym motywem i wizualizacjami
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   BarChart,
   Bar,
@@ -7,509 +6,687 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
+  LineChart,
+  Line,
+  Legend,
   PieChart,
   Pie,
   Cell,
-  LineChart,
-  Line,
 } from 'recharts';
-import {
-  Camera,
-  Activity,
-  WifiOff,
-  CheckCircle,
-  XCircle,
-  AlertCircle,
-  Clock,
-  Server,
-  Database,
-  RefreshCw,
-  Zap,
-  Layers,
-  BarChart3,
-  ShieldCheck,
-  Network,
-  HardDrive,
-  Gauge,
-} from 'lucide-react';
 import styles from './Dashboard.module.css';
 
-// ===== KONFIGURACJA =====
+// ─── KONFIGURACJA ──────────────────────────────────────────────────────────────
 const BACKEND_IP = '192.168.77.212';
 const BACKEND_PORT = 3001;
-const BACKEND_URL = `http://${BACKEND_IP}:${BACKEND_PORT}/api/dashboard-data`;
+const BACKEND_URL = `http://${BACKEND_IP}:${BACKEND_PORT}`;
+const FRONTEND_POLL_MS = 30_000; // 30 sekund
 
-// Interwał odświeżania frontendu (co 30 sekund)
-const FRONTEND_POLL_INTERVAL_MS = 30000;
-
-// Kolory dla wykresów
-const COLORS = {
-  Online: '#22c55e',
-  Offline: '#ef4444',
-  Initializing: '#f59e0b',
-  Paused: '#8b5cf6',
-  Pending: '#3b82f6',
-  default: '#64748b',
+// ─── STAŁE UI ─────────────────────────────────────────────────────────────────
+const STATUS_COLORS = {
+  Online: '#22d3a0',
+  Offline: '#f43f5e',
+  Paused: '#f59e0b',
+  Initializing: '#818cf8',
+  Pending: '#64748b',
+  Unknown: '#475569',
 };
 
-const STATUS_COLORS = ['#22c55e', '#ef4444', '#f59e0b', '#8b5cf6', '#3b82f6'];
+const PIE_PALETTE = ['#22d3a0', '#f43f5e', '#f59e0b', '#818cf8', '#64748b'];
 
-// ===== KOMPONENT GŁÓWNY =====
-const Dashboard = () => {
-  const [dashboardData, setDashboardData] = useState(null);
+// ─── UTILITY ──────────────────────────────────────────────────────────────────
+function formatAge(isoString) {
+  if (!isoString) return '–';
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec}s temu`;
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min temu`;
+  return `${Math.floor(diffMin / 60)}h temu`;
+}
+
+function formatDateTime(isoString) {
+  if (!isoString) return '–';
+  try {
+    return new Date(isoString).toLocaleString('pl-PL', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return isoString;
+  }
+}
+
+function formatTimeBucket(bucket) {
+  if (!bucket) return '';
+  try {
+    return new Date(bucket).toLocaleTimeString('pl-PL', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return bucket;
+  }
+}
+
+// ─── KOMPONENTY POMOCNICZE ────────────────────────────────────────────────────
+
+function StatusBadge({ status }) {
+  const color = STATUS_COLORS[status] || STATUS_COLORS.Unknown;
+  return (
+    <span className={styles.badge} style={{ '--badge-color': color }}>
+      <span className={styles.badgeDot} style={{ background: color }} />
+      {status || 'Unknown'}
+    </span>
+  );
+}
+
+function KPICard({ label, value, sub, accent, alert }) {
+  return (
+    <div className={`${styles.kpiCard} ${alert ? styles.kpiAlert : ''}`}>
+      <div className={styles.kpiValue} style={accent ? { color: accent } : {}}>
+        {value ?? '–'}
+      </div>
+      <div className={styles.kpiLabel}>{label}</div>
+      {sub && <div className={styles.kpiSub}>{sub}</div>}
+    </div>
+  );
+}
+
+function IntegrationPill({ name, connected, error }) {
+  return (
+    <div
+      className={styles.integrationPill}
+      title={error || (connected ? 'Połączono' : 'Brak połączenia')}
+    >
+      <span
+        className={styles.integrationDot}
+        style={{ background: connected ? '#22d3a0' : '#f43f5e' }}
+      />
+      {name}
+    </div>
+  );
+}
+
+function SectionHeader({ title, count }) {
+  return (
+    <div className={styles.sectionHeader}>
+      <h2 className={styles.sectionTitle}>{title}</h2>
+      {count !== undefined && (
+        <span className={styles.sectionCount}>{count}</span>
+      )}
+    </div>
+  );
+}
+
+// ─── CUSTOM TOOLTIP DLA WYKRESÓW ─────────────────────────────────────────────
+function FlowTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className={styles.chartTooltip}>
+      <div className={styles.tooltipLabel}>{formatTimeBucket(label)}</div>
+      {payload.map((p) => (
+        <div key={p.name} className={styles.tooltipRow} style={{ color: p.color }}>
+          <span>{p.name === 'count_in' ? 'Wejścia' : 'Wyjścia'}</span>
+          <span className={styles.tooltipVal}>{p.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── GŁÓWNY KOMPONENT ─────────────────────────────────────────────────────────
+export default function Dashboard() {
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [lastFetch, setLastFetch] = useState(null);
-  const [isStale, setIsStale] = useState(false);
-  const [timeSinceUpdate, setTimeSinceUpdate] = useState(0);
-
+  const [connError, setConnError] = useState(null);
+  const [selectedApp, setSelectedApp] = useState(null);
   const intervalRef = useRef(null);
 
-  // ===== Pobieranie danych z backendu =====
   const fetchData = useCallback(async () => {
     try {
-      const response = await fetch(BACKEND_URL, {
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const result = await response.json();
-
-      if (!result.success || !result.data) {
-        throw new Error(result.error || 'Nieprawidłowa odpowiedź z backendu');
-      }
-
-      setDashboardData(result.data);
-      setLastFetch(new Date());
-      setIsStale(result.isStale || false);
-      setError(null);
+      const res = await fetch(`${BACKEND_URL}/api/dashboard-data`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setData(json);
+      setConnError(null);
     } catch (err) {
-      console.error('[Dashboard] Błąd pobierania:', err);
-      setError(err.message);
-      // Nie resetujemy danych – zostawiamy ostatnie poprawne
+      setConnError(err.message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // ===== Efekt: pierwsze pobranie i interwał =====
   useEffect(() => {
     fetchData();
-
-    intervalRef.current = setInterval(() => {
-      fetchData();
-    }, FRONTEND_POLL_INTERVAL_MS);
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
+    intervalRef.current = setInterval(fetchData, FRONTEND_POLL_MS);
+    return () => clearInterval(intervalRef.current);
   }, [fetchData]);
 
-  // ===== Licznik czasu od ostatniej aktualizacji =====
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (lastFetch) {
-        const diff = Math.floor((Date.now() - lastFetch.getTime()) / 1000);
-        setTimeSinceUpdate(diff);
-      }
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [lastFetch]);
-
-  // ===== Formatowanie czasu =====
-  const formatTimeAgo = (seconds) => {
-    if (seconds < 60) return `${seconds}s`;
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}m ${secs}s`;
-  };
-
-  const formatDate = (isoString) => {
-    if (!isoString) return '—';
-    try {
-      const d = new Date(isoString);
-      return d.toLocaleString('pl-PL', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-    } catch {
-      return isoString;
-    }
-  };
-
-  // ===== Stan ładowania =====
-  if (loading && !dashboardData) {
+  // ─── LOADING / ERROR STATES ────────────────────────────────────────────────
+  if (loading) {
     return (
-      <div className={styles.loadingContainer}>
-        <RefreshCw className={styles.loadingSpinner} size={48} />
-        <p>Ładowanie danych z backendu...</p>
-        <small>Backend: {BACKEND_URL}</small>
+      <div className={styles.centeredState}>
+        <div className={styles.spinner} />
+        <p>Łączenie z backendem…</p>
       </div>
     );
   }
 
-  // ===== Brak danych =====
-  if (!dashboardData) {
-    return (
-      <div className={styles.errorContainer}>
-        <AlertCircle size={48} className={styles.errorIcon} />
-        <h2>Brak danych</h2>
-        <p>Nie udało się pobrać danych z backendu.</p>
-        <p className={styles.errorDetail}>{error || 'Sprawdź połączenie z backendem.'}</p>
-        <button onClick={fetchData} className={styles.retryButton}>
-          <RefreshCw size={18} /> Spróbuj ponownie
-        </button>
-      </div>
-    );
-  }
+  const { summary, health, license, mqtt, vms, applications, timeline, _cache } =
+    data || {};
 
-  const { data } = dashboardData;
-  const { stats, applications, cameras, objectFlowApps, health, license, vmsStatus, mqttSettings, featureFlags } = data;
+  // Aplikacje
+  const objectFlowApps = (applications || []).filter(
+    (a) => a.__typename === 'ObjectFlow'
+  );
+  const objectCountApps = (applications || []).filter(
+    (a) => a.__typename === 'ObjectCount'
+  );
+  const crowdCountApps = (applications || []).filter(
+    (a) => a.__typename === 'CrowdCount'
+  );
 
-  // ===== Przygotowanie danych dla wykresów =====
-  const statusChartData = Object.entries(stats.statusMap || {}).map(([name, value]) => ({
-    name,
-    value,
-    color: STATUS_COLORS[Object.keys(stats.statusMap || {}).indexOf(name)] || '#64748b',
-  }));
+  // Dane do wykresu kołowego (statusy)
+  const statusPieData = Object.entries(summary?.statusBreakdown || {}).map(
+    ([name, value]) => ({ name, value })
+  );
 
-  const appStatusData = statusChartData.filter((d) => d.value > 0);
+  // Szczegóły wybranej aplikacji (historia linii)
+  const selectedAppData = selectedApp
+    ? applications?.find((a) => a.uuid === selectedApp)
+    : null;
 
-  // Przygotowanie danych dla aplikacji ObjectFlow do tabeli
-  const appTableData = (objectFlowApps || []).map((app) => ({
-    uuid: app.uuid,
-    name: app.name || 'Bez nazwy',
-    camera: app.camera?.name || '—',
-    status: app.status || 'Offline',
-    lastOnline: app.last_online,
-    linesCount: (app.lines || []).length,
-    areasCount: (app.areas || []).length,
-    totalZones: (app.lines || []).length + (app.areas || []).length,
-    hasAlarms: (app.alarms || []).some((a) => a.enabled),
-  }));
+  const selectedHistoryLines = selectedAppData?._history?.lines || [];
 
-  // Live counts dla podglądu
-  const liveCounts = (objectFlowApps || []).slice(0, 6).map((app) => {
-    const totalIn = (app.lines || []).reduce((sum, line) => sum + (line.count_live?.count_in || 0), 0);
-    const totalOut = (app.lines || []).reduce((sum, line) => sum + (line.count_live?.count_out || 0), 0);
-    return {
-      name: app.name || '—',
-      in: totalIn,
-      out: totalOut,
-      status: app.status,
-    };
-  });
+  // Dane wykresu dla wybranej aplikacji (pierwsza linia)
+  const detailChartData =
+    selectedHistoryLines[0]?.count_data?.map((b) => ({
+      ...b,
+      label: formatTimeBucket(b.time_bucket),
+    })) || [];
 
-  // ===== RENDER =====
+  // ─── RENDER ───────────────────────────────────────────────────────────────
   return (
-    <div className={styles.dashboard}>
-      {/* === HEADER === */}
+    <div className={styles.root}>
+      {/* ── HEADER ── */}
       <header className={styles.header}>
         <div className={styles.headerLeft}>
-          <div className={styles.logo}>
-            <ShieldCheck size={28} className={styles.logoIcon} />
-            <span className={styles.logoText}>Perception Monitor</span>
-          </div>
-          <div className={styles.headerStatus}>
-            <span className={`${styles.statusDot} ${error ? styles.statusDotError : styles.statusDotOk}`} />
-            <span className={styles.statusLabel}>
-              {error ? 'Błąd połączenia' : 'Połączono z backendem'}
-            </span>
+          <div className={styles.logoMark}>
+            <span className={styles.logoIcon}>▶</span>
+            <span className={styles.logoText}>Isarsoft</span>
+            <span className={styles.logoSub}>Analytics Dashboard</span>
           </div>
         </div>
+
+        <div className={styles.headerCenter}>
+          {connError ? (
+            <span className={styles.connBad}>
+              ⚠ Brak połączenia z backendem ({connError})
+            </span>
+          ) : (
+            <span className={styles.connGood}>● Backend online</span>
+          )}
+        </div>
+
         <div className={styles.headerRight}>
           <div className={styles.updateInfo}>
-            <Clock size={16} className={styles.updateIcon} />
-            <span>
-              Ostatnia aktualizacja:{' '}
-              <strong>{lastFetch ? formatDate(lastFetch.toISOString()) : '—'}</strong>
+            <span className={styles.updateLabel}>Ostatnia aktualizacja</span>
+            <span className={styles.updateTime}>
+              {formatAge(_cache?.lastSuccess)}
             </span>
-            <span className={styles.updateAge}>
-              ({formatTimeAgo(timeSinceUpdate)} temu)
-            </span>
-            {isStale && (
-              <span className={styles.staleBadge}>
-                <AlertCircle size={14} /> DANE NIEAKTUALNE
-              </span>
-            )}
           </div>
-          <button onClick={fetchData} className={styles.refreshButton} title="Odśwież ręcznie">
-            <RefreshCw size={18} className={loading ? styles.spinning : ''} />
-          </button>
+          <div className={styles.updateInfo}>
+            <span className={styles.updateLabel}>Dane z API</span>
+            <span className={styles.updateTime}>
+              {formatDateTime(_cache?.lastSuccess)}
+            </span>
+          </div>
         </div>
       </header>
 
-      {/* === KPI METRICS === */}
-      <section className={styles.kpiGrid}>
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: 'rgba(59, 130, 246, 0.15)' }}>
-            <Camera size={24} color="#3b82f6" />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue}>{stats.totalCameras || 0}</span>
-            <span className={styles.kpiLabel}>Kamery</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span className={styles.kpiSubOk}>{stats.healthStatus === 'ok' ? '✓' : '⚠'} System: {stats.healthStatus || '—'}</span>
-          </div>
-        </div>
+      <main className={styles.main}>
+        {/* ── KPI GRID ── */}
+        <section className={styles.kpiGrid}>
+          <KPICard
+            label="Kamery"
+            value={summary?.totalCameras}
+            sub={`${health?.cameras_online ?? '?'} online`}
+          />
+          <KPICard
+            label="Aplikacje"
+            value={summary?.totalApplications}
+            sub={`ObjectFlow: ${summary?.objectFlowCount}`}
+          />
+          <KPICard
+            label="Aplikacje Offline"
+            value={health?.applications_offline ?? summary?.statusBreakdown?.Offline ?? 0}
+            alert={(health?.applications_offline || 0) > 0}
+            accent={
+              (health?.applications_offline || 0) > 0 ? '#f43f5e' : '#22d3a0'
+            }
+          />
+          <KPICard
+            label="Wejścia (12h)"
+            value={summary?.totalCountIn12h?.toLocaleString('pl-PL')}
+            accent="#22d3a0"
+          />
+          <KPICard
+            label="Wyjścia (12h)"
+            value={summary?.totalCountOut12h?.toLocaleString('pl-PL')}
+            accent="#818cf8"
+          />
+          <KPICard
+            label="Live — Wejścia"
+            value={summary?.liveTotalIn}
+            sub="ostatnia chwila"
+            accent="#22d3a0"
+          />
+          <KPICard
+            label="Licencja"
+            value={license?.valid ? 'Aktywna' : 'Nieaktywna'}
+            sub={license?.expires_at ? `Wygasa: ${formatDateTime(license.expires_at)}` : undefined}
+            accent={license?.valid ? '#22d3a0' : '#f43f5e'}
+            alert={!license?.valid}
+          />
+          <KPICard
+            label="MQTT"
+            value={mqtt?.enabled ? 'Aktywny' : 'Wyłączony'}
+            sub={mqtt?.host ? `${mqtt.host}:${mqtt.port}` : undefined}
+            accent={mqtt?.enabled ? '#22d3a0' : '#64748b'}
+          />
+        </section>
 
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: 'rgba(34, 197, 94, 0.15)' }}>
-            <Activity size={24} color="#22c55e" />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue}>{stats.activeApps || 0}</span>
-            <span className={styles.kpiLabel}>Aktywne aplikacje</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span className={styles.kpiSubOk}>Online</span>
-            <span className={styles.kpiSubDivider}>·</span>
-            <span className={styles.kpiSubOff}>Offline: {stats.offlineApps || 0}</span>
-          </div>
-        </div>
+        {/* ── VMS INTEGRACJE ── */}
+        {vms && (
+          <section className={styles.card}>
+            <SectionHeader title="Integracje VMS" />
+            <div className={styles.integrationsRow}>
+              {vms.cayuga && (
+                <IntegrationPill
+                  name="Cayuga"
+                  connected={vms.cayuga.connected}
+                  error={vms.cayuga.error}
+                />
+              )}
+              {vms.milestone && (
+                <IntegrationPill
+                  name="Milestone"
+                  connected={vms.milestone.connected}
+                  error={vms.milestone.error}
+                />
+              )}
+              {vms.genetec && (
+                <IntegrationPill
+                  name="Genetec"
+                  connected={vms.genetec.connected}
+                  error={vms.genetec.error}
+                />
+              )}
+            </div>
+          </section>
+        )}
 
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)' }}>
-            <AlertCircle size={24} color="#ef4444" />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue}>{stats.offlineApps || 0}</span>
-            <span className={styles.kpiLabel}>Aplikacje offline</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span className={styles.kpiSubOff}>Wymagają uwagi</span>
-          </div>
-        </div>
-
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: stats.licenseValid ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)' }}>
-            <ShieldCheck size={24} color={stats.licenseValid ? '#22c55e' : '#ef4444'} />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue} style={{ color: stats.licenseValid ? '#22c55e' : '#ef4444' }}>
-              {stats.licenseValid ? '✔' : '✖'}
-            </span>
-            <span className={styles.kpiLabel}>Licencja</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span className={stats.licenseValid ? styles.kpiSubOk : styles.kpiSubOff}>
-              {stats.licenseValid ? 'Ważna' : 'NIEWAŻNA'}
-            </span>
-            {stats.licenseExpiry && (
-              <>
-                <span className={styles.kpiSubDivider}>·</span>
-                <span>do {formatDate(stats.licenseExpiry)}</span>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: 'rgba(139, 92, 246, 0.15)' }}>
-            <Network size={24} color="#8b5cf6" />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue}>{stats.vmsConnected ? '✔' : '✖'}</span>
-            <span className={styles.kpiLabel}>Integracja VMS</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span className={stats.vmsConnected ? styles.kpiSubOk : styles.kpiSubOff}>
-              {stats.vmsConnected ? 'Połączono' : 'Rozłączono'}
-            </span>
-            {vmsStatus?.vms_type && (
-              <>
-                <span className={styles.kpiSubDivider}>·</span>
-                <span>{vmsStatus.vms_type}</span>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className={styles.kpiCard}>
-          <div className={styles.kpiIcon} style={{ backgroundColor: 'rgba(251, 191, 36, 0.15)' }}>
-            <Zap size={24} color="#fbbf24" />
-          </div>
-          <div className={styles.kpiContent}>
-            <span className={styles.kpiValue}>{stats.totalObjectFlowApps || 0}</span>
-            <span className={styles.kpiLabel}>Aplikacje ObjectFlow</span>
-          </div>
-          <div className={styles.kpiSub}>
-            <span>Linie + strefy: </span>
-            <span className={styles.kpiSubOk}>
-              {(objectFlowApps || []).reduce((sum, a) => sum + (a.lines?.length || 0) + (a.areas?.length || 0), 0)}
-            </span>
-          </div>
-        </div>
-      </section>
-
-      {/* === WYKRESY === */}
-      <section className={styles.chartsRow}>
-        <div className={styles.chartCard}>
-          <div className={styles.chartHeader}>
-            <BarChart3 size={18} />
-            <span>Status aplikacji</span>
-          </div>
-          <div className={styles.chartBody}>
-            {appStatusData.length > 0 ? (
+        {/* ── WYKRESY ROW ── */}
+        <div className={styles.chartsRow}>
+          {/* Wykres czasowy przejść (12h) */}
+          <div className={`${styles.card} ${styles.chartCard}`}>
+            <SectionHeader title="Przepływ obiektów — ostatnie 12h" />
+            {timeline && timeline.length > 0 ? (
               <ResponsiveContainer width="100%" height={220}>
-                <PieChart>
-                  <Pie
-                    data={appStatusData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={50}
-                    outerRadius={80}
-                    paddingAngle={2}
-                    dataKey="value"
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                    labelLine={false}
-                  >
-                    {appStatusData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color || COLORS.default} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    formatter={(value, name) => [`${value} aplikacji`, name]}
-                    contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }}
+                <LineChart data={timeline} margin={{ top: 8, right: 16, bottom: 0, left: -16 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                  <XAxis
+                    dataKey="time_bucket"
+                    tickFormatter={formatTimeBucket}
+                    tick={{ fill: '#64748b', fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval="preserveStartEnd"
                   />
-                  <Legend />
-                </PieChart>
+                  <YAxis
+                    tick={{ fill: '#64748b', fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <Tooltip content={<FlowTooltip />} />
+                  <Legend
+                    formatter={(v) => (v === 'count_in' ? 'Wejścia' : 'Wyjścia')}
+                    wrapperStyle={{ fontSize: 12, color: '#94a3b8' }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="count_in"
+                    stroke="#22d3a0"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4, fill: '#22d3a0' }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="count_out"
+                    stroke="#818cf8"
+                    strokeWidth={2}
+                    dot={false}
+                    activeDot={{ r: 4, fill: '#818cf8' }}
+                  />
+                </LineChart>
               </ResponsiveContainer>
             ) : (
-              <div className={styles.chartEmpty}>Brak danych o statusach</div>
+              <div className={styles.emptyChart}>Brak danych historycznych</div>
             )}
           </div>
-        </div>
 
-        <div className={styles.chartCard}>
-          <div className={styles.chartHeader}>
-            <Gauge size={18} />
-            <span>Live: Wejścia / Wyjścia</span>
-          </div>
-          <div className={styles.chartBody}>
-            {liveCounts.length > 0 ? (
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={liveCounts} layout="vertical" margin={{ left: 80, right: 20, top: 10, bottom: 10 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                  <XAxis type="number" stroke="#94a3b8" />
-                  <YAxis type="category" dataKey="name" stroke="#94a3b8" tick={{ fontSize: 11 }} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1e293b', borderColor: '#334155', color: '#f1f5f9' }}
-                  />
-                  <Legend />
-                  <Bar dataKey="in" name="Wejścia" fill="#3b82f6" stackId="a" />
-                  <Bar dataKey="out" name="Wyjścia" fill="#f59e0b" stackId="a" />
-                </BarChart>
-              </ResponsiveContainer>
+          {/* Wykres kołowy statusów */}
+          <div className={`${styles.card} ${styles.chartCardSm}`}>
+            <SectionHeader title="Statusy aplikacji" />
+            {statusPieData.length > 0 ? (
+              <div className={styles.pieWrapper}>
+                <ResponsiveContainer width="100%" height={180}>
+                  <PieChart>
+                    <Pie
+                      data={statusPieData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={50}
+                      outerRadius={78}
+                      paddingAngle={3}
+                      dataKey="value"
+                    >
+                      {statusPieData.map((entry, i) => (
+                        <Cell
+                          key={entry.name}
+                          fill={STATUS_COLORS[entry.name] || PIE_PALETTE[i % PIE_PALETTE.length]}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      formatter={(v, n) => [v, n]}
+                      contentStyle={{
+                        background: '#0f172a',
+                        border: '1px solid #1e293b',
+                        borderRadius: 8,
+                        fontSize: 12,
+                      }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className={styles.pieLegend}>
+                  {statusPieData.map((entry, i) => (
+                    <div key={entry.name} className={styles.pieLegendItem}>
+                      <span
+                        className={styles.pieLegendDot}
+                        style={{
+                          background:
+                            STATUS_COLORS[entry.name] || PIE_PALETTE[i % PIE_PALETTE.length],
+                        }}
+                      />
+                      <span className={styles.pieLegendName}>{entry.name}</span>
+                      <span className={styles.pieLegendVal}>{entry.value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : (
-              <div className={styles.chartEmpty}>Brak danych live</div>
+              <div className={styles.emptyChart}>Brak danych</div>
             )}
           </div>
         </div>
-      </section>
 
-      {/* === TABELA APLIKACJI === */}
-      <section className={styles.tableSection}>
-        <div className={styles.tableHeader}>
-          <div className={styles.tableTitle}>
-            <Layers size={18} />
-            <span>Aplikacje ObjectFlow</span>
-            <span className={styles.tableBadge}>{objectFlowApps?.length || 0}</span>
-          </div>
-          <div className={styles.tableFilters}>
-            <span className={styles.filterPill}>
-              <span className={styles.filterDot} style={{ backgroundColor: '#22c55e' }} /> Online
-            </span>
-            <span className={styles.filterPill}>
-              <span className={styles.filterDot} style={{ backgroundColor: '#ef4444' }} /> Offline
-            </span>
-          </div>
-        </div>
-
-        <div className={styles.tableWrapper}>
-          <table className={styles.appTable}>
-            <thead>
-              <tr>
-                <th>Nazwa aplikacji</th>
-                <th>Kamera</th>
-                <th>Status</th>
-                <th>Ostatnio online</th>
-                <th>Linie</th>
-                <th>Strefy</th>
-                <th>Alarmy</th>
-              </tr>
-            </thead>
-            <tbody>
-              {appTableData.length > 0 ? (
-                appTableData.map((app) => (
-                  <tr key={app.uuid} className={app.status === 'Offline' ? styles.rowOffline : ''}>
-                    <td className={styles.appName}>{app.name}</td>
-                    <td>{app.camera}</td>
-                    <td>
-                      <span className={`${styles.statusBadge} ${styles[`statusBadge_${app.status.toLowerCase()}`]}`}>
-                        <span className={styles.statusBadgeDot} />
-                        {app.status}
-                      </span>
-                    </td>
-                    <td>{app.lastOnline ? formatDate(app.lastOnline) : '—'}</td>
-                    <td>{app.linesCount}</td>
-                    <td>{app.areasCount}</td>
-                    <td>
-                      {app.hasAlarms ? (
-                        <span className={styles.alarmActive}>🔔</span>
-                      ) : (
-                        <span className={styles.alarmInactive}>—</span>
-                      )}
+        {/* ── TABELA APLIKACJI ── */}
+        <section className={styles.card}>
+          <SectionHeader title="Aplikacje ObjectFlow" count={objectFlowApps.length} />
+          <div className={styles.tableWrapper}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>Nazwa</th>
+                  <th>Kamera</th>
+                  <th>Status</th>
+                  <th>Ostatnio online</th>
+                  <th>Linie</th>
+                  <th>Strefy</th>
+                  <th>Live IN/OUT</th>
+                  <th>Alarmy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {objectFlowApps.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className={styles.tableEmpty}>
+                      Brak aplikacji ObjectFlow
                     </td>
                   </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan="7" className={styles.tableEmpty}>Brak aplikacji ObjectFlow</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+                )}
+                {objectFlowApps.map((app) => {
+                  const liveIn = app.lines
+                    ?.reduce((s, l) => s + (l.count_live?.count_in || 0), 0) ?? 0;
+                  const liveOut = app.lines
+                    ?.reduce((s, l) => s + (l.count_live?.count_out || 0), 0) ?? 0;
 
-      {/* === STOPKA Z FEATURE FLAGS === */}
-      <footer className={styles.footer}>
-        <div className={styles.footerLeft}>
-          <span>Perception Monitor v1.0</span>
-          <span className={styles.footerDivider}>·</span>
-          <span>Backend: {BACKEND_IP}:{BACKEND_PORT}</span>
-          <span className={styles.footerDivider}>·</span>
-          <span>Dane z: {formatDate(data.timestamp)}</span>
-        </div>
-        <div className={styles.footerRight}>
-          {featureFlags && featureFlags.length > 0 && (
-            <>
-              <span className={styles.featureLabel}>Feature Flags:</span>
-              {featureFlags.slice(0, 5).map((flag, idx) => (
-                <span key={idx} className={`${styles.featurePill} ${flag.enabled ? styles.featureOn : styles.featureOff}`}>
-                  {flag.enabled ? '✔' : '✖'} {flag.name}
-                </span>
-              ))}
-              {featureFlags.length > 5 && <span className={styles.featureMore}>+{featureFlags.length - 5}</span>}
-            </>
+                  return (
+                    <tr
+                      key={app.uuid}
+                      className={`${styles.tableRow} ${selectedApp === app.uuid ? styles.tableRowSelected : ''}`}
+                      onClick={() =>
+                        setSelectedApp(selectedApp === app.uuid ? null : app.uuid)
+                      }
+                    >
+                      <td className={styles.tdName}>{app.name}</td>
+                      <td className={styles.tdCamera}>{app.camera?.name || '–'}</td>
+                      <td>
+                        <StatusBadge status={app.status} />
+                      </td>
+                      <td className={styles.tdMuted}>
+                        {formatDateTime(app.last_online)}
+                      </td>
+                      <td className={styles.tdCenter}>{app.lines?.length ?? 0}</td>
+                      <td className={styles.tdCenter}>{app.areas?.length ?? 0}</td>
+                      <td className={styles.tdFlow}>
+                        <span className={styles.flowIn}>↑{liveIn}</span>
+                        <span className={styles.flowOut}>↓{liveOut}</span>
+                      </td>
+                      <td className={styles.tdCenter}>{app.alarms?.length ?? 0}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Szczegóły wybranej aplikacji */}
+          {selectedAppData && (
+            <div className={styles.appDetail}>
+              <div className={styles.appDetailHeader}>
+                <h3 className={styles.appDetailTitle}>
+                  Szczegóły: {selectedAppData.name}
+                </h3>
+                <button
+                  className={styles.closeBtn}
+                  onClick={() => setSelectedApp(null)}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className={styles.appDetailGrid}>
+                <div>
+                  <div className={styles.detailSection}>
+                    <div className={styles.detailSectionTitle}>Linie pomiarowe</div>
+                    {selectedAppData.lines?.length ? (
+                      selectedAppData.lines.map((line) => (
+                        <div key={line.uuid} className={styles.lineRow}>
+                          <span className={styles.lineName}>{line.name}</span>
+                          <span className={styles.flowIn}>
+                            ↑{line.count_live?.count_in ?? 0}
+                          </span>
+                          <span className={styles.flowOut}>
+                            ↓{line.count_live?.count_out ?? 0}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <span className={styles.tdMuted}>Brak linii</span>
+                    )}
+                  </div>
+
+                  <div className={styles.detailSection}>
+                    <div className={styles.detailSectionTitle}>Strefy</div>
+                    {selectedAppData.areas?.length ? (
+                      selectedAppData.areas.map((area) => (
+                        <div key={area.uuid} className={styles.lineRow}>
+                          <span className={styles.lineName}>{area.name}</span>
+                          <span className={styles.tdMuted}>
+                            avg:{' '}
+                            {area.count_live?.count_avg?.toFixed(1) ?? '–'}
+                          </span>
+                        </div>
+                      ))
+                    ) : (
+                      <span className={styles.tdMuted}>Brak stref</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Historia pierwszej linii */}
+                <div>
+                  {detailChartData.length > 0 ? (
+                    <>
+                      <div className={styles.detailSectionTitle}>
+                        Historia linii „{selectedHistoryLines[0]?.name}" (12h)
+                      </div>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <BarChart
+                          data={detailChartData}
+                          margin={{ top: 4, right: 8, bottom: 0, left: -20 }}
+                          barSize={6}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                          <XAxis
+                            dataKey="label"
+                            tick={{ fill: '#64748b', fontSize: 10 }}
+                            tickLine={false}
+                            axisLine={false}
+                            interval="preserveStartEnd"
+                          />
+                          <YAxis
+                            tick={{ fill: '#64748b', fontSize: 10 }}
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <Tooltip content={<FlowTooltip />} />
+                          <Bar dataKey="count_in" fill="#22d3a0" radius={[2, 2, 0, 0]} />
+                          <Bar dataKey="count_out" fill="#818cf8" radius={[2, 2, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </>
+                  ) : (
+                    <div className={styles.emptyChart}>Brak danych historycznych linii</div>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
-        </div>
+        </section>
+
+        {/* ── OBJECT COUNT / CROWD COUNT ── */}
+        {(objectCountApps.length > 0 || crowdCountApps.length > 0) && (
+          <div className={styles.chartsRow}>
+            {objectCountApps.length > 0 && (
+              <section className={`${styles.card} ${styles.flexGrow}`}>
+                <SectionHeader
+                  title="Aplikacje ObjectCount"
+                  count={objectCountApps.length}
+                />
+                <div className={styles.tableWrapper}>
+                  <table className={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>Nazwa</th>
+                        <th>Kamera</th>
+                        <th>Status</th>
+                        <th>Ostatnio online</th>
+                        <th>Strefy</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {objectCountApps.map((app) => (
+                        <tr key={app.uuid} className={styles.tableRow}>
+                          <td className={styles.tdName}>{app.name}</td>
+                          <td className={styles.tdCamera}>{app.camera?.name || '–'}</td>
+                          <td>
+                            <StatusBadge status={app.status} />
+                          </td>
+                          <td className={styles.tdMuted}>
+                            {formatDateTime(app.last_online)}
+                          </td>
+                          <td className={styles.tdCenter}>{app.areas?.length ?? 0}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
+            {crowdCountApps.length > 0 && (
+              <section className={`${styles.card} ${styles.flexGrow}`}>
+                <SectionHeader
+                  title="Aplikacje CrowdCount"
+                  count={crowdCountApps.length}
+                />
+                <div className={styles.tableWrapper}>
+                  <table className={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>Nazwa</th>
+                        <th>Kamera</th>
+                        <th>Status</th>
+                        <th>Bieżąca liczba</th>
+                        <th>Ostatnio online</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {crowdCountApps.map((app) => (
+                        <tr key={app.uuid} className={styles.tableRow}>
+                          <td className={styles.tdName}>{app.name}</td>
+                          <td className={styles.tdCamera}>{app.camera?.name || '–'}</td>
+                          <td>
+                            <StatusBadge status={app.status} />
+                          </td>
+                          <td className={styles.tdCenter}>
+                            <span className={styles.crowdNum}>
+                              {app.current_count ?? '–'}
+                            </span>
+                          </td>
+                          <td className={styles.tdMuted}>
+                            {formatDateTime(app.last_online)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* ── FOOTER ── */}
+      <footer className={styles.footer}>
+        <span>Isarsoft Analytics Dashboard</span>
+        <span>
+          Backend: {BACKEND_URL} · Odświeżanie co {FRONTEND_POLL_MS / 1000}s
+        </span>
+        {_cache?.lastError && (
+          <span className={styles.footerError}>
+            Ostatni błąd API: {_cache.lastError}
+          </span>
+        )}
       </footer>
     </div>
   );
-};
-
-export default Dashboard;
+}
