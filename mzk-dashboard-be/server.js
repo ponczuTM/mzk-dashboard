@@ -16,14 +16,12 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
-  classNames: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
+  defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean),
-  presetShort: process.env.ISARSOFT_PRESET_SHORT || 'LAST_1_HOUR',
-  presetMedium: process.env.ISARSOFT_PRESET_MEDIUM || 'LAST_12_HOUR',
-  presetLong: process.env.ISARSOFT_PRESET_LONG || 'THIS_YEAR',
-  healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST_1_DAY',
+  defaultPreset: process.env.ISARSOFT_PRESET || 'THISYEAR',
+  healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST1DAY',
 };
 
 const httpsAgent = new https.Agent({
@@ -62,7 +60,7 @@ function sumBy(arr, fn) {
 }
 
 function avg(arr) {
-  const vals = toArray(arr).map(num).filter((x) => Number.isFinite(x));
+  const vals = toArray(arr).map(num).filter(Number.isFinite);
   return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
 }
 
@@ -192,7 +190,6 @@ query {
       name
       kind
       enumValues { name }
-      fields { name }
     }
   }
 }
@@ -213,6 +210,32 @@ query($featureflags: [FeatureFlags!]!) {
 }
 `;
 
+const QUERY_SYSTEM_HEALTH = `
+query($healthRange: TimeRangeInput!) {
+  getSystemHealth {
+    perception_camera_count
+    perception_camera_initializing_count
+    perception_camera_offline_count
+    perception_camera_online_count
+    perception_camera_paused_count
+    perception_camera_pending_count
+    perception_app_count
+    perception_app_initializing_count
+    perception_app_offline_count
+    perception_app_online_count
+    perception_app_paused_count
+    perception_app_pending_count
+
+    perception_camera_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_camera_online_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_camera_offline_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_app_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_app_online_counts_history(time_range: $healthRange) { points { timestamp value } }
+    perception_app_offline_counts_history(time_range: $healthRange) { points { timestamp value } }
+  }
+}
+`;
+
 const QUERY_MISC = `
 query {
   getMachineFingerprint
@@ -227,81 +250,15 @@ query {
   getGenetecSettings { __typename }
   getMilestoneSettings { __typename }
   getObjectFlowSettings { __typename }
-  checkCayugaConnection
-  checkMilestoneConnection
-  checkGenetecConnection
-  allCayugaCameras { __typename }
-  allMilestoneCameras { __typename }
-  allGenetecCameras { __typename }
-}
-`;
-
-const QUERY_SYSTEM_HEALTH = `
-query($healthRange: TimeRangeInput!) {
-  getSystemHealth {
-    perception_camera_count
-    perception_camera_initializing_count
-    perception_camera_offline_count
-    perception_camera_online_count
-    perception_camera_paused_count
-    perception_camera_pending_count
-
-    perception_app_count
-    perception_app_initializing_count
-    perception_app_offline_count
-    perception_app_online_count
-    perception_app_paused_count
-    perception_app_pending_count
-
-    perception_camera_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_camera_initializing_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_camera_offline_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_camera_online_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_camera_paused_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_camera_pending_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-
-    perception_app_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_app_initializing_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_app_offline_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_app_online_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_app_paused_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-    perception_app_pending_counts_history(time_range: $healthRange) {
-      points { timestamp value }
-    }
-  }
 }
 `;
 
 const QUERY_APPLICATIONS = `
 query(
+  $selectedClasses: [ObjectClassInput!]!,
   $personOnly: [ObjectClassInput!]!,
   $headOnly: [ObjectClassInput!]!,
-  $allClasses: [ObjectClassInput!]!,
-  $presetShort: TimeRangePreset!,
-  $presetMedium: TimeRangePreset!,
-  $presetLong: TimeRangePreset!
+  $timeRange: TimeRangeInput!
 ) {
   allApplications {
     __typename
@@ -334,6 +291,11 @@ query(
         created_at
         updated_at
 
+        live_selected: count_live(object_classes: $selectedClasses) {
+          count_in
+          count_out
+        }
+
         live_person: count_live(object_classes: $personOnly) {
           count_in
           count_out
@@ -344,13 +306,18 @@ query(
           count_out
         }
 
-        live_all: count_live(object_classes: $allClasses) {
+        selected_data: count_data(
+          time_range: $timeRange
+          object_classes: $selectedClasses
+        ) {
+          time_bucket
+          number_of_samples
           count_in
           count_out
         }
 
-        short_person: count_data(
-          time_range: { time_range_preset: $presetShort }
+        person_data: count_data(
+          time_range: $timeRange
           object_classes: $personOnly
         ) {
           time_bucket
@@ -359,79 +326,9 @@ query(
           count_out
         }
 
-        short_head: count_data(
-          time_range: { time_range_preset: $presetShort }
+        head_data: count_data(
+          time_range: $timeRange
           object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        short_all: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $allClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_person: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_head: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_all: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $allClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $allClasses
         ) {
           time_bucket
           number_of_samples
@@ -448,109 +345,13 @@ query(
         created_at
         updated_at
 
-        live_person: count_live(object_classes: $personOnly) {
+        live_selected: count_live(object_classes: $selectedClasses) {
           count
         }
 
-        live_head: count_live(object_classes: $headOnly) {
-          count
-        }
-
-        live_all: count_live(object_classes: $allClasses) {
-          count
-        }
-
-        short_person: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_head: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_all: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $allClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_person: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_head: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_all: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $allClasses
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $allClasses
+        selected_data: count_data(
+          time_range: $timeRange
+          object_classes: $selectedClasses
         ) {
           time_bucket
           number_of_samples
@@ -569,7 +370,6 @@ query(
       updated_at
       status
       last_online
-      default_model_settings
 
       camera {
         uuid
@@ -586,46 +386,14 @@ query(
         name
         tags
         coordinates
-        created_at
-        updated_at
 
-        live_person: count_live(object_classes: $personOnly) {
+        live_selected: count_live(object_classes: $selectedClasses) {
           count
         }
 
-        live_head: count_live(object_classes: $headOnly) {
-          count
-        }
-
-        live_all: count_live(object_classes: $allClasses) {
-          count
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $allClasses
+        selected_data: count_data(
+          time_range: $timeRange
+          object_classes: $selectedClasses
         ) {
           time_bucket
           number_of_samples
@@ -660,7 +428,7 @@ query(
         name
       }
 
-      long_data: count_data(time_range: { time_range_preset: $presetLong }) {
+      selected_data: count_data(time_range: $timeRange) {
         time_bucket
         number_of_samples
         count_min
@@ -672,9 +440,34 @@ query(
 }
 `;
 
-function featureFlagNamesFromSchema(schemaTypes) {
-  const enumType = toArray(schemaTypes).find((x) => x.name === 'FeatureFlags');
-  return toArray(enumType?.enumValues).map((x) => x.name).filter(Boolean);
+function getEnumValues(schema, typeName) {
+  const type = toArray(schema?.types).find((x) => x.name === typeName);
+  return toArray(type?.enumValues).map((x) => x.name).filter(Boolean);
+}
+
+function normalizePreset(input, allowed) {
+  const fallback = CONFIG.defaultPreset;
+  if (!input) return allowed.includes(fallback) ? fallback : allowed[0];
+
+  const raw = String(input).trim().toUpperCase();
+  if (allowed.includes(raw)) return raw;
+
+  const collapsed = raw.replace(/[_\s-]/g, '');
+  const found = allowed.find((x) => x.replace(/[_\s-]/g, '') === collapsed);
+  return found || (allowed.includes(fallback) ? fallback : allowed[0]);
+}
+
+function parseClasses(input) {
+  const list = (input || CONFIG.defaultClasses.join(','))
+    .split(',')
+    .map((x) => x.trim().toUpperCase())
+    .filter(Boolean);
+
+  return list.length ? list : CONFIG.defaultClasses;
+}
+
+function featureFlagNamesFromSchema(schema) {
+  return getEnumValues(schema, 'FeatureFlags');
 }
 
 function summarizeLineSeries(rows) {
@@ -722,21 +515,9 @@ function summarizeAreaLive(rows) {
 }
 
 function mapObjectFlowLine(line) {
-  const livePerson = summarizeLineLive(line.live_person);
-  const liveHead = summarizeLineLive(line.live_head);
-  const liveAll = summarizeLineLive(line.live_all);
-
-  const shortPerson = summarizeLineSeries(line.short_person);
-  const shortHead = summarizeLineSeries(line.short_head);
-  const shortAll = summarizeLineSeries(line.short_all);
-
-  const mediumPerson = summarizeLineSeries(line.medium_person);
-  const mediumHead = summarizeLineSeries(line.medium_head);
-  const mediumAll = summarizeLineSeries(line.medium_all);
-
-  const longPerson = summarizeLineSeries(line.long_person);
-  const longHead = summarizeLineSeries(line.long_head);
-  const longAll = summarizeLineSeries(line.long_all);
+  const selected = summarizeLineSeries(line.selected_data);
+  const person = summarizeLineSeries(line.person_data);
+  const head = summarizeLineSeries(line.head_data);
 
   return {
     uuid: line.uuid,
@@ -745,44 +526,25 @@ function mapObjectFlowLine(line) {
     coordinates: toArray(line.coordinates),
     created_at: line.created_at || null,
     updated_at: line.updated_at || null,
-
-    classes: {
-      PERSON: {
-        live: livePerson,
-        short: shortPerson,
-        medium: mediumPerson,
-        this_year: longPerson,
-      },
-      HEAD: {
-        live: liveHead,
-        short: shortHead,
-        medium: mediumHead,
-        this_year: longHead,
-      },
-      ALL: {
-        live: liveAll,
-        short: shortAll,
-        medium: mediumAll,
-        this_year: longAll,
-      },
+    selected: {
+      live: summarizeLineLive(line.live_selected),
+      data: selected,
     },
-
-    totals_this_year: {
-      person_in: longPerson.total_in,
-      person_out: longPerson.total_out,
-      head_in: longHead.total_in,
-      head_out: longHead.total_out,
-      all_in: longAll.total_in,
-      all_out: longAll.total_out,
+    person: {
+      live: summarizeLineLive(line.live_person),
+      data: person,
     },
-
-    totals_live: {
-      person_in: livePerson.total_in,
-      person_out: livePerson.total_out,
-      head_in: liveHead.total_in,
-      head_out: liveHead.total_out,
-      all_in: liveAll.total_in,
-      all_out: liveAll.total_out,
+    head: {
+      live: summarizeLineLive(line.live_head),
+      data: head,
+    },
+    totals: {
+      selected_in: selected.total_in,
+      selected_out: selected.total_out,
+      person_in: person.total_in,
+      person_out: person.total_out,
+      head_in: head.total_in,
+      head_out: head.total_out,
     },
   };
 }
@@ -795,25 +557,9 @@ function mapObjectFlowArea(area) {
     coordinates: toArray(area.coordinates),
     created_at: area.created_at || null,
     updated_at: area.updated_at || null,
-    classes: {
-      PERSON: {
-        live: summarizeAreaLive(area.live_person),
-        short: summarizeAreaSeries(area.short_person),
-        medium: summarizeAreaSeries(area.medium_person),
-        this_year: summarizeAreaSeries(area.long_person),
-      },
-      HEAD: {
-        live: summarizeAreaLive(area.live_head),
-        short: summarizeAreaSeries(area.short_head),
-        medium: summarizeAreaSeries(area.medium_head),
-        this_year: summarizeAreaSeries(area.long_head),
-      },
-      ALL: {
-        live: summarizeAreaLive(area.live_all),
-        short: summarizeAreaSeries(area.short_all),
-        medium: summarizeAreaSeries(area.medium_all),
-        this_year: summarizeAreaSeries(area.long_all),
-      },
+    selected: {
+      live: summarizeAreaLive(area.live_selected),
+      data: summarizeAreaSeries(area.selected_data),
     },
   };
 }
@@ -837,23 +583,13 @@ function mapApplication(app) {
       model: app.model || null,
       lines,
       areas,
-
-      totals_this_year: {
-        person_in: sumBy(lines, (x) => x.totals_this_year.person_in),
-        person_out: sumBy(lines, (x) => x.totals_this_year.person_out),
-        head_in: sumBy(lines, (x) => x.totals_this_year.head_in),
-        head_out: sumBy(lines, (x) => x.totals_this_year.head_out),
-        all_in: sumBy(lines, (x) => x.totals_this_year.all_in),
-        all_out: sumBy(lines, (x) => x.totals_this_year.all_out),
-      },
-
-      totals_live: {
-        person_in: sumBy(lines, (x) => x.totals_live.person_in),
-        person_out: sumBy(lines, (x) => x.totals_live.person_out),
-        head_in: sumBy(lines, (x) => x.totals_live.head_in),
-        head_out: sumBy(lines, (x) => x.totals_live.head_out),
-        all_in: sumBy(lines, (x) => x.totals_live.all_in),
-        all_out: sumBy(lines, (x) => x.totals_live.all_out),
+      totals: {
+        selected_in: sumBy(lines, (x) => x.totals.selected_in),
+        selected_out: sumBy(lines, (x) => x.totals.selected_out),
+        person_in: sumBy(lines, (x) => x.totals.person_in),
+        person_out: sumBy(lines, (x) => x.totals.person_out),
+        head_in: sumBy(lines, (x) => x.totals.head_in),
+        head_out: sumBy(lines, (x) => x.totals.head_out),
       },
     };
   }
@@ -868,31 +604,9 @@ function mapApplication(app) {
       updated_at: app.updated_at || null,
       status: app.status || null,
       last_online: app.last_online || null,
-      default_model_settings: app.default_model_settings,
       camera: app.camera || null,
       model: app.model || null,
-      areas: toArray(app.areas).map((area) => ({
-        uuid: area.uuid,
-        name: area.name,
-        tags: toArray(area.tags),
-        coordinates: toArray(area.coordinates),
-        created_at: area.created_at || null,
-        updated_at: area.updated_at || null,
-        classes: {
-          PERSON: {
-            live: summarizeAreaLive(area.live_person),
-            this_year: summarizeAreaSeries(area.long_person),
-          },
-          HEAD: {
-            live: summarizeAreaLive(area.live_head),
-            this_year: summarizeAreaSeries(area.long_head),
-          },
-          ALL: {
-            live: summarizeAreaLive(area.live_all),
-            this_year: summarizeAreaSeries(area.long_all),
-          },
-        },
-      })),
+      areas: toArray(app.areas).map(mapObjectFlowArea),
     };
   }
 
@@ -915,7 +629,7 @@ function mapApplication(app) {
       },
       camera: app.camera || null,
       model: app.model || null,
-      this_year: summarizeAreaSeries(app.long_data),
+      selected: summarizeAreaSeries(app.selected_data),
     };
   }
 
@@ -923,50 +637,39 @@ function mapApplication(app) {
 }
 
 function filterApplications(applications, filters = {}) {
-  const type = filters.type ? lower(filters.type) : null;
-  const line = filters.line ? lower(filters.line) : null;
-  const appName = filters.app ? lower(filters.app) : null;
-  const camera = filters.camera ? lower(filters.camera) : null;
-
   let result = toArray(applications);
 
-  if (type) {
-    result = result.filter((a) => lower(a.type) === type);
+  if (filters.type) {
+    result = result.filter((a) => lower(a.type) === lower(filters.type));
   }
 
-  if (appName) {
-    result = result.filter((a) => lower(a.name).includes(appName));
+  if (filters.app) {
+    result = result.filter((a) => lower(a.name).includes(lower(filters.app)));
   }
 
-  if (camera) {
-    result = result.filter((a) => lower(a.camera?.name).includes(camera));
+  if (filters.camera) {
+    result = result.filter((a) => lower(a.camera?.name).includes(lower(filters.camera)));
   }
 
-  if (line) {
+  if (filters.line) {
     result = result
       .map((app) => {
         if (app.type !== 'ObjectFlow') return null;
-        const matchedLines = toArray(app.lines).filter((l) => lower(l.name).includes(line));
+        const matchedLines = toArray(app.lines).filter((l) =>
+          lower(l.name).includes(lower(filters.line))
+        );
         if (!matchedLines.length) return null;
 
         return {
           ...app,
           lines: matchedLines,
-          totals_this_year: {
-            person_in: sumBy(matchedLines, (x) => x.totals_this_year.person_in),
-            person_out: sumBy(matchedLines, (x) => x.totals_this_year.person_out),
-            head_in: sumBy(matchedLines, (x) => x.totals_this_year.head_in),
-            head_out: sumBy(matchedLines, (x) => x.totals_this_year.head_out),
-            all_in: sumBy(matchedLines, (x) => x.totals_this_year.all_in),
-            all_out: sumBy(matchedLines, (x) => x.totals_this_year.all_out),
-          },
-          totals_live: {
-            person_in: sumBy(matchedLines, (x) => x.totals_live.person_in),
-            person_out: sumBy(matchedLines, (x) => x.totals_live.person_out),
-            head_in: sumBy(matchedLines, (x) => x.totals_live.head_in),
-            head_out: sumBy(matchedLines, (x) => x.totals_live.head_out),
-            all_in: sumBy(matchedLines, (x) => x.totals_live.all_in),
-            all_out: sumBy(matchedLines, (x) => x.totals_live.all_out),
+          totals: {
+            selected_in: sumBy(matchedLines, (x) => x.totals.selected_in),
+            selected_out: sumBy(matchedLines, (x) => x.totals.selected_out),
+            person_in: sumBy(matchedLines, (x) => x.totals.person_in),
+            person_out: sumBy(matchedLines, (x) => x.totals.person_out),
+            head_in: sumBy(matchedLines, (x) => x.totals.head_in),
+            head_out: sumBy(matchedLines, (x) => x.totals.head_out),
           },
         };
       })
@@ -976,47 +679,42 @@ function filterApplications(applications, filters = {}) {
   return result;
 }
 
-function buildGlobalTotals(applications) {
-  const objectFlow = toArray(applications).filter((a) => a.type === 'ObjectFlow');
-
+function buildTotals(applications) {
+  const flowApps = toArray(applications).filter((a) => a.type === 'ObjectFlow');
   return {
-    objectflow_apps: objectFlow.length,
-    totals_this_year: {
-      person_in: sumBy(objectFlow, (a) => a.totals_this_year.person_in),
-      person_out: sumBy(objectFlow, (a) => a.totals_this_year.person_out),
-      head_in: sumBy(objectFlow, (a) => a.totals_this_year.head_in),
-      head_out: sumBy(objectFlow, (a) => a.totals_this_year.head_out),
-      all_in: sumBy(objectFlow, (a) => a.totals_this_year.all_in),
-      all_out: sumBy(objectFlow, (a) => a.totals_this_year.all_out),
-    },
-    totals_live: {
-      person_in: sumBy(objectFlow, (a) => a.totals_live.person_in),
-      person_out: sumBy(objectFlow, (a) => a.totals_live.person_out),
-      head_in: sumBy(objectFlow, (a) => a.totals_live.head_in),
-      head_out: sumBy(objectFlow, (a) => a.totals_live.head_out),
-      all_in: sumBy(objectFlow, (a) => a.totals_live.all_in),
-      all_out: sumBy(objectFlow, (a) => a.totals_live.all_out),
-    },
+    objectflow_apps: flowApps.length,
+    selected_in: sumBy(flowApps, (a) => a.totals.selected_in),
+    selected_out: sumBy(flowApps, (a) => a.totals.selected_out),
+    person_in: sumBy(flowApps, (a) => a.totals.person_in),
+    person_out: sumBy(flowApps, (a) => a.totals.person_out),
+    head_in: sumBy(flowApps, (a) => a.totals.head_in),
+    head_out: sumBy(flowApps, (a) => a.totals.head_out),
   };
 }
 
 async function collectData(filters = {}) {
   const schemaRes = await graphql(QUERY_SCHEMA);
   const schema = schemaRes.data?.__schema || null;
-  const featureflags = featureFlagNamesFromSchema(schema?.types);
+
+  const allowedPresets = getEnumValues(schema, 'TimeRangePreset');
+  const preset = normalizePreset(filters.preset, allowedPresets);
+  const classes = parseClasses(filters.class);
+  const selectedClasses = classes.map((name) => ({ name }));
+
+  const featureflags = featureFlagNamesFromSchema(schema);
 
   const variablesApps = {
+    selectedClasses,
     personOnly: [{ name: 'PERSON' }],
     headOnly: [{ name: 'HEAD' }],
-    allClasses: CONFIG.classNames.map((name) => ({ name })),
-    presetShort: CONFIG.presetShort,
-    presetMedium: CONFIG.presetMedium,
-    presetLong: CONFIG.presetLong,
+    timeRange: {
+      time_range_preset: preset,
+    },
   };
 
   const variablesHealth = {
     healthRange: {
-      time_range_preset: CONFIG.healthPreset,
+      time_range_preset: normalizePreset(CONFIG.healthPreset, allowedPresets),
     },
   };
 
@@ -1031,23 +729,27 @@ async function collectData(filters = {}) {
   const cameras = toArray(camerasRes.data?.allCameras);
   const applicationsRaw = toArray(appsRes.data?.allApplications).map(mapApplication);
   const applications = filterApplications(applicationsRaw, filters);
-  const totals = buildGlobalTotals(applications);
+  const totals = buildTotals(applications);
 
   return {
     ok: true,
     generated_at: nowIso(),
-    filters,
+    filters: {
+      type: filters.type || '',
+      app: filters.app || '',
+      camera: filters.camera || '',
+      line: filters.line || '',
+      class: classes.join(','),
+      preset,
+    },
+    available_presets: allowedPresets,
     config: {
       baseUrl: CONFIG.baseUrl,
       graphqlPath: CONFIG.graphqlPath,
       verifyTls: CONFIG.verifyTls,
-      classes: CONFIG.classNames,
-      presets: {
-        short: CONFIG.presetShort,
-        medium: CONFIG.presetMedium,
-        long: CONFIG.presetLong,
-        health: CONFIG.healthPreset,
-      },
+      defaultClasses: CONFIG.defaultClasses,
+      defaultPreset: CONFIG.defaultPreset,
+      healthPreset: CONFIG.healthPreset,
     },
     totals,
     inventory: {
@@ -1088,6 +790,8 @@ function pickFilters(url) {
     app: url.searchParams.get('app') || '',
     camera: url.searchParams.get('camera') || '',
     line: url.searchParams.get('line') || '',
+    class: url.searchParams.get('class') || '',
+    preset: url.searchParams.get('preset') || '',
   };
 }
 
@@ -1099,14 +803,12 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'isarsoft-node-server',
       time: nowIso(),
-      endpoints: [
-        '/health',
-        '/summary',
-        '/data',
-        '/applications',
-        '/cameras',
-        '/summary?line=walk',
-        '/data?line=walk&type=objectflow',
+      examples: [
+        '/summary?preset=LAST1DAY',
+        '/summary?preset=LAST1MONTH',
+        '/summary?preset=THISYEAR',
+        '/summary?preset=THISYEARSOFAR&class=HEAD&line=walk',
+        '/data?type=objectflow&class=HEAD&line=walk&preset=THISYEAR',
       ],
     });
   }
@@ -1123,7 +825,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         generated_at: data.generated_at,
         filters: data.filters,
-        config: data.config,
+        available_presets: data.available_presets,
         totals: data.totals,
       });
     } catch (err) {
@@ -1202,13 +904,8 @@ server.listen(CONFIG.port, () => {
         port: CONFIG.port,
         baseUrl: CONFIG.baseUrl,
         graphqlPath: CONFIG.graphqlPath,
-        classes: CONFIG.classNames,
-        presets: {
-          short: CONFIG.presetShort,
-          medium: CONFIG.presetMedium,
-          long: CONFIG.presetLong,
-          health: CONFIG.healthPreset,
-        },
+        defaultPreset: CONFIG.defaultPreset,
+        defaultClasses: CONFIG.defaultClasses,
         time: nowIso(),
       },
       null,
