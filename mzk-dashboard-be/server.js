@@ -25,11 +25,10 @@ const CONFIG = {
 };
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: CONFIG.verifyTls });
-
 let tokenCache = { token: null, expiresAt: 0 };
 
 function nowIso() { return new Date().toISOString(); }
-function toArray(v) { return Array.isArray(v) ? v : (v != null ? [] : []); }
+function toArray(v) { return Array.isArray(v) ? v : []; }
 function lower(v) { return String(v || '').toLowerCase(); }
 function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function sumBy(arr, fn) { return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0); }
@@ -40,16 +39,14 @@ function log(level, msg, data) {
   if (data !== undefined) entry.data = data;
   console.log(JSON.stringify(entry));
 }
+function debug(msg, data) { if (CONFIG.debugMode) log('DEBUG', msg, data); }
 
-function debug(msg, data) {
-  if (CONFIG.debugMode) log('DEBUG', msg, data);
-}
+// ─── HTTP ────────────────────────────────────────────────────────────────────
 
 function requestRaw(urlString, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
     const lib = url.protocol === 'https:' ? https : http;
-
     const req = lib.request(
       {
         protocol: url.protocol,
@@ -65,18 +62,15 @@ function requestRaw(urlString, options = {}, body = null) {
         let raw = '';
         res.setEncoding('utf8');
         res.on('data', (chunk) => { raw += chunk; });
-        res.on('end', () => {
-          resolve({
-            ok: res.statusCode >= 200 && res.statusCode < 300,
-            status: res.statusCode,
-            statusText: res.statusMessage,
-            text: raw,
-            json: () => safeJson(raw),
-          });
-        });
+        res.on('end', () => resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          statusText: res.statusMessage,
+          text: raw,
+          json: () => safeJson(raw),
+        }));
       }
     );
-
     req.on('timeout', () => req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`)));
     req.on('error', reject);
     if (body) req.write(body);
@@ -84,48 +78,35 @@ function requestRaw(urlString, options = {}, body = null) {
   });
 }
 
+// ─── AUTH ────────────────────────────────────────────────────────────────────
+
 async function getToken(force = false) {
   if (!force && tokenCache.token && Date.now() < tokenCache.expiresAt - 15000) {
     return tokenCache.token;
   }
-
   const body = new URLSearchParams({
     grant_type: 'password',
     client_id: CONFIG.clientId,
     username: CONFIG.username,
     password: CONFIG.password,
   }).toString();
-
   const res = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.tokenPath}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    },
+    { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) } },
     body
   );
-
   const json = res.json();
   if (!res.ok || !json?.access_token) {
-    throw new Error(`Token request failed: ${res.status} ${res.statusText} ${res.text}`);
+    throw new Error(`Token request failed: ${res.status} ${res.statusText}`);
   }
-
-  tokenCache = {
-    token: json.access_token,
-    expiresAt: Date.now() + (Number(json.expires_in) || 300) * 1000,
-  };
-
-  log('INFO', 'Token refreshed', { expires_in: json.expires_in });
+  tokenCache = { token: json.access_token, expiresAt: Date.now() + (Number(json.expires_in) || 300) * 1000 };
+  log('INFO', 'Token refreshed');
   return tokenCache.token;
 }
 
-async function graphql(query, variables = null, retry = true) {
+async function graphql(query, retry = true) {
   const token = await getToken(false);
-  const payload = JSON.stringify({ query, variables });
-
+  const payload = JSON.stringify({ query });
   const res = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.graphqlPath}`,
     {
@@ -139,51 +120,44 @@ async function graphql(query, variables = null, retry = true) {
     },
     payload
   );
-
   const json = res.json();
-
   if (res.status === 401 && retry) {
-    log('WARN', 'Got 401, refreshing token and retrying');
+    log('WARN', 'Got 401, refreshing token');
     await getToken(true);
-    return graphql(query, variables, false);
+    return graphql(query, false);
   }
-
   if (!res.ok) {
-    throw new Error(`GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text.slice(0, 500)}`);
+    throw new Error(`GraphQL HTTP ${res.status}: ${res.text.slice(0, 800)}`);
   }
-
-  if (!json) {
-    throw new Error(`GraphQL returned invalid JSON: ${res.text.slice(0, 500)}`);
+  if (!json) throw new Error(`GraphQL returned invalid JSON`);
+  if (json.errors && !json.data) {
+    throw new Error(`GraphQL errors: ${JSON.stringify(json.errors).slice(0, 800)}`);
   }
-
-  if (json.errors && json.errors.length > 0) {
-    // Log errors but don't throw — partial data may still be present
-    log('WARN', 'GraphQL errors', json.errors);
-    if (!json.data) {
-      throw new Error(`GraphQL errors (no data): ${JSON.stringify(json.errors)}`);
-    }
+  if (json.errors) {
+    log('WARN', 'GraphQL partial errors', json.errors.map(e => e.message));
   }
-
   return json.data || null;
 }
 
 // ─── QUERIES ────────────────────────────────────────────────────────────────
+//
+// Key facts learned from the logs:
+//   1. ObjectFlowAreaLiveData has field "count" (not count_min/avg/max)
+//   2. getApplication requires argument form: application: {uuid: "..."}
+//   3. The big allApplications-with-inline-count_data query is the cleanest
+//      approach — it avoids getApplication entirely.
 
-const QUERY_TIME_RANGE_PRESETS = `
-query {
-  __schema {
-    types {
-      name
-      enumValues { name }
-    }
-  }
-}
-`;
+const QUERY_PRESETS = `query { __schema { types { name enumValues { name } } } }`;
 
-// Step 1: list all apps with basic metadata, line/area UUIDs and coordinates
-// We do NOT ask for count_data here — that requires time_range argument on each line,
-// which we'll supply in Step 2.
-const QUERY_ALL_OBJECTFLOW_APPS = `
+function buildAllAppsQuery(preset, classNames) {
+  const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
+  const rangeArg   = `{time_range_preset: ${preset}}`;
+
+  // NOTE: ObjectFlowAreaLiveData.count_live returns { count } not { count_min, count_avg, count_max }
+  // ObjectFlowArea.count_data      returns { time_bucket, number_of_samples, count_min, count_avg, count_max }
+  // ObjectFlowLine.count_data      returns { time_bucket, number_of_samples, count_in, count_out }
+  // ObjectFlowLine.count_live      returns { count_in, count_out }
+  return `
 query {
   allApplications {
     __typename
@@ -202,55 +176,25 @@ query {
         name
         tags
         coordinates
+        count_data(
+          time_range: ${rangeArg},
+          object_classes: [${classesArg}]
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+        count_live(object_classes: [${classesArg}]) {
+          count_in
+          count_out
+        }
       }
       areas {
         uuid
         name
         tags
         coordinates
-      }
-    }
-  }
-}
-`;
-
-// Step 2: for a single ObjectFlow app, fetch count_data and count_live on all lines.
-// Uses inline arguments (no variables) to avoid schema mismatches with input types.
-// We build this string dynamically so we can inject the exact preset and class names.
-function buildAppCountQuery(appUuid, preset, classNames) {
-  const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
-  const rangeArg = `{time_range_preset: ${preset}}`;
-
-  // Try both known argument forms for getApplication.
-  // The API might accept uuid directly or wrapped in an ApplicationInput object.
-  // We'll try direct uuid first (most common pattern).
-  return `
-query {
-  getApplication(uuid: "${appUuid}") {
-    __typename
-    ... on ObjectFlow {
-      uuid
-      name
-      lines {
-        uuid
-        name
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-        count_live(object_classes: [${classesArg}]) {
-          count_in
-          count_out
-        }
-      }
-      areas {
-        uuid
-        name
         count_data(
           time_range: ${rangeArg},
           object_classes: [${classesArg}]
@@ -262,22 +206,18 @@ query {
           count_max
         }
         count_live(object_classes: [${classesArg}]) {
-          count_min
-          count_avg
-          count_max
+          count
         }
       }
     }
   }
-}
-`;
+}`;
 }
 
-// Fallback form if getApplication doesn't accept bare uuid
-function buildAppCountQueryAlt(appUuid, preset, classNames) {
+// Per-app fallback using the confirmed working argument form: application: {uuid: "..."}
+function buildPerAppQuery(appUuid, preset, classNames) {
   const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
-  const rangeArg = `{time_range_preset: ${preset}}`;
-
+  const rangeArg   = `{time_range_preset: ${preset}}`;
   return `
 query {
   getApplication(application: {uuid: "${appUuid}"}) {
@@ -316,116 +256,29 @@ query {
           count_max
         }
         count_live(object_classes: [${classesArg}]) {
-          count_min
-          count_avg
-          count_max
+          count
         }
       }
     }
   }
-}
-`;
-}
-
-// Alternative: fetch all apps with count_data inline (one big query, no per-app roundtrips)
-// This works when the API allows count_data args directly on allApplications results.
-function buildAllAppsCountQuery(preset, classNames) {
-  const classesArg = classNames.map((n) => `{name:"${n}"}`).join(', ');
-  const rangeArg = `{time_range_preset: ${preset}}`;
-
-  return `
-query {
-  allApplications {
-    __typename
-    ... on ObjectFlow {
-      uuid
-      name
-      tags
-      status
-      last_online
-      created_at
-      updated_at
-      camera { uuid name }
-      model  { uuid name }
-      lines {
-        uuid
-        name
-        tags
-        coordinates
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-        count_live(object_classes: [${classesArg}]) {
-          count_in
-          count_out
-        }
-      }
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-        count_data(
-          time_range: ${rangeArg},
-          object_classes: [${classesArg}]
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-        count_live(object_classes: [${classesArg}]) {
-          count_min
-          count_avg
-          count_max
-        }
-      }
-    }
-  }
-}
-`;
+}`;
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 function getEnumValues(schemaTypes, typeName) {
-  const type = toArray(schemaTypes).find((x) => x.name === typeName);
-  return toArray(type?.enumValues).map((x) => x.name).filter(Boolean);
+  const t = toArray(schemaTypes).find((x) => x.name === typeName);
+  return toArray(t?.enumValues).map((x) => x.name).filter(Boolean);
 }
 
 function normalizePreset(input, allowed) {
   const fallback = CONFIG.defaultPreset;
   if (!input) return allowed.includes(fallback) ? fallback : (allowed[0] || 'LAST_1_DAY');
-
-  // Try exact match (case-insensitive)
   const upper = String(input).trim().toUpperCase();
   if (allowed.includes(upper)) return upper;
-
-  // Try collapsed match (ignore underscores)
   const collapsed = upper.replace(/_/g, '');
   const found = allowed.find((x) => x.replace(/_/g, '') === collapsed);
   if (found) return found;
-
-  // Try common aliases
-  const ALIASES = {
-    THISYEAR: 'THIS_YEAR',
-    THISMONTH: 'THIS_MONTH',
-    THISWEEK: 'THIS_WEEK',
-    TODAY: 'THIS_DAY',
-    YESTERDAY: 'PREVIOUS_DAY',
-    LAST1HOUR: 'LAST_1_HOUR',
-    LAST1DAY: 'LAST_1_DAY',
-  };
-  const aliased = ALIASES[collapsed];
-  if (aliased && allowed.includes(aliased)) return aliased;
-
   return allowed.includes(fallback) ? fallback : (allowed[0] || 'LAST_1_DAY');
 }
 
@@ -437,8 +290,7 @@ function parseClasses(input) {
 
 function summarizeLine(line) {
   const buckets = toArray(line.count_data);
-
-  // count_live can be an array OR a single object — handle both
+  // count_live: array or single object, fields: count_in / count_out
   let liveIn = 0, liveOut = 0;
   if (Array.isArray(line.count_live)) {
     liveIn  = sumBy(line.count_live, (x) => x?.count_in);
@@ -447,17 +299,16 @@ function summarizeLine(line) {
     liveIn  = num(line.count_live.count_in);
     liveOut = num(line.count_live.count_out);
   }
-
-  const totalIn  = sumBy(buckets, (x) => x?.count_in);
-  const totalOut = sumBy(buckets, (x) => x?.count_out);
-
   return {
     uuid:        line.uuid,
     name:        line.name,
     tags:        toArray(line.tags),
     coordinates: toArray(line.coordinates),
-    totals: { in: totalIn, out: totalOut },
-    live:   { in: liveIn, out: liveOut },
+    totals: {
+      in:  sumBy(buckets, (x) => x?.count_in),
+      out: sumBy(buckets, (x) => x?.count_out),
+    },
+    live: { in: liveIn, out: liveOut },
     history: {
       buckets:      buckets.length,
       first_bucket: buckets[0]?.time_bucket || null,
@@ -469,24 +320,19 @@ function summarizeLine(line) {
 
 function summarizeArea(area) {
   const buckets = toArray(area.count_data);
-
-  let liveMin = null, liveAvg = null, liveMax = null;
+  // count_live for ObjectFlowArea: { count } (single scalar field)
+  let liveCount = null;
   if (Array.isArray(area.count_live) && area.count_live.length > 0) {
-    liveAvg = area.count_live[0]?.count_avg ?? null;
-    liveMin = area.count_live[0]?.count_min ?? null;
-    liveMax = area.count_live[0]?.count_max ?? null;
+    liveCount = num(area.count_live[0]?.count);
   } else if (area.count_live && typeof area.count_live === 'object') {
-    liveAvg = num(area.count_live.count_avg);
-    liveMin = num(area.count_live.count_min);
-    liveMax = num(area.count_live.count_max);
+    liveCount = num(area.count_live.count);
   }
-
   return {
     uuid:        area.uuid,
     name:        area.name,
     tags:        toArray(area.tags),
     coordinates: toArray(area.coordinates),
-    live: { min: liveMin, avg: liveAvg, max: liveMax },
+    live: { count: liveCount },
     history: {
       buckets:      buckets.length,
       first_bucket: buckets[0]?.time_bucket || null,
@@ -506,176 +352,129 @@ function pickFilters(url) {
   };
 }
 
-// ─── MAIN DATA COLLECTION ────────────────────────────────────────────────────
+// ─── DATA COLLECTION ─────────────────────────────────────────────────────────
 
 async function collectData(filters = {}) {
-  // 1. Fetch allowed preset values from schema
-  log('INFO', 'Fetching schema enums...');
-  const schemaData = await graphql(QUERY_TIME_RANGE_PRESETS);
-  const schemaTypes = schemaData?.__schema?.types || [];
+  // 1. Schema — get allowed preset values
+  const schemaData   = await graphql(QUERY_PRESETS);
+  const schemaTypes  = schemaData?.__schema?.types || [];
   const allowedPresets = getEnumValues(schemaTypes, 'TimeRangePreset');
-  debug('Available TimeRangePreset values', allowedPresets);
+  debug('Available presets', allowedPresets);
 
   const preset  = normalizePreset(filters.preset, allowedPresets);
   const classes = parseClasses(filters.class);
-  log('INFO', `Using preset=${preset}, classes=${classes.join(',')}`);
+  log('INFO', `Collecting data: preset=${preset} classes=${classes.join(',')}`);
 
-  // 2. Try to fetch everything in ONE query (allApplications with count_data inline).
-  //    This is the most efficient and avoids getApplication argument guessing.
-  log('INFO', 'Fetching all ObjectFlow apps with count_data (single query)...');
-  const bigQuery = buildAllAppsCountQuery(preset, classes);
-  debug('Big query', bigQuery);
-
+  // 2. Try single big query (allApplications with count_data inline — no getApplication needed)
   let appsRaw = [];
-  let usedSingleQuery = false;
+  let strategy = 'unknown';
+
+  const bigQ = buildAllAppsQuery(preset, classes);
+  debug('Big query', bigQ);
 
   try {
-    const bigData = await graphql(bigQuery);
-    const candidates = toArray(bigData?.allApplications).filter(
-      (x) => x.__typename === 'ObjectFlow'
+    const bigData = await graphql(bigQ);
+    appsRaw = toArray(bigData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
+
+    const totalBuckets = appsRaw.reduce(
+      (acc, app) => acc + toArray(app.lines).reduce((a, l) => a + toArray(l.count_data).length, 0), 0
     );
+    log('INFO', `Single query OK: ${appsRaw.length} apps, ${totalBuckets} line-buckets total`);
+    strategy = 'single';
 
-    // Check if we actually got count data or if everything is empty/null
-    const totalBuckets = candidates.reduce(
-      (acc, app) => acc + toArray(app.lines).reduce(
-        (a2, l) => a2 + toArray(l.count_data).length, 0
-      ), 0
-    );
-
-    debug('Single-query results', {
-      apps: candidates.length,
-      total_count_data_buckets: totalBuckets,
-    });
-
-    appsRaw = candidates;
-    usedSingleQuery = true;
-    log('INFO', `Single-query succeeded: ${candidates.length} apps, ${totalBuckets} total buckets`);
+    // If we got apps but zero buckets across all of them, something is still off —
+    // fall through to per-app queries.
+    if (appsRaw.length > 0 && totalBuckets === 0) {
+      log('WARN', 'Single query returned 0 buckets across all apps — trying per-app fallback');
+      strategy = 'fallback';
+    }
   } catch (err) {
-    log('WARN', 'Single-query failed, will fall back to per-app queries', { error: err.message });
+    log('WARN', 'Single query failed', { error: err.message });
+    strategy = 'fallback';
   }
 
-  // 3. If single query gave us nothing (count_data all empty), try per-app approach
-  //    with both argument forms for getApplication.
-  if (!usedSingleQuery || appsRaw.every(
-    (app) => toArray(app.lines).every((l) => toArray(l.count_data).length === 0)
-  )) {
-    log('INFO', 'Falling back to per-app queries (count_data was empty in single query)...');
-
-    // First get the app list without counts
-    const listData = await graphql(QUERY_ALL_OBJECTFLOW_APPS);
-    const appList  = toArray(listData?.allApplications).filter(
-      (x) => x.__typename === 'ObjectFlow'
-    );
-    log('INFO', `Found ${appList.length} ObjectFlow apps`);
+  // 3. Per-app fallback
+  if (strategy === 'fallback') {
+    // Re-fetch app list without count_data to get clean metadata
+    const listQ = `
+query {
+  allApplications {
+    __typename
+    ... on ObjectFlow {
+      uuid name tags status last_online created_at updated_at
+      camera { uuid name }
+      model  { uuid name }
+      lines { uuid name tags coordinates }
+      areas { uuid name tags coordinates }
+    }
+  }
+}`;
+    const listData = await graphql(listQ);
+    const appList  = toArray(listData?.allApplications).filter((x) => x.__typename === 'ObjectFlow');
+    log('INFO', `Fallback: found ${appList.length} apps, fetching per-app counts`);
 
     appsRaw = [];
-
-    for (const appMeta of appList) {
-      log('INFO', `Fetching counts for app: ${appMeta.name} (${appMeta.uuid})`);
-
-      let appWithCounts = null;
-
-      // Try primary form first
+    for (const meta of appList) {
+      log('INFO', `Per-app query: ${meta.name} (${meta.uuid})`);
       try {
-        const q = buildAppCountQuery(appMeta.uuid, preset, classes);
-        debug(`Query for ${appMeta.name}`, q);
-        const d = await graphql(q);
-        const candidate = d?.getApplication;
-        if (candidate && candidate.__typename === 'ObjectFlow') {
-          appWithCounts = candidate;
-          debug(`Primary form worked for ${appMeta.name}`, {
-            lines: toArray(candidate.lines).length,
-            buckets: toArray(candidate.lines).reduce(
-              (a, l) => a + toArray(l.count_data).length, 0
-            ),
+        const q   = buildPerAppQuery(meta.uuid, preset, classes);
+        const d   = await graphql(q);
+        const app = d?.getApplication;
+        if (app && app.__typename === 'ObjectFlow') {
+          // Merge coordinates/tags from meta into count response
+          const mergedLines = toArray(app.lines).map((l) => {
+            const m = toArray(meta.lines).find((ml) => ml.uuid === l.uuid) || {};
+            return { ...m, ...l };
           });
+          const mergedAreas = toArray(app.areas).map((a) => {
+            const m = toArray(meta.areas).find((ma) => ma.uuid === a.uuid) || {};
+            return { ...m, ...a };
+          });
+          appsRaw.push({ ...meta, lines: mergedLines, areas: mergedAreas });
+          const b = mergedLines.reduce((acc, l) => acc + toArray(l.count_data).length, 0);
+          log('INFO', `  -> ${mergedLines.length} lines, ${b} buckets`);
+        } else {
+          log('WARN', `  -> getApplication returned unexpected type for ${meta.name}`);
+          appsRaw.push(meta);
         }
       } catch (err) {
-        log('WARN', `Primary getApplication form failed for ${appMeta.name}`, { error: err.message });
-      }
-
-      // Try alt form
-      if (!appWithCounts) {
-        try {
-          const q2 = buildAppCountQueryAlt(appMeta.uuid, preset, classes);
-          debug(`Alt query for ${appMeta.name}`, q2);
-          const d2 = await graphql(q2);
-          const candidate2 = d2?.getApplication;
-          if (candidate2 && candidate2.__typename === 'ObjectFlow') {
-            appWithCounts = candidate2;
-            debug(`Alt form worked for ${appMeta.name}`);
-          }
-        } catch (err2) {
-          log('WARN', `Alt getApplication form also failed for ${appMeta.name}`, { error: err2.message });
-        }
-      }
-
-      // Merge metadata from appList with count data from getApplication
-      if (appWithCounts) {
-        appsRaw.push({
-          ...appMeta,
-          lines: toArray(appWithCounts.lines).map((countLine) => {
-            const metaLine = toArray(appMeta.lines).find((ml) => ml.uuid === countLine.uuid) || {};
-            return { ...metaLine, ...countLine };
-          }),
-          areas: toArray(appWithCounts.areas).map((countArea) => {
-            const metaArea = toArray(appMeta.areas).find((ma) => ma.uuid === countArea.uuid) || {};
-            return { ...metaArea, ...countArea };
-          }),
-        });
-      } else {
-        // Still include the app but with no count data so it shows up in listings
-        log('WARN', `Could not fetch counts for ${appMeta.name}, including with empty counts`);
-        appsRaw.push(appMeta);
+        log('WARN', `  -> Per-app query failed for ${meta.name}: ${err.message}`);
+        appsRaw.push(meta); // include with no counts rather than skip
       }
     }
   }
 
   // 4. Apply filters
   let apps = appsRaw;
+  if (filters.app)    apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
+  if (filters.camera) apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
 
-  if (filters.app) {
-    apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
-  }
-  if (filters.camera) {
-    apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
-  }
-
-  // 5. Summarize and structure
+  // 5. Structure output
   const detailedApps = apps.map((app) => {
     let lines = toArray(app.lines).map(summarizeLine);
     let areas = toArray(app.areas).map(summarizeArea);
 
-    if (filters.line) {
-      lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
-    }
+    if (filters.line) lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
 
-    const appTotalIn  = sumBy(lines, (l) => l.totals.in);
-    const appTotalOut = sumBy(lines, (l) => l.totals.out);
-
-    debug(`App summary: ${app.name}`, {
-      lines: lines.length,
-      totalIn: appTotalIn,
-      totalOut: appTotalOut,
-    });
+    const totalIn  = sumBy(lines, (l) => l.totals.in);
+    const totalOut = sumBy(lines, (l) => l.totals.out);
 
     return {
       uuid:        app.uuid,
       name:        app.name,
       tags:        toArray(app.tags),
-      status:      app.status || null,
+      status:      app.status      || null,
       last_online: app.last_online || null,
-      created_at:  app.created_at || null,
-      updated_at:  app.updated_at || null,
+      created_at:  app.created_at  || null,
+      updated_at:  app.updated_at  || null,
       camera:      app.camera || null,
       model:       app.model  || null,
-      totals:      { in: appTotalIn, out: appTotalOut },
+      totals:      { in: totalIn, out: totalOut },
       lines,
       areas,
     };
   });
 
-  // 6. Flat line rows for the /debug/lines endpoint
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
       application_uuid: app.uuid,
@@ -695,9 +494,9 @@ async function collectData(filters = {}) {
   lineRows.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
 
   return {
-    ok:               true,
-    generated_at:     nowIso(),
-    used_single_query: usedSingleQuery,
+    ok:           true,
+    generated_at: nowIso(),
+    strategy,
     filters: {
       preset,
       class:  classes.join(','),
@@ -735,72 +534,60 @@ function sendJson(res, status, payload) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === 'OPTIONS') {
-    cors(res);
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+  if (req.method === 'OPTIONS') { cors(res); res.writeHead(204); res.end(); return; }
 
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   log('INFO', `${req.method} ${url.pathname}`);
 
-  if (req.method !== 'GET') {
-    return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
-  }
+  if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'Method not allowed' });
 
-  // Root
   if (url.pathname === '/') {
     return sendJson(res, 200, {
       ok: true,
       endpoints: [
         'GET /health',
+        'GET /debug/presets              — list preset values from live schema',
         'GET /summary?preset=THIS_YEAR&class=PERSON,HEAD',
         'GET /data?preset=THIS_YEAR&class=PERSON,HEAD',
         'GET /debug/lines?preset=THIS_YEAR&class=PERSON,HEAD',
-        'GET /debug/raw?preset=THIS_YEAR&class=PERSON,HEAD&app=Real+Cam+2',
       ],
-      presets_hint: 'Use /debug/presets to see available preset values from the live schema',
       time: nowIso(),
     });
   }
 
-  // Health
   if (url.pathname === '/health') {
     return sendJson(res, 200, { ok: true, time: nowIso() });
   }
 
-  // Show available presets (useful for debugging what values the API accepts)
   if (url.pathname === '/debug/presets') {
     try {
-      const schemaData = await graphql(QUERY_TIME_RANGE_PRESETS);
-      const types = schemaData?.__schema?.types || [];
-      const presets = getEnumValues(types, 'TimeRangePreset');
+      const d = await graphql(QUERY_PRESETS);
+      const presets = getEnumValues(d?.__schema?.types || [], 'TimeRangePreset');
       return sendJson(res, 200, { ok: true, presets });
     } catch (err) {
       return sendJson(res, 500, { ok: false, error: err.message });
     }
   }
 
-  // Summary (no raw data)
-  if (url.pathname === '/summary') {
-    try {
-      const data = await collectData(pickFilters(url));
+  const handler = async () => {
+    const data = await collectData(pickFilters(url));
+
+    if (url.pathname === '/summary') {
       return sendJson(res, 200, {
         ok:                true,
         generated_at:      data.generated_at,
-        used_single_query: data.used_single_query,
+        strategy:          data.strategy,
         filters:           data.filters,
         available_presets: data.available_presets,
         totals:            data.totals,
-        applications:      data.applications.map((a) => ({
+        applications: data.applications.map((a) => ({
           uuid:        a.uuid,
           name:        a.name,
           status:      a.status,
           last_online: a.last_online,
           camera:      a.camera,
           totals:      a.totals,
-          lines:       a.lines.map((l) => ({
+          lines: a.lines.map((l) => ({
             uuid:    l.uuid,
             name:    l.name,
             totals:  l.totals,
@@ -809,105 +596,34 @@ const server = http.createServer(async (req, res) => {
           })),
         })),
       });
-    } catch (err) {
-      log('ERROR', 'Error in /summary', { error: err.message, stack: err.stack });
-      return sendJson(res, 500, { ok: false, error: err.message });
     }
-  }
 
-  // Full data with raw buckets
-  if (url.pathname === '/data') {
-    try {
-      const data = await collectData(pickFilters(url));
+    if (url.pathname === '/data') {
       return sendJson(res, 200, data);
-    } catch (err) {
-      log('ERROR', 'Error in /data', { error: err.message, stack: err.stack });
-      return sendJson(res, 500, { ok: false, error: err.message });
     }
-  }
 
-  // Flat line rows
-  if (url.pathname === '/debug/lines') {
-    try {
-      const data = await collectData(pickFilters(url));
-      return sendJson(res, 200, {
-        ok:          true,
-        generated_at: data.generated_at,
-        filters:     data.filters,
-        totals:      data.totals,
-        lines:       data.lines,
-      });
-    } catch (err) {
-      log('ERROR', 'Error in /debug/lines', { error: err.message, stack: err.stack });
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // Raw app dump for one app — useful to see exactly what the API returns
-  if (url.pathname === '/debug/raw') {
-    const appFilter = url.searchParams.get('app') || '';
-    const preset    = url.searchParams.get('preset') || CONFIG.defaultPreset;
-    const classStr  = url.searchParams.get('class') || CONFIG.defaultClasses.join(',');
-
-    try {
-      const schemaData   = await graphql(QUERY_TIME_RANGE_PRESETS);
-      const schemaTypes  = schemaData?.__schema?.types || [];
-      const allowed      = getEnumValues(schemaTypes, 'TimeRangePreset');
-      const finalPreset  = normalizePreset(preset, allowed);
-      const classes      = parseClasses(classStr);
-
-      // First get app list to find the UUID
-      const listData = await graphql(QUERY_ALL_OBJECTFLOW_APPS);
-      let candidates = toArray(listData?.allApplications).filter(
-        (x) => x.__typename === 'ObjectFlow'
-      );
-      if (appFilter) {
-        candidates = candidates.filter((x) => lower(x.name).includes(lower(appFilter)));
-      }
-
-      if (candidates.length === 0) {
-        return sendJson(res, 200, { ok: true, message: 'No matching apps', available: toArray(listData?.allApplications).map((x) => x.name) });
-      }
-
-      const app = candidates[0];
-
-      // Try primary form
-      let rawResult = null;
-      let formUsed  = null;
-      let rawError1 = null;
-
-      try {
-        const q1 = buildAppCountQuery(app.uuid, finalPreset, classes);
-        const d1 = await graphql(q1);
-        rawResult = d1;
-        formUsed  = 'primary (uuid: "...")';
-      } catch (e) {
-        rawError1 = e.message;
-      }
-
-      if (!rawResult?.getApplication) {
-        try {
-          const q2 = buildAppCountQueryAlt(app.uuid, finalPreset, classes);
-          const d2 = await graphql(q2);
-          rawResult = d2;
-          formUsed  = 'alt (application: {uuid: "..."})';
-        } catch (e) {
-          // both failed
-        }
-      }
-
+    if (url.pathname === '/debug/lines') {
       return sendJson(res, 200, {
         ok:           true,
-        app_meta:     app,
-        preset_used:  finalPreset,
-        classes_used: classes,
-        form_used:    formUsed,
-        raw_primary_error: rawError1,
-        raw_result:   rawResult,
+        generated_at: data.generated_at,
+        strategy:     data.strategy,
+        filters:      data.filters,
+        totals:       data.totals,
+        lines:        data.lines,
       });
+    }
+
+    return sendJson(res, 404, { ok: false, error: 'Not found' });
+  };
+
+  if (['/summary', '/data', '/debug/lines'].includes(url.pathname)) {
+    try {
+      await handler();
     } catch (err) {
+      log('ERROR', `${url.pathname} failed`, { error: err.message });
       return sendJson(res, 500, { ok: false, error: err.message });
     }
+    return;
   }
 
   return sendJson(res, 404, { ok: false, error: 'Not found' });
@@ -917,10 +633,8 @@ server.listen(CONFIG.port, () => {
   log('INFO', 'Server started', {
     port:           CONFIG.port,
     baseUrl:        CONFIG.baseUrl,
-    graphqlPath:    CONFIG.graphqlPath,
     defaultPreset:  CONFIG.defaultPreset,
     defaultClasses: CONFIG.defaultClasses,
-    debugMode:      CONFIG.debugMode,
-    tip: 'Set DEBUG_MODE=true env var to see verbose query/response logging',
+    tip:            'Set DEBUG_MODE=true for verbose query logging',
   });
 });
