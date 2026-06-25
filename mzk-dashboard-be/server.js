@@ -20,9 +20,9 @@ const CONFIG = {
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean),
-  historyPresetShort: process.env.ISARSOFT_PRESET_SHORT || 'LAST_1_HOUR',
-  historyPresetMedium: process.env.ISARSOFT_PRESET_MEDIUM || 'LAST_12_HOUR',
-  historyPresetLong: process.env.ISARSOFT_PRESET_LONG || 'THIS_YEAR',
+  presetShort: process.env.ISARSOFT_PRESET_SHORT || 'LAST_1_HOUR',
+  presetMedium: process.env.ISARSOFT_PRESET_MEDIUM || 'LAST_12_HOUR',
+  presetLong: process.env.ISARSOFT_PRESET_LONG || 'THIS_YEAR',
   healthPreset: process.env.ISARSOFT_HEALTH_PRESET || 'LAST_1_DAY',
 };
 
@@ -40,14 +40,8 @@ function toArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function sumBy(arr, fn) {
-  return toArray(arr).reduce((acc, item) => acc + (Number(fn(item)) || 0), 0);
-}
-
-function avg(arr) {
-  const values = arr.filter((x) => Number.isFinite(x));
-  if (!values.length) return null;
-  return values.reduce((a, b) => a + b, 0) / values.length;
+function lower(v) {
+  return String(v || '').toLowerCase();
 }
 
 function safeJson(text) {
@@ -56,6 +50,20 @@ function safeJson(text) {
   } catch {
     return null;
   }
+}
+
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function sumBy(arr, fn) {
+  return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0);
+}
+
+function avg(arr) {
+  const vals = toArray(arr).map(num).filter((x) => Number.isFinite(x));
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
 }
 
 function requestRaw(urlString, options = {}, body = null) {
@@ -94,6 +102,7 @@ function requestRaw(urlString, options = {}, body = null) {
 
     req.on('timeout', () => req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`)));
     req.on('error', reject);
+
     if (body) req.write(body);
     req.end();
   });
@@ -176,6 +185,19 @@ async function graphql(query, variables = null, retry = true) {
   return { data: json.data || null, errors: null };
 }
 
+const QUERY_SCHEMA = `
+query {
+  __schema {
+    types {
+      name
+      kind
+      enumValues { name }
+      fields { name }
+    }
+  }
+}
+`;
+
 const QUERY_CAMERAS = `
 query {
   allCameras {
@@ -185,498 +207,32 @@ query {
 }
 `;
 
-const QUERY_APPS = `
-query(
-  $personAndHead: [ObjectClassInput!]!,
-  $personOnly: [ObjectClassInput!]!,
-  $headOnly: [ObjectClassInput!]!,
-  $presetShort: TimeRangePreset!,
-  $presetMedium: TimeRangePreset!,
-  $presetLong: TimeRangePreset!
-) {
-  allApplications {
-    __typename
+const QUERY_FEATURE_FLAGS = `
+query($featureflags: [FeatureFlags!]!) {
+  getFeatureFlags(featureflags: $featureflags)
+}
+`;
 
-    ... on ObjectFlow {
-      uuid
-      name
-      tags
-      created_at
-      updated_at
-      status
-      last_online
-      default_model_settings
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
-      alarms {
-        uuid
-        name
-      }
-
-      output_stream {
-        __typename
-      }
-
-      tracks_live {
-        __typename
-      }
-
-      lines {
-        uuid
-        name
-        tags
-        coordinates
-        created_at
-        updated_at
-
-        live_person: count_live(object_classes: $personOnly) {
-          count_in
-          count_out
-        }
-
-        live_head: count_live(object_classes: $headOnly) {
-          count_in
-          count_out
-        }
-
-        live_all: count_live(object_classes: $personAndHead) {
-          count_in
-          count_out
-        }
-
-        short_person: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        short_head: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        short_all: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_person: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_head: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        medium_all: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
-      }
-
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-        created_at
-        updated_at
-
-        live_person: count_live(object_classes: $personOnly) {
-          count
-        }
-
-        live_head: count_live(object_classes: $headOnly) {
-          count
-        }
-
-        live_all: count_live(object_classes: $personAndHead) {
-          count
-        }
-
-        short_person: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_head: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_all: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_person: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_head: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_all: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-      }
-    }
-
-    ... on ObjectCount {
-      uuid
-      name
-      tags
-      created_at
-      updated_at
-      status
-      last_online
-      default_model_settings
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
-      alarms {
-        uuid
-        name
-      }
-
-      output_stream {
-        __typename
-      }
-
-      detections_live {
-        __typename
-      }
-
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-        created_at
-        updated_at
-
-        live_person: count_live(object_classes: $personOnly) {
-          count
-        }
-
-        live_head: count_live(object_classes: $headOnly) {
-          count
-        }
-
-        live_all: count_live(object_classes: $personAndHead) {
-          count
-        }
-
-        short_person: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_head: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        short_all: count_data(
-          time_range: { time_range_preset: $presetShort }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_person: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_head: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        medium_all: count_data(
-          time_range: { time_range_preset: $presetMedium }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_person: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_head: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $headOnly
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-
-        long_all: count_data(
-          time_range: { time_range_preset: $presetLong }
-          object_classes: $personAndHead
-        ) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
-      }
-    }
-
-    ... on CrowdCount {
-      uuid
-      name
-      tags
-      created_at
-      updated_at
-      status
-      last_online
-      current_count
-      box_u1
-      box_v1
-      box_u2
-      box_v2
-
-      camera {
-        uuid
-        name
-      }
-
-      model {
-        uuid
-        name
-      }
-
-      alarms {
-        uuid
-        name
-      }
-
-      output_stream {
-        __typename
-      }
-
-      short_data: count_data(time_range: { time_range_preset: $presetShort }) {
-        time_bucket
-        number_of_samples
-        count_min
-        count_avg
-        count_max
-      }
-
-      medium_data: count_data(time_range: { time_range_preset: $presetMedium }) {
-        time_bucket
-        number_of_samples
-        count_min
-        count_avg
-        count_max
-      }
-
-      long_data: count_data(time_range: { time_range_preset: $presetLong }) {
-        time_bucket
-        number_of_samples
-        count_min
-        count_avg
-        count_max
-      }
-    }
-  }
+const QUERY_MISC = `
+query {
+  getMachineFingerprint
+  getLicense { __typename }
+  getLicenseStatus { __typename }
+  allExports { __typename }
+  getDeviceSettings { __typename }
+  getMQTTSettings { __typename }
+  getKafkaSettings { __typename }
+  getKinesisSettings { __typename }
+  getCayugaSettings { __typename }
+  getGenetecSettings { __typename }
+  getMilestoneSettings { __typename }
+  getObjectFlowSettings { __typename }
+  checkCayugaConnection
+  checkMilestoneConnection
+  checkGenetecConnection
+  allCayugaCameras { __typename }
+  allMilestoneCameras { __typename }
+  allGenetecCameras { __typename }
 }
 `;
 
@@ -738,104 +294,449 @@ query($healthRange: TimeRangeInput!) {
 }
 `;
 
-const QUERY_FEATURE_FLAGS = `
-query($featureflags: [FeatureFlags!]!) {
-  getFeatureFlags(featureflags: $featureflags)
-}
-`;
+const QUERY_APPLICATIONS = `
+query(
+  $personOnly: [ObjectClassInput!]!,
+  $headOnly: [ObjectClassInput!]!,
+  $allClasses: [ObjectClassInput!]!,
+  $presetShort: TimeRangePreset!,
+  $presetMedium: TimeRangePreset!,
+  $presetLong: TimeRangePreset!
+) {
+  allApplications {
+    __typename
 
-const QUERY_MISC = `
-query {
-  getMachineFingerprint
-  getLicense { __typename }
-  getLicenseStatus { __typename }
-  allExports { __typename }
-  getDeviceSettings { __typename }
-  getMQTTSettings { __typename }
-  getKafkaSettings { __typename }
-  getKinesisSettings { __typename }
-  getCayugaSettings { __typename }
-  getGenetecSettings { __typename }
-  getMilestoneSettings { __typename }
-  getObjectFlowSettings { __typename }
-  checkCayugaConnection
-  checkMilestoneConnection
-  checkGenetecConnection
-  allCayugaCameras { __typename }
-  allMilestoneCameras { __typename }
-  allGenetecCameras { __typename }
-}
-`;
-
-const QUERY_SCHEMA = `
-query {
-  __schema {
-    queryType { name fields { name } }
-    mutationType { name fields { name } }
-    subscriptionType { name }
-    types {
+    ... on ObjectFlow {
+      uuid
       name
-      kind
-      fields { name }
-      inputFields { name }
-      enumValues { name }
+      tags
+      created_at
+      updated_at
+      status
+      last_online
+      default_model_settings
+
+      camera {
+        uuid
+        name
+      }
+
+      model {
+        uuid
+        name
+      }
+
+      lines {
+        uuid
+        name
+        tags
+        coordinates
+        created_at
+        updated_at
+
+        live_person: count_live(object_classes: $personOnly) {
+          count_in
+          count_out
+        }
+
+        live_head: count_live(object_classes: $headOnly) {
+          count_in
+          count_out
+        }
+
+        live_all: count_live(object_classes: $allClasses) {
+          count_in
+          count_out
+        }
+
+        short_person: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        short_head: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        short_all: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_person: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_head: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        medium_all: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_in
+          count_out
+        }
+      }
+
+      areas {
+        uuid
+        name
+        tags
+        coordinates
+        created_at
+        updated_at
+
+        live_person: count_live(object_classes: $personOnly) {
+          count
+        }
+
+        live_head: count_live(object_classes: $headOnly) {
+          count
+        }
+
+        live_all: count_live(object_classes: $allClasses) {
+          count
+        }
+
+        short_person: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        short_head: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        short_all: count_data(
+          time_range: { time_range_preset: $presetShort }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_person: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_head: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        medium_all: count_data(
+          time_range: { time_range_preset: $presetMedium }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+      }
+    }
+
+    ... on ObjectCount {
+      uuid
+      name
+      tags
+      created_at
+      updated_at
+      status
+      last_online
+      default_model_settings
+
+      camera {
+        uuid
+        name
+      }
+
+      model {
+        uuid
+        name
+      }
+
+      areas {
+        uuid
+        name
+        tags
+        coordinates
+        created_at
+        updated_at
+
+        live_person: count_live(object_classes: $personOnly) {
+          count
+        }
+
+        live_head: count_live(object_classes: $headOnly) {
+          count
+        }
+
+        live_all: count_live(object_classes: $allClasses) {
+          count
+        }
+
+        long_person: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $personOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_head: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $headOnly
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+
+        long_all: count_data(
+          time_range: { time_range_preset: $presetLong }
+          object_classes: $allClasses
+        ) {
+          time_bucket
+          number_of_samples
+          count_min
+          count_avg
+          count_max
+        }
+      }
+    }
+
+    ... on CrowdCount {
+      uuid
+      name
+      tags
+      created_at
+      updated_at
+      status
+      last_online
+      current_count
+      box_u1
+      box_v1
+      box_u2
+      box_v2
+
+      camera {
+        uuid
+        name
+      }
+
+      model {
+        uuid
+        name
+      }
+
+      long_data: count_data(time_range: { time_range_preset: $presetLong }) {
+        time_bucket
+        number_of_samples
+        count_min
+        count_avg
+        count_max
+      }
     }
   }
 }
 `;
 
-function summarizeLineBuckets(rows) {
-  const list = toArray(rows);
+function featureFlagNamesFromSchema(schemaTypes) {
+  const enumType = toArray(schemaTypes).find((x) => x.name === 'FeatureFlags');
+  return toArray(enumType?.enumValues).map((x) => x.name).filter(Boolean);
+}
+
+function summarizeLineSeries(rows) {
+  const raw = toArray(rows);
   return {
-    buckets: list.length,
-    samples: sumBy(list, (x) => x?.number_of_samples),
-    total_in: sumBy(list, (x) => x?.count_in),
-    total_out: sumBy(list, (x) => x?.count_out),
-    first_bucket: list[0]?.time_bucket || null,
-    last_bucket: list[list.length - 1]?.time_bucket || null,
-    raw: list,
+    buckets: raw.length,
+    first_bucket: raw[0]?.time_bucket || null,
+    last_bucket: raw[raw.length - 1]?.time_bucket || null,
+    samples: sumBy(raw, (x) => x?.number_of_samples),
+    total_in: sumBy(raw, (x) => x?.count_in),
+    total_out: sumBy(raw, (x) => x?.count_out),
+    raw,
   };
 }
 
-function summarizeAreaBuckets(rows) {
-  const list = toArray(rows);
-  const mins = list.map((x) => Number(x?.count_min)).filter(Number.isFinite);
-  const avgs = list.map((x) => Number(x?.count_avg)).filter(Number.isFinite);
-  const maxs = list.map((x) => Number(x?.count_max)).filter(Number.isFinite);
-
+function summarizeAreaSeries(rows) {
+  const raw = toArray(rows);
   return {
-    buckets: list.length,
-    samples: sumBy(list, (x) => x?.number_of_samples),
-    min_of_mins: mins.length ? Math.min(...mins) : null,
-    avg_of_avgs: avg(avgs),
-    max_of_maxs: maxs.length ? Math.max(...maxs) : null,
-    first_bucket: list[0]?.time_bucket || null,
-    last_bucket: list[list.length - 1]?.time_bucket || null,
-    raw: list,
+    buckets: raw.length,
+    first_bucket: raw[0]?.time_bucket || null,
+    last_bucket: raw[raw.length - 1]?.time_bucket || null,
+    samples: sumBy(raw, (x) => x?.number_of_samples),
+    min_of_mins: raw.length ? Math.min(...raw.map((x) => num(x?.count_min))) : null,
+    avg_of_avgs: raw.length ? avg(raw.map((x) => num(x?.count_avg))) : null,
+    max_of_maxs: raw.length ? Math.max(...raw.map((x) => num(x?.count_max))) : null,
+    raw,
   };
 }
 
 function summarizeLineLive(rows) {
-  const list = toArray(rows);
+  const raw = toArray(rows);
   return {
-    total_in: sumBy(list, (x) => x?.count_in),
-    total_out: sumBy(list, (x) => x?.count_out),
-    raw: list,
+    total_in: sumBy(raw, (x) => x?.count_in),
+    total_out: sumBy(raw, (x) => x?.count_out),
+    raw,
   };
 }
 
 function summarizeAreaLive(rows) {
-  const list = toArray(rows);
+  const raw = toArray(rows);
   return {
-    count: sumBy(list, (x) => x?.count),
-    raw: list,
+    count: sumBy(raw, (x) => x?.count),
+    raw,
   };
 }
 
-function mapLine(line) {
-  const personLive = summarizeLineLive(line.live_person);
-  const headLive = summarizeLineLive(line.live_head);
-  const allLive = summarizeLineLive(line.live_all);
+function mapObjectFlowLine(line) {
+  const livePerson = summarizeLineLive(line.live_person);
+  const liveHead = summarizeLineLive(line.live_head);
+  const liveAll = summarizeLineLive(line.live_all);
+
+  const shortPerson = summarizeLineSeries(line.short_person);
+  const shortHead = summarizeLineSeries(line.short_head);
+  const shortAll = summarizeLineSeries(line.short_all);
+
+  const mediumPerson = summarizeLineSeries(line.medium_person);
+  const mediumHead = summarizeLineSeries(line.medium_head);
+  const mediumAll = summarizeLineSeries(line.medium_all);
+
+  const longPerson = summarizeLineSeries(line.long_person);
+  const longHead = summarizeLineSeries(line.long_head);
+  const longAll = summarizeLineSeries(line.long_all);
 
   return {
     uuid: line.uuid,
@@ -847,63 +748,46 @@ function mapLine(line) {
 
     classes: {
       PERSON: {
-        live: personLive,
-        short: summarizeLineBuckets(line.short_person),
-        medium: summarizeLineBuckets(line.medium_person),
-        long: summarizeLineBuckets(line.long_person),
+        live: livePerson,
+        short: shortPerson,
+        medium: mediumPerson,
+        this_year: longPerson,
       },
       HEAD: {
-        live: headLive,
-        short: summarizeLineBuckets(line.short_head),
-        medium: summarizeLineBuckets(line.medium_head),
-        long: summarizeLineBuckets(line.long_head),
+        live: liveHead,
+        short: shortHead,
+        medium: mediumHead,
+        this_year: longHead,
       },
       ALL: {
-        live: allLive,
-        short: summarizeLineBuckets(line.short_all),
-        medium: summarizeLineBuckets(line.medium_all),
-        long: summarizeLineBuckets(line.long_all),
+        live: liveAll,
+        short: shortAll,
+        medium: mediumAll,
+        this_year: longAll,
       },
     },
 
-    always_report: {
-      people_in_out_live: {
-        person_in: personLive.total_in,
-        person_out: personLive.total_out,
-        head_in: headLive.total_in,
-        head_out: headLive.total_out,
-        all_in: allLive.total_in,
-        all_out: allLive.total_out,
-      },
-      people_in_out_short: {
-        person_in: sumBy(line.short_person, (x) => x?.count_in),
-        person_out: sumBy(line.short_person, (x) => x?.count_out),
-        head_in: sumBy(line.short_head, (x) => x?.count_in),
-        head_out: sumBy(line.short_head, (x) => x?.count_out),
-        all_in: sumBy(line.short_all, (x) => x?.count_in),
-        all_out: sumBy(line.short_all, (x) => x?.count_out),
-      },
-      people_in_out_medium: {
-        person_in: sumBy(line.medium_person, (x) => x?.count_in),
-        person_out: sumBy(line.medium_person, (x) => x?.count_out),
-        head_in: sumBy(line.medium_head, (x) => x?.count_in),
-        head_out: sumBy(line.medium_head, (x) => x?.count_out),
-        all_in: sumBy(line.medium_all, (x) => x?.count_in),
-        all_out: sumBy(line.medium_all, (x) => x?.count_out),
-      },
-      people_in_out_long: {
-        person_in: sumBy(line.long_person, (x) => x?.count_in),
-        person_out: sumBy(line.long_person, (x) => x?.count_out),
-        head_in: sumBy(line.long_head, (x) => x?.count_in),
-        head_out: sumBy(line.long_head, (x) => x?.count_out),
-        all_in: sumBy(line.long_all, (x) => x?.count_in),
-        all_out: sumBy(line.long_all, (x) => x?.count_out),
-      },
+    totals_this_year: {
+      person_in: longPerson.total_in,
+      person_out: longPerson.total_out,
+      head_in: longHead.total_in,
+      head_out: longHead.total_out,
+      all_in: longAll.total_in,
+      all_out: longAll.total_out,
+    },
+
+    totals_live: {
+      person_in: livePerson.total_in,
+      person_out: livePerson.total_out,
+      head_in: liveHead.total_in,
+      head_out: liveHead.total_out,
+      all_in: liveAll.total_in,
+      all_out: liveAll.total_out,
     },
   };
 }
 
-function mapArea(area) {
+function mapObjectFlowArea(area) {
   return {
     uuid: area.uuid,
     name: area.name,
@@ -914,21 +798,21 @@ function mapArea(area) {
     classes: {
       PERSON: {
         live: summarizeAreaLive(area.live_person),
-        short: summarizeAreaBuckets(area.short_person),
-        medium: summarizeAreaBuckets(area.medium_person),
-        long: summarizeAreaBuckets(area.long_person),
+        short: summarizeAreaSeries(area.short_person),
+        medium: summarizeAreaSeries(area.medium_person),
+        this_year: summarizeAreaSeries(area.long_person),
       },
       HEAD: {
         live: summarizeAreaLive(area.live_head),
-        short: summarizeAreaBuckets(area.short_head),
-        medium: summarizeAreaBuckets(area.medium_head),
-        long: summarizeAreaBuckets(area.long_head),
+        short: summarizeAreaSeries(area.short_head),
+        medium: summarizeAreaSeries(area.medium_head),
+        this_year: summarizeAreaSeries(area.long_head),
       },
       ALL: {
         live: summarizeAreaLive(area.live_all),
-        short: summarizeAreaBuckets(area.short_all),
-        medium: summarizeAreaBuckets(area.medium_all),
-        long: summarizeAreaBuckets(area.long_all),
+        short: summarizeAreaSeries(area.short_all),
+        medium: summarizeAreaSeries(area.medium_all),
+        this_year: summarizeAreaSeries(area.long_all),
       },
     },
   };
@@ -936,8 +820,8 @@ function mapArea(area) {
 
 function mapApplication(app) {
   if (app.__typename === 'ObjectFlow') {
-    const lines = toArray(app.lines).map(mapLine);
-    const areas = toArray(app.areas).map(mapArea);
+    const lines = toArray(app.lines).map(mapObjectFlowLine);
+    const areas = toArray(app.areas).map(mapObjectFlowArea);
 
     return {
       type: 'ObjectFlow',
@@ -951,47 +835,30 @@ function mapApplication(app) {
       default_model_settings: app.default_model_settings,
       camera: app.camera || null,
       model: app.model || null,
-      alarms: toArray(app.alarms),
-      output_stream: app.output_stream || null,
-      tracks_live: toArray(app.tracks_live),
       lines,
       areas,
 
-      always_report: {
-        person_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.person_in),
-        person_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.person_out),
-        head_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.head_in),
-        head_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.head_out),
-        all_live_in: sumBy(lines, (x) => x.always_report.people_in_out_live.all_in),
-        all_live_out: sumBy(lines, (x) => x.always_report.people_in_out_live.all_out),
+      totals_this_year: {
+        person_in: sumBy(lines, (x) => x.totals_this_year.person_in),
+        person_out: sumBy(lines, (x) => x.totals_this_year.person_out),
+        head_in: sumBy(lines, (x) => x.totals_this_year.head_in),
+        head_out: sumBy(lines, (x) => x.totals_this_year.head_out),
+        all_in: sumBy(lines, (x) => x.totals_this_year.all_in),
+        all_out: sumBy(lines, (x) => x.totals_this_year.all_out),
+      },
 
-        person_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.person_in),
-        person_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.person_out),
-        head_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.head_in),
-        head_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.head_out),
-        all_short_in: sumBy(lines, (x) => x.always_report.people_in_out_short.all_in),
-        all_short_out: sumBy(lines, (x) => x.always_report.people_in_out_short.all_out),
-
-        person_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.person_in),
-        person_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.person_out),
-        head_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.head_in),
-        head_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.head_out),
-        all_medium_in: sumBy(lines, (x) => x.always_report.people_in_out_medium.all_in),
-        all_medium_out: sumBy(lines, (x) => x.always_report.people_in_out_medium.all_out),
-
-        person_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.person_in),
-        person_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.person_out),
-        head_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.head_in),
-        head_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.head_out),
-        all_long_in: sumBy(lines, (x) => x.always_report.people_in_out_long.all_in),
-        all_long_out: sumBy(lines, (x) => x.always_report.people_in_out_long.all_out),
+      totals_live: {
+        person_in: sumBy(lines, (x) => x.totals_live.person_in),
+        person_out: sumBy(lines, (x) => x.totals_live.person_out),
+        head_in: sumBy(lines, (x) => x.totals_live.head_in),
+        head_out: sumBy(lines, (x) => x.totals_live.head_out),
+        all_in: sumBy(lines, (x) => x.totals_live.all_in),
+        all_out: sumBy(lines, (x) => x.totals_live.all_out),
       },
     };
   }
 
   if (app.__typename === 'ObjectCount') {
-    const areas = toArray(app.areas).map(mapArea);
-
     return {
       type: 'ObjectCount',
       uuid: app.uuid,
@@ -1004,16 +871,28 @@ function mapApplication(app) {
       default_model_settings: app.default_model_settings,
       camera: app.camera || null,
       model: app.model || null,
-      alarms: toArray(app.alarms),
-      output_stream: app.output_stream || null,
-      detections_live: toArray(app.detections_live),
-      areas,
-      always_report: {
-        person_live_count: sumBy(areas, (x) => x.classes.PERSON.live.count),
-        head_live_count: sumBy(areas, (x) => x.classes.HEAD.live.count),
-        all_live_count: sumBy(areas, (x) => x.classes.ALL.live.count),
-        note: 'ObjectCount exposes area occupancy/count, not directional IN/OUT.',
-      },
+      areas: toArray(app.areas).map((area) => ({
+        uuid: area.uuid,
+        name: area.name,
+        tags: toArray(area.tags),
+        coordinates: toArray(area.coordinates),
+        created_at: area.created_at || null,
+        updated_at: area.updated_at || null,
+        classes: {
+          PERSON: {
+            live: summarizeAreaLive(area.live_person),
+            this_year: summarizeAreaSeries(area.long_person),
+          },
+          HEAD: {
+            live: summarizeAreaLive(area.live_head),
+            this_year: summarizeAreaSeries(area.long_head),
+          },
+          ALL: {
+            live: summarizeAreaLive(area.live_all),
+            this_year: summarizeAreaSeries(area.long_all),
+          },
+        },
+      })),
     };
   }
 
@@ -1036,39 +915,103 @@ function mapApplication(app) {
       },
       camera: app.camera || null,
       model: app.model || null,
-      alarms: toArray(app.alarms),
-      output_stream: app.output_stream || null,
-      short: summarizeAreaBuckets(app.short_data),
-      medium: summarizeAreaBuckets(app.medium_data),
-      long: summarizeAreaBuckets(app.long_data),
-      always_report: {
-        current_count: app.current_count ?? null,
-        note: 'CrowdCount exposes occupancy/current_count, not directional IN/OUT.',
-      },
+      this_year: summarizeAreaSeries(app.long_data),
     };
   }
 
   return { type: app.__typename || 'Unknown', raw: app };
 }
 
-function featureFlagNamesFromSchema(schemaTypes) {
-  const enumType = toArray(schemaTypes).find((x) => x.name === 'FeatureFlags');
-  return toArray(enumType?.enumValues).map((x) => x.name).filter(Boolean);
+function filterApplications(applications, filters = {}) {
+  const type = filters.type ? lower(filters.type) : null;
+  const line = filters.line ? lower(filters.line) : null;
+  const appName = filters.app ? lower(filters.app) : null;
+  const camera = filters.camera ? lower(filters.camera) : null;
+
+  let result = toArray(applications);
+
+  if (type) {
+    result = result.filter((a) => lower(a.type) === type);
+  }
+
+  if (appName) {
+    result = result.filter((a) => lower(a.name).includes(appName));
+  }
+
+  if (camera) {
+    result = result.filter((a) => lower(a.camera?.name).includes(camera));
+  }
+
+  if (line) {
+    result = result
+      .map((app) => {
+        if (app.type !== 'ObjectFlow') return null;
+        const matchedLines = toArray(app.lines).filter((l) => lower(l.name).includes(line));
+        if (!matchedLines.length) return null;
+
+        return {
+          ...app,
+          lines: matchedLines,
+          totals_this_year: {
+            person_in: sumBy(matchedLines, (x) => x.totals_this_year.person_in),
+            person_out: sumBy(matchedLines, (x) => x.totals_this_year.person_out),
+            head_in: sumBy(matchedLines, (x) => x.totals_this_year.head_in),
+            head_out: sumBy(matchedLines, (x) => x.totals_this_year.head_out),
+            all_in: sumBy(matchedLines, (x) => x.totals_this_year.all_in),
+            all_out: sumBy(matchedLines, (x) => x.totals_this_year.all_out),
+          },
+          totals_live: {
+            person_in: sumBy(matchedLines, (x) => x.totals_live.person_in),
+            person_out: sumBy(matchedLines, (x) => x.totals_live.person_out),
+            head_in: sumBy(matchedLines, (x) => x.totals_live.head_in),
+            head_out: sumBy(matchedLines, (x) => x.totals_live.head_out),
+            all_in: sumBy(matchedLines, (x) => x.totals_live.all_in),
+            all_out: sumBy(matchedLines, (x) => x.totals_live.all_out),
+          },
+        };
+      })
+      .filter(Boolean);
+  }
+
+  return result;
 }
 
-async function collectData() {
+function buildGlobalTotals(applications) {
+  const objectFlow = toArray(applications).filter((a) => a.type === 'ObjectFlow');
+
+  return {
+    objectflow_apps: objectFlow.length,
+    totals_this_year: {
+      person_in: sumBy(objectFlow, (a) => a.totals_this_year.person_in),
+      person_out: sumBy(objectFlow, (a) => a.totals_this_year.person_out),
+      head_in: sumBy(objectFlow, (a) => a.totals_this_year.head_in),
+      head_out: sumBy(objectFlow, (a) => a.totals_this_year.head_out),
+      all_in: sumBy(objectFlow, (a) => a.totals_this_year.all_in),
+      all_out: sumBy(objectFlow, (a) => a.totals_this_year.all_out),
+    },
+    totals_live: {
+      person_in: sumBy(objectFlow, (a) => a.totals_live.person_in),
+      person_out: sumBy(objectFlow, (a) => a.totals_live.person_out),
+      head_in: sumBy(objectFlow, (a) => a.totals_live.head_in),
+      head_out: sumBy(objectFlow, (a) => a.totals_live.head_out),
+      all_in: sumBy(objectFlow, (a) => a.totals_live.all_in),
+      all_out: sumBy(objectFlow, (a) => a.totals_live.all_out),
+    },
+  };
+}
+
+async function collectData(filters = {}) {
   const schemaRes = await graphql(QUERY_SCHEMA);
   const schema = schemaRes.data?.__schema || null;
-
-  const featureFlagsList = featureFlagNamesFromSchema(schema?.types);
+  const featureflags = featureFlagNamesFromSchema(schema?.types);
 
   const variablesApps = {
-    personAndHead: CONFIG.classNames.map((name) => ({ name })),
     personOnly: [{ name: 'PERSON' }],
     headOnly: [{ name: 'HEAD' }],
-    presetShort: CONFIG.historyPresetShort,
-    presetMedium: CONFIG.historyPresetMedium,
-    presetLong: CONFIG.historyPresetLong,
+    allClasses: CONFIG.classNames.map((name) => ({ name })),
+    presetShort: CONFIG.presetShort,
+    presetMedium: CONFIG.presetMedium,
+    presetLong: CONFIG.presetLong,
   };
 
   const variablesHealth = {
@@ -1077,98 +1020,48 @@ async function collectData() {
     },
   };
 
-  const variablesFlags = {
-    featureflags: featureFlagsList,
-  };
-
   const [camerasRes, appsRes, healthRes, flagsRes, miscRes] = await Promise.all([
     graphql(QUERY_CAMERAS),
-    graphql(QUERY_APPS, variablesApps),
+    graphql(QUERY_APPLICATIONS, variablesApps),
     graphql(QUERY_SYSTEM_HEALTH, variablesHealth),
-    graphql(QUERY_FEATURE_FLAGS, variablesFlags),
+    graphql(QUERY_FEATURE_FLAGS, { featureflags }),
     graphql(QUERY_MISC),
   ]);
 
   const cameras = toArray(camerasRes.data?.allCameras);
-  const applications = toArray(appsRes.data?.allApplications).map(mapApplication);
-
-  const objectFlowApps = applications.filter((x) => x.type === 'ObjectFlow');
-  const objectCountApps = applications.filter((x) => x.type === 'ObjectCount');
-  const crowdApps = applications.filter((x) => x.type === 'CrowdCount');
-
-  const summary = {
-    generated_at: nowIso(),
-    totals: {
-      cameras: cameras.length,
-      applications: applications.length,
-      objectflow: objectFlowApps.length,
-      objectcount: objectCountApps.length,
-      crowdcount: crowdApps.length,
-    },
-    in_out: {
-      person_live_in: sumBy(objectFlowApps, (x) => x.always_report.person_live_in),
-      person_live_out: sumBy(objectFlowApps, (x) => x.always_report.person_live_out),
-      head_live_in: sumBy(objectFlowApps, (x) => x.always_report.head_live_in),
-      head_live_out: sumBy(objectFlowApps, (x) => x.always_report.head_live_out),
-      all_live_in: sumBy(objectFlowApps, (x) => x.always_report.all_live_in),
-      all_live_out: sumBy(objectFlowApps, (x) => x.always_report.all_live_out),
-
-      person_short_in: sumBy(objectFlowApps, (x) => x.always_report.person_short_in),
-      person_short_out: sumBy(objectFlowApps, (x) => x.always_report.person_short_out),
-      head_short_in: sumBy(objectFlowApps, (x) => x.always_report.head_short_in),
-      head_short_out: sumBy(objectFlowApps, (x) => x.always_report.head_short_out),
-      all_short_in: sumBy(objectFlowApps, (x) => x.always_report.all_short_in),
-      all_short_out: sumBy(objectFlowApps, (x) => x.always_report.all_short_out),
-
-      person_medium_in: sumBy(objectFlowApps, (x) => x.always_report.person_medium_in),
-      person_medium_out: sumBy(objectFlowApps, (x) => x.always_report.person_medium_out),
-      head_medium_in: sumBy(objectFlowApps, (x) => x.always_report.head_medium_in),
-      head_medium_out: sumBy(objectFlowApps, (x) => x.always_report.head_medium_out),
-      all_medium_in: sumBy(objectFlowApps, (x) => x.always_report.all_medium_in),
-      all_medium_out: sumBy(objectFlowApps, (x) => x.always_report.all_medium_out),
-
-      person_long_in: sumBy(objectFlowApps, (x) => x.always_report.person_long_in),
-      person_long_out: sumBy(objectFlowApps, (x) => x.always_report.person_long_out),
-      head_long_in: sumBy(objectFlowApps, (x) => x.always_report.head_long_in),
-      head_long_out: sumBy(objectFlowApps, (x) => x.always_report.head_long_out),
-      all_long_in: sumBy(objectFlowApps, (x) => x.always_report.all_long_in),
-      all_long_out: sumBy(objectFlowApps, (x) => x.always_report.all_long_out),
-    },
-    occupancy: {
-      objectcount_person_live: sumBy(objectCountApps, (x) => x.always_report.person_live_count || 0),
-      objectcount_head_live: sumBy(objectCountApps, (x) => x.always_report.head_live_count || 0),
-      objectcount_all_live: sumBy(objectCountApps, (x) => x.always_report.all_live_count || 0),
-      crowdcount_current: sumBy(crowdApps, (x) => x.current_count || 0),
-    },
-  };
+  const applicationsRaw = toArray(appsRes.data?.allApplications).map(mapApplication);
+  const applications = filterApplications(applicationsRaw, filters);
+  const totals = buildGlobalTotals(applications);
 
   return {
     ok: true,
     generated_at: nowIso(),
+    filters,
     config: {
       baseUrl: CONFIG.baseUrl,
       graphqlPath: CONFIG.graphqlPath,
       verifyTls: CONFIG.verifyTls,
       classes: CONFIG.classNames,
       presets: {
-        short: CONFIG.historyPresetShort,
-        medium: CONFIG.historyPresetMedium,
-        long: CONFIG.historyPresetLong,
+        short: CONFIG.presetShort,
+        medium: CONFIG.presetMedium,
+        long: CONFIG.presetLong,
         health: CONFIG.healthPreset,
       },
     },
-    summary,
-    schema,
+    totals,
     inventory: {
       cameras,
       applications,
+      application_count: applications.length,
     },
     operations: {
       system_health: healthRes.data?.getSystemHealth || null,
-      feature_flags_requested: featureFlagsList,
+      feature_flags_requested: featureflags,
       feature_flags_result: flagsRes.data?.getFeatureFlags || null,
       misc: miscRes.data || null,
     },
+    schema,
     errors: {
       schema: schemaRes.errors,
       cameras: camerasRes.errors,
@@ -1189,6 +1082,15 @@ function sendJson(res, code, payload) {
   res.end(body);
 }
 
+function pickFilters(url) {
+  return {
+    type: url.searchParams.get('type') || '',
+    app: url.searchParams.get('app') || '',
+    camera: url.searchParams.get('camera') || '',
+    line: url.searchParams.get('line') || '',
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -1197,7 +1099,15 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'isarsoft-node-server',
       time: nowIso(),
-      endpoints: ['/health', '/summary', '/data', '/applications', '/cameras'],
+      endpoints: [
+        '/health',
+        '/summary',
+        '/data',
+        '/applications',
+        '/cameras',
+        '/summary?line=walk',
+        '/data?line=walk&type=objectflow',
+      ],
     });
   }
 
@@ -1207,12 +1117,14 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/summary') {
     try {
-      const data = await collectData();
+      const filters = pickFilters(url);
+      const data = await collectData(filters);
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
+        filters: data.filters,
         config: data.config,
-        summary: data.summary,
+        totals: data.totals,
       });
     } catch (err) {
       return sendJson(res, 500, {
@@ -1225,7 +1137,8 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/data') {
     try {
-      const data = await collectData();
+      const filters = pickFilters(url);
+      const data = await collectData(filters);
       return sendJson(res, 200, data);
     } catch (err) {
       return sendJson(res, 500, {
@@ -1238,10 +1151,13 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/applications') {
     try {
-      const data = await collectData();
+      const filters = pickFilters(url);
+      const data = await collectData(filters);
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
+        filters: data.filters,
+        totals: data.totals,
         applications: data.inventory.applications,
       });
     } catch (err) {
@@ -1255,7 +1171,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/cameras') {
     try {
-      const data = await collectData();
+      const data = await collectData({});
       return sendJson(res, 200, {
         ok: true,
         generated_at: data.generated_at,
@@ -1288,9 +1204,9 @@ server.listen(CONFIG.port, () => {
         graphqlPath: CONFIG.graphqlPath,
         classes: CONFIG.classNames,
         presets: {
-          short: CONFIG.historyPresetShort,
-          medium: CONFIG.historyPresetMedium,
-          long: CONFIG.historyPresetLong,
+          short: CONFIG.presetShort,
+          medium: CONFIG.presetMedium,
+          long: CONFIG.presetLong,
           health: CONFIG.healthPreset,
         },
         time: nowIso(),
