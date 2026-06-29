@@ -4,9 +4,7 @@ const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
 
-// ============================================================
 // KONFIGURACJA
-// ============================================================
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
@@ -28,16 +26,12 @@ const CONFIG = {
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000),
 };
 
-// ============================================================
 // AGENT HTTPS
-// ============================================================
 const httpsAgent = new https.Agent({
   rejectUnauthorized: CONFIG.verifyTls,
 });
 
-// ============================================================
 // POMOCNICY
-// ============================================================
 function nowIso() {
   return new Date().toISOString();
 }
@@ -67,9 +61,7 @@ function safeJson(text) {
   }
 }
 
-// ============================================================
 // NISKOPOZIOMOWE ŻĄDANIA HTTP
-// ============================================================
 function requestRaw(urlString, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
@@ -112,9 +104,7 @@ function requestRaw(urlString, options = {}, body = null) {
   });
 }
 
-// ============================================================
 // TOKEN OAuth2
-// ============================================================
 let tokenCache = { token: null, expiresAt: 0 };
 
 async function getToken(force = false) {
@@ -154,9 +144,7 @@ async function getToken(force = false) {
   return tokenCache.token;
 }
 
-// ============================================================
 // WYKONYWANIE ZAPYTAŃ GRAPHQL
-// ============================================================
 async function graphql(query, variables = null, retry = true) {
   const token = await getToken(false);
   const payload = JSON.stringify({ query, variables });
@@ -197,9 +185,7 @@ async function graphql(query, variables = null, retry = true) {
   return json.data || null;
 }
 
-// ============================================================
 // ZAPYTANIA GRAPHQL (poprawione)
-// ============================================================
 
 // 1. Introspekcja – pobranie enumów
 const QUERY_SCHEMA = `
@@ -312,9 +298,7 @@ query {
 }
 `;
 
-// ============================================================
 // FUNKCJE POMOCNICZE DO PRZETWARZANIA DANYCH
-// ============================================================
 
 function getEnumValues(schema, typeName) {
   const type = toArray(schema?.types).find((x) => x.name === typeName);
@@ -345,10 +329,8 @@ function classInputs(classes) {
   return classes.map((name) => ({ name }));
 }
 
-// ============================================================
 // UWAGA: Funkcje agregujące obsługują teraz tablicę tablic
 //         (gdy count_data zwraca dane dla wielu klas oddzielnie)
-// ============================================================
 
 function flattenRows(rows) {
   // Jeśli rows jest tablicą, a pierwszy element też jest tablicą, to spłaszczamy
@@ -405,9 +387,7 @@ function summarizeAreaLive(rows) {
   };
 }
 
-// ============================================================
 // GŁÓWNA FUNKCJA ZBIERAJĄCA DANE
-// ============================================================
 
 async function collectAllData(filters = {}) {
   // --- 1. Pobierz schemę dla enumów ---
@@ -680,9 +660,7 @@ async function collectAllData(filters = {}) {
   };
 }
 
-// ============================================================
 // BUFOR PAMIĘCIOWY (cache)
-// ============================================================
 let cachedData = null;
 let lastSuccess = null;
 let isPolling = false;
@@ -725,9 +703,7 @@ function getCachedData() {
   };
 }
 
-// ============================================================
 // SERWER HTTP
-// ============================================================
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
@@ -930,9 +906,7 @@ const server = http.createServer(async (req, res) => {
   return sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
-// ============================================================
 // URUCHOMIENIE
-// ============================================================
 
 server.listen(CONFIG.port, async () => {
   console.log(JSON.stringify({
@@ -966,9 +940,7 @@ server.listen(CONFIG.port, async () => {
   console.log(`[startup] Serwer nasłuchuje na porcie ${CONFIG.port}, odświeżanie co ${CONFIG.pollIntervalMs / 1000}s`);
 });
 
-// ============================================================
 // ZAMKNIĘCIE
-// ============================================================
 process.on('SIGINT', () => {
   console.log('[shutdown] Otrzymano SIGINT, zamykam serwer...');
   server.close(() => {
