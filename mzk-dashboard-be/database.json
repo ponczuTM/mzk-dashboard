@@ -115,10 +115,10 @@
       "planned_time": "06:20:00"
     },
     "planned_time": "06:20:00",
-    "actual_time": "2026-06-29T13:05:34.324Z",
+    "actual_time": "2026-06-29T13:15:54.348Z",
     "status": "opóźniony",
-    "delay_seconds": 31534,
-    "last_update": "2026-06-29T13:05:34.324Z",
+    "delay_seconds": 32154,
+    "last_update": "2026-06-29T13:15:54.348Z",
     "data_quality": {
       "complete": false,
       "errors": [
@@ -222,6 +222,78 @@
       "stop_id": "stop_5",
       "status": "opóźniony",
       "delay_seconds": 31534
+    },
+    {
+      "timestamp": "2026-06-29T13:15:14.342Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32114
+    },
+    {
+      "timestamp": "2026-06-29T13:15:19.343Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32119
+    },
+    {
+      "timestamp": "2026-06-29T13:15:24.344Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32124
+    },
+    {
+      "timestamp": "2026-06-29T13:15:29.346Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32129
+    },
+    {
+      "timestamp": "2026-06-29T13:15:34.346Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32134
+    },
+    {
+      "timestamp": "2026-06-29T13:15:39.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32139
+    },
+    {
+      "timestamp": "2026-06-29T13:15:44.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32144
+    },
+    {
+      "timestamp": "2026-06-29T13:15:49.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32149
+    },
+    {
+      "timestamp": "2026-06-29T13:15:54.348Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32154
     }
   ]
 }

@@ -3,13 +3,10 @@
 const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
-const fs = require('fs').promises;
-const path = require('path');
 
-// ============================
-// KONFIGURACJA I STAŁE
-// ============================
-
+// ============================================================
+// KONFIGURACJA
+// ============================================================
 const CONFIG = {
   port: Number(process.env.PORT || 3000),
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
@@ -22,25 +19,25 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
+  // Zmieniamy domyślny preset na LAST_1_DAY, aby mieć pewność, że dane istnieją
   defaultPreset: process.env.ISARSOFT_PRESET || 'LAST_1_DAY',
   defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON,HEAD')
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
   pollIntervalMs: Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000),
-  // Nowe stałe dla symulacji
-  simulationIntervalMs: 5000, // co 5 sekund
-  delayThresholdSeconds: 10,   // próg punktualności
-  maxHistoryEntries: 1000,     // ograniczenie historii
 };
 
-const VEHICLE_ID = 'first_bus_line_113';
-const DB_PATH = path.join(__dirname, 'database.json');
+// ============================================================
+// AGENT HTTPS
+// ============================================================
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: CONFIG.verifyTls,
+});
 
-// ============================
-// POMOCNICY OGÓLNI (istniejący)
-// ============================
-
+// ============================================================
+// POMOCNICY
+// ============================================================
 function nowIso() {
   return new Date().toISOString();
 }
@@ -70,421 +67,9 @@ function safeJson(text) {
   }
 }
 
-// ============================
-// OBSŁUGA BAZY DANYCH (database.json)
-// ============================
-
-/**
- * Zwraca domyślną strukturę bazy z przykładowymi danymi dla linii 113 w Toruniu.
- */
-function getDefaultDatabase() {
-  return {
-    stops: [
-      {
-        stop_id: 'stop_1',
-        name: 'Plac Rapackiego',
-        number: '01',
-        latitude: 53.0138,
-        longitude: 18.5982,
-        admin_zone: 'Toruń',
-        zone_type: 'stały',
-      },
-      {
-        stop_id: 'stop_2',
-        name: 'Dworzec Główny',
-        number: '02',
-        latitude: 53.0146,
-        longitude: 18.5998,
-        admin_zone: 'Toruń',
-        zone_type: 'stały',
-      },
-      {
-        stop_id: 'stop_3',
-        name: 'Bydgoska',
-        number: '03',
-        latitude: 53.0133,
-        longitude: 18.6022,
-        admin_zone: 'Toruń',
-        zone_type: 'stały',
-      },
-      {
-        stop_id: 'stop_4',
-        name: 'Szosa Chełmińska',
-        number: '04',
-        latitude: 53.0106,
-        longitude: 18.6015,
-        admin_zone: 'Toruń',
-        zone_type: 'stały',
-      },
-      {
-        stop_id: 'stop_5',
-        name: 'Włocławska',
-        number: '05',
-        latitude: 53.0088,
-        longitude: 18.5983,
-        admin_zone: 'Toruń',
-        zone_type: 'na żądanie',
-      },
-    ],
-    schedules: [
-      {
-        line: '113',
-        direction: 'Dworzec Główny → Włocławska',
-        day_type: 'weekday',
-        stops_sequence: [
-          { stop_id: 'stop_1', planned_time: '06:00:00' },
-          { stop_id: 'stop_2', planned_time: '06:05:00' },
-          { stop_id: 'stop_3', planned_time: '06:10:00' },
-          { stop_id: 'stop_4', planned_time: '06:15:00' },
-          { stop_id: 'stop_5', planned_time: '06:20:00' },
-        ],
-      },
-      {
-        line: '113',
-        direction: 'Dworzec Główny → Włocławska',
-        day_type: 'weekend',
-        stops_sequence: [
-          { stop_id: 'stop_1', planned_time: '07:00:00' },
-          { stop_id: 'stop_2', planned_time: '07:06:00' },
-          { stop_id: 'stop_3', planned_time: '07:12:00' },
-          { stop_id: 'stop_4', planned_time: '07:18:00' },
-          { stop_id: 'stop_5', planned_time: '07:24:00' },
-        ],
-      },
-    ],
-    trips: {
-      vehicle_id: VEHICLE_ID,
-      current_stop_index: 0,
-      current_position: { lat: 53.0138, lng: 18.5982 },
-      next_stop: null,
-      planned_time: null,
-      actual_time: null,
-      status: 'o czasie',
-      delay_seconds: 0,
-      last_update: null,
-      data_quality: { complete: true, errors: [] },
-    },
-    history: [],
-  };
-}
-
-/**
- * Atomowy odczyt bazy danych.
- */
-async function readDatabase() {
-  try {
-    const data = await fs.readFile(DB_PATH, 'utf8');
-    return JSON.parse(data);
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      // Baza nie istnieje – tworzymy domyślną i zapisujemy
-      const defaultData = getDefaultDatabase();
-      await writeDatabase(defaultData);
-      return defaultData;
-    }
-    throw err;
-  }
-}
-
-/**
- * Atomowy zapis bazy danych (przez plik tymczasowy + rename).
- */
-async function writeDatabase(data) {
-  const tempPath = DB_PATH + '.tmp';
-  await fs.writeFile(tempPath, JSON.stringify(data, null, 2));
-  await fs.rename(tempPath, DB_PATH);
-}
-
-// ============================
-// FUNKCJE POMOCNICZE DLA SYMULACJI
-// ============================
-
-/**
- * Określa typ dnia na podstawie aktualnej daty.
- * Pomija święta – uproszczenie.
- */
-function getCurrentDayType() {
-  const now = new Date();
-  const day = now.getDay(); // 0 = niedziela, 6 = sobota
-  if (day === 0 || day === 6) return 'weekend';
-  return 'weekday';
-}
-
-/**
- * Konwertuje czas HH:MM:SS na liczbę sekund od północy.
- */
-function timeToSeconds(timeStr) {
-  const parts = timeStr.split(':').map(Number);
-  return parts[0] * 3600 + parts[1] * 60 + parts[2];
-}
-
-/**
- * Formatuje różnicę w sekundach na czytelny napis HH:MM:SS.
- * Dla wartości ujemnej zwraca z minusem.
- */
-function formatDelay(seconds) {
-  const abs = Math.abs(seconds);
-  const h = Math.floor(abs / 3600);
-  const m = Math.floor((abs % 3600) / 60);
-  const s = Math.floor(abs % 60);
-  const sign = seconds < 0 ? '-' : '';
-  return `${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-/**
- * Interpoluje współrzędne między dwoma przystankami na podstawie frakcji (0..1).
- */
-function interpolatePosition(stopA, stopB, fraction) {
-  const lat = stopA.latitude + fraction * (stopB.latitude - stopA.latitude);
-  const lng = stopA.longitude + fraction * (stopB.longitude - stopA.longitude);
-  return { lat, lng };
-}
-
-/**
- * Sprawdza jakość danych z kamer na podstawie globalnego cache.
- */
-function checkCameraQuality() {
-  const result = { complete: true, errors: [] };
-
-  // Jeśli cache jest pusty lub wystąpił błąd pobierania
-  if (!cachedData || pollError) {
-    result.complete = false;
-    result.errors.push('Brak danych z Isarsoft – pomiar wadliwy');
-    return result;
-  }
-
-  // Sprawdzamy, czy mamy jakiekolwiek kamery
-  const cameras = cachedData.cameras || [];
-  if (cameras.length === 0) {
-    result.complete = false;
-    result.errors.push('Brak zarejestrowanych kamer – pomiar wadliwy');
-    return result;
-  }
-
-  // Opcjonalnie: sprawdź, czy wszystkie aplikacje ObjectFlow są online
-  const apps = cachedData.applications || [];
-  const offlineApps = apps.filter(app => app.status !== 'online' && app.status !== 'OK');
-  if (offlineApps.length > 0) {
-    result.complete = false;
-    result.errors.push(`Następujące aplikacje są offline: ${offlineApps.map(a => a.name).join(', ')}`);
-  }
-
-  return result;
-}
-
-// ============================
-// GŁÓWNA LOGIKA SYMULACJI (wywoływana co 5 sekund)
-// ============================
-
-async function simulatePosition() {
-  try {
-    // 1. Odczyt bazy
-    const db = await readDatabase();
-
-    // 2. Pobranie aktualnego dnia i znalezienie odpowiedniego rozkładu
-    const dayType = getCurrentDayType();
-    const schedule = db.schedules.find(
-      (s) => s.line === '113' && s.day_type === dayType
-    );
-
-    if (!schedule) {
-      // Brak rozkładu – nie aktualizujemy pozycji
-      console.log(`[simulate] Brak rozkładu dla dnia ${dayType}, pomijam aktualizację.`);
-      return;
-    }
-
-    const stopsSeq = schedule.stops_sequence;
-    if (!stopsSeq || stopsSeq.length < 2) {
-      console.log('[simulate] Rozkład ma mniej niż 2 przystanki – pomijam.');
-      return;
-    }
-
-    // 3. Pobranie pełnych danych przystanków (z kolekcji stops)
-    const stopsMap = {};
-    db.stops.forEach((stop) => {
-      stopsMap[stop.stop_id] = stop;
-    });
-
-    // Sprawdzenie, czy wszystkie stop_id z rozkładu istnieją
-    const missingStops = stopsSeq
-      .map((item) => item.stop_id)
-      .filter((id) => !stopsMap[id]);
-    if (missingStops.length > 0) {
-      console.log(`[simulate] Brak danych dla przystanków: ${missingStops.join(', ')}`);
-      return;
-    }
-
-    // 4. Obliczenie planowanych czasów w sekundach od północy
-    const now = new Date();
-    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const currentSeconds = Math.floor((now.getTime() - todayMidnight.getTime()) / 1000);
-
-    const plannedTimes = stopsSeq.map((item) => timeToSeconds(item.planned_time));
-
-    // 5. Znalezienie przedziału, w którym znajduje się aktualny czas
-    let index = 0;
-    while (index < plannedTimes.length - 1 && currentSeconds > plannedTimes[index + 1]) {
-      index++;
-    }
-
-    // Jeśli czas jest przed pierwszym przystankiem
-    if (currentSeconds < plannedTimes[0]) {
-      // Autobus jeszcze nie ruszył – stoi na pierwszym przystanku
-      const firstStop = stopsMap[stopsSeq[0].stop_id];
-      const nextStop = stopsMap[stopsSeq[1].stop_id];
-      const delay = currentSeconds - plannedTimes[0]; // ujemne (za wcześnie)
-      const status = delay < -CONFIG.delayThresholdSeconds ? 'za szybko' : 'o czasie';
-
-      // Aktualizacja trips
-      db.trips.current_stop_index = 0;
-      db.trips.current_position = { lat: firstStop.latitude, lng: firstStop.longitude };
-      db.trips.next_stop = {
-        stop_id: firstStop.stop_id,
-        name: firstStop.name,
-        planned_time: stopsSeq[0].planned_time,
-      };
-      db.trips.planned_time = stopsSeq[0].planned_time;
-      db.trips.actual_time = nowIso();
-      db.trips.status = status;
-      db.trips.delay_seconds = delay;
-      db.trips.last_update = nowIso();
-
-      // Jakość kamer
-      const quality = checkCameraQuality();
-      db.trips.data_quality = quality;
-
-      // Dodanie do historii
-      db.history.push({
-        timestamp: nowIso(),
-        lat: firstStop.latitude,
-        lng: firstStop.longitude,
-        stop_id: firstStop.stop_id,
-        status: status,
-        delay_seconds: delay,
-      });
-      // Ograniczenie historii
-      if (db.history.length > CONFIG.maxHistoryEntries) {
-        db.history = db.history.slice(-CONFIG.maxHistoryEntries);
-      }
-
-      await writeDatabase(db);
-
-      // Log
-      const statusText = status === 'o czasie' ? 'O CZASIE' : status.toUpperCase();
-      console.log(
-        `Zaktualizowano pozycję komputera pokładowego (${VEHICLE_ID}). Współrzędne: [${firstStop.latitude.toFixed(4)}, ${firstStop.longitude.toFixed(4)}]. Status: ${statusText} (odchylenie ${formatDelay(delay)}) względem przystanku ${firstStop.name} (Rozkład: ${dayType})`
-      );
-      return;
-    }
-
-    // Jeśli czas jest po ostatnim przystanku
-    if (currentSeconds >= plannedTimes[plannedTimes.length - 1]) {
-      const lastStop = stopsMap[stopsSeq[stopsSeq.length - 1].stop_id];
-      const delay = currentSeconds - plannedTimes[plannedTimes.length - 1];
-      const status = delay > CONFIG.delayThresholdSeconds ? 'opóźniony' : 'o czasie';
-
-      db.trips.current_stop_index = stopsSeq.length - 1;
-      db.trips.current_position = { lat: lastStop.latitude, lng: lastStop.longitude };
-      db.trips.next_stop = {
-        stop_id: lastStop.stop_id,
-        name: lastStop.name,
-        planned_time: stopsSeq[stopsSeq.length - 1].planned_time,
-      };
-      db.trips.planned_time = stopsSeq[stopsSeq.length - 1].planned_time;
-      db.trips.actual_time = nowIso();
-      db.trips.status = status;
-      db.trips.delay_seconds = delay;
-      db.trips.last_update = nowIso();
-
-      const quality = checkCameraQuality();
-      db.trips.data_quality = quality;
-
-      db.history.push({
-        timestamp: nowIso(),
-        lat: lastStop.latitude,
-        lng: lastStop.longitude,
-        stop_id: lastStop.stop_id,
-        status: status,
-        delay_seconds: delay,
-      });
-      if (db.history.length > CONFIG.maxHistoryEntries) {
-        db.history = db.history.slice(-CONFIG.maxHistoryEntries);
-      }
-
-      await writeDatabase(db);
-
-      const statusText = status === 'o czasie' ? 'O CZASIE' : status.toUpperCase();
-      console.log(
-        `Zaktualizowano pozycję komputera pokładowego (${VEHICLE_ID}). Współrzędne: [${lastStop.latitude.toFixed(4)}, ${lastStop.longitude.toFixed(4)}]. Status: ${statusText} (odchylenie ${formatDelay(delay)}) względem przystanku ${lastStop.name} (Rozkład: ${dayType})`
-      );
-      return;
-    }
-
-    // 6. Interpolacja między przystankiem 'index' a 'index+1'
-    const stopA = stopsMap[stopsSeq[index].stop_id];
-    const stopB = stopsMap[stopsSeq[index + 1].stop_id];
-    const tA = plannedTimes[index];
-    const tB = plannedTimes[index + 1];
-    const fraction = (currentSeconds - tA) / (tB - tA); // 0..1
-
-    const pos = interpolatePosition(stopA, stopB, fraction);
-
-    // 7. Określenie statusu na podstawie najbliższego przystanku docelowego (index+1)
-    const delay = currentSeconds - plannedTimes[index + 1];
-    let status = 'o czasie';
-    if (delay > CONFIG.delayThresholdSeconds) status = 'opóźniony';
-    else if (delay < -CONFIG.delayThresholdSeconds) status = 'za szybko';
-
-    // 8. Aktualizacja trips
-    db.trips.current_stop_index = index;
-    db.trips.current_position = { lat: pos.lat, lng: pos.lng };
-    db.trips.next_stop = {
-      stop_id: stopB.stop_id,
-      name: stopB.name,
-      planned_time: stopsSeq[index + 1].planned_time,
-    };
-    db.trips.planned_time = stopsSeq[index + 1].planned_time;
-    db.trips.actual_time = nowIso();
-    db.trips.status = status;
-    db.trips.delay_seconds = delay;
-    db.trips.last_update = nowIso();
-
-    const quality = checkCameraQuality();
-    db.trips.data_quality = quality;
-
-    // 9. Zapis do historii
-    db.history.push({
-      timestamp: nowIso(),
-      lat: pos.lat,
-      lng: pos.lng,
-      stop_id: stopB.stop_id, // zapisujemy docelowy przystanek
-      status: status,
-      delay_seconds: delay,
-    });
-    if (db.history.length > CONFIG.maxHistoryEntries) {
-      db.history = db.history.slice(-CONFIG.maxHistoryEntries);
-    }
-
-    await writeDatabase(db);
-
-    // 10. Log
-    const statusText = status === 'o czasie' ? 'O CZASIE' : status.toUpperCase();
-    console.log(
-      `Zaktualizowano pozycję komputera pokładowego (${VEHICLE_ID}). Współrzędne: [${pos.lat.toFixed(4)}, ${pos.lng.toFixed(4)}]. Status: ${statusText} (odchylenie ${formatDelay(delay)}) względem przystanku ${stopB.name} (Rozkład: ${dayType})`
-    );
-  } catch (err) {
-    console.error('[simulatePosition] Błąd:', err.message);
-  }
-}
-
-// ============================
-// ISTNIEJĄCY KOD OBSŁUGI ISARSOFT (bez zmian)
-// ============================
-
-const httpsAgent = new https.Agent({
-  rejectUnauthorized: CONFIG.verifyTls,
-});
-
+// ============================================================
+// NISKOPOZIOMOWE ŻĄDANIA HTTP
+// ============================================================
 function requestRaw(urlString, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
@@ -527,6 +112,9 @@ function requestRaw(urlString, options = {}, body = null) {
   });
 }
 
+// ============================================================
+// TOKEN OAuth2
+// ============================================================
 let tokenCache = { token: null, expiresAt: 0 };
 
 async function getToken(force = false) {
@@ -566,6 +154,9 @@ async function getToken(force = false) {
   return tokenCache.token;
 }
 
+// ============================================================
+// WYKONYWANIE ZAPYTAŃ GRAPHQL
+// ============================================================
 async function graphql(query, variables = null, retry = true) {
   const token = await getToken(false);
   const payload = JSON.stringify({ query, variables });
@@ -606,7 +197,11 @@ async function graphql(query, variables = null, retry = true) {
   return json.data || null;
 }
 
-// Zapytania GraphQL
+// ============================================================
+// ZAPYTANIA GRAPHQL (poprawione)
+// ============================================================
+
+// 1. Introspekcja – pobranie enumów
 const QUERY_SCHEMA = `
 query {
   __schema {
@@ -619,6 +214,7 @@ query {
 }
 `;
 
+// 2. Lista aplikacji ObjectFlow (metadane + linie i obszary bez liczników)
 const QUERY_OBJECTFLOW_APPS = `
 query {
   allApplications {
@@ -650,6 +246,8 @@ query {
 }
 `;
 
+// 3. Szczegóły aplikacji ObjectFlow z danymi licznikowymi
+//    UWAGA: użyto poprawnego argumentu `application: { uuid: $app }`
 const QUERY_ONE_APP_COUNTS = `
 query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
   getApplication(application: { uuid: $app }) {
@@ -695,6 +293,7 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
 }
 `;
 
+// 4. Lista wszystkich kamer
 const QUERY_ALL_CAMERAS = `
 query {
   allCameras {
@@ -704,6 +303,7 @@ query {
 }
 `;
 
+// 5. Licencja (uproszczona)
 const QUERY_LICENSE = `
 query {
   getLicenseStatus {
@@ -711,6 +311,10 @@ query {
   }
 }
 `;
+
+// ============================================================
+// FUNKCJE POMOCNICZE DO PRZETWARZANIA DANYCH
+// ============================================================
 
 function getEnumValues(schema, typeName) {
   const type = toArray(schema?.types).find((x) => x.name === typeName);
@@ -741,7 +345,13 @@ function classInputs(classes) {
   return classes.map((name) => ({ name }));
 }
 
+// ============================================================
+// UWAGA: Funkcje agregujące obsługują teraz tablicę tablic
+//         (gdy count_data zwraca dane dla wielu klas oddzielnie)
+// ============================================================
+
 function flattenRows(rows) {
+  // Jeśli rows jest tablicą, a pierwszy element też jest tablicą, to spłaszczamy
   if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
     return rows.flat();
   }
@@ -795,7 +405,12 @@ function summarizeAreaLive(rows) {
   };
 }
 
+// ============================================================
+// GŁÓWNA FUNKCJA ZBIERAJĄCA DANE
+// ============================================================
+
 async function collectAllData(filters = {}) {
+  // --- 1. Pobierz schemę dla enumów ---
   let allowedPresets = ['LAST_1_DAY', 'LAST_1_HOUR', 'LAST_12_HOUR', 'THIS_YEAR', 'THIS_WEEK', 'THIS_MONTH'];
   try {
     const schemaData = await graphql(QUERY_SCHEMA);
@@ -811,6 +426,7 @@ async function collectAllData(filters = {}) {
   const range = { time_range_preset: preset };
   const classesVar = classInputs(classes);
 
+  // --- 2. Pobierz listę aplikacji ObjectFlow ---
   let apps = [];
   try {
     const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
@@ -820,6 +436,7 @@ async function collectAllData(filters = {}) {
     throw err;
   }
 
+  // Filtrowanie po nazwie / kamerze
   if (filters.app) {
     apps = apps.filter((x) => lower(x.name).includes(lower(filters.app)));
   }
@@ -827,6 +444,7 @@ async function collectAllData(filters = {}) {
     apps = apps.filter((x) => lower(x.camera?.name).includes(lower(filters.camera)));
   }
 
+  // --- 3. Dla każdej aplikacji pobierz szczegółowe dane licznikowe ---
   const detailedApps = [];
   for (const app of apps) {
     try {
@@ -853,6 +471,7 @@ async function collectAllData(filters = {}) {
         continue;
       }
 
+      // --- 3a. Linie ---
       let lines = toArray(objectFlow.lines);
       if (filters.line) {
         lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
@@ -872,6 +491,7 @@ async function collectAllData(filters = {}) {
         };
       });
 
+      // --- 3b. Obszary ---
       let areas = toArray(objectFlow.areas);
       if (filters.area) {
         areas = areas.filter((a) => lower(a.name).includes(lower(filters.area)));
@@ -896,6 +516,7 @@ async function collectAllData(filters = {}) {
         };
       });
 
+      // --- 3c. Agregacja ---
       const totalIn = sumBy(mappedLines, (x) => x.totals.in);
       const totalOut = sumBy(mappedLines, (x) => x.totals.out);
 
@@ -937,6 +558,7 @@ async function collectAllData(filters = {}) {
     }
   }
 
+  // --- 4. Kamery ---
   let allCameras = [];
   try {
     const camerasData = await graphql(QUERY_ALL_CAMERAS);
@@ -945,6 +567,7 @@ async function collectAllData(filters = {}) {
     console.error('[collectAllData] Błąd pobierania kamer:', err.message);
   }
 
+  // --- 5. Licencja ---
   let licenseStatus = null;
   try {
     const licenseData = await graphql(QUERY_LICENSE);
@@ -953,6 +576,7 @@ async function collectAllData(filters = {}) {
     console.error('[collectAllData] Błąd pobierania licencji:', err.message);
   }
 
+  // --- 6. Integracje (MQTT, Kafka) ---
   let mqttSettings = null;
   try {
     const mqttData = await graphql(`
@@ -988,6 +612,7 @@ async function collectAllData(filters = {}) {
     // ignorujemy
   }
 
+  // --- 7. Wynik ---
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
       application_uuid: app.uuid,
@@ -1055,10 +680,9 @@ async function collectAllData(filters = {}) {
   };
 }
 
-// ============================
-// CACHE DANYCH ISARSOFT
-// ============================
-
+// ============================================================
+// BUFOR PAMIĘCIOWY (cache)
+// ============================================================
 let cachedData = null;
 let lastSuccess = null;
 let isPolling = false;
@@ -1101,9 +725,9 @@ function getCachedData() {
   };
 }
 
-// ============================
+// ============================================================
 // SERWER HTTP
-// ============================
+// ============================================================
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
@@ -1111,7 +735,7 @@ function sendJson(res, status, payload) {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   });
   res.end(body);
@@ -1120,7 +744,7 @@ function sendJson(res, status, payload) {
 function sendOptions(res) {
   res.writeHead(204, {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Max-Age': '86400',
   });
@@ -1138,24 +762,6 @@ function parseFilters(url) {
   };
 }
 
-/**
- * Pomocnicza funkcja do odczytu body żądania (dla POST).
- */
-function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch (err) {
-        reject(new Error('Invalid JSON'));
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
@@ -1163,29 +769,22 @@ const server = http.createServer(async (req, res) => {
     return sendOptions(res);
   }
 
-  // ------------------------------------------------------------
-  // 1. GŁÓWNY ENDPOINT INFORMACYJNY
-  // ------------------------------------------------------------
+  // GET /
   if (req.method === 'GET' && url.pathname === '/') {
     return sendJson(res, 200, {
       ok: true,
-      service: 'Isarsoft Dashboard Cache + Symulacja GPS',
-      version: '3.0.0',
+      service: 'Isarsoft Dashboard Cache',
+      version: '2.2.0',
       endpoints: [
         { path: '/', description: 'Informacje' },
         { path: '/health', description: 'Status serwera' },
-        { path: '/data', description: 'Dane z cache Isarsoft' },
-        { path: '/raw', description: 'Dane na żywo z Isarsoft' },
+        { path: '/data', description: 'Dane z cache (domyślnie LAST_1_DAY)' },
+        { path: '/data?preset=LAST_1_HOUR', description: 'Dane z cache z wybranym presetem' },
         { path: '/refresh', description: 'Wymusza odświeżenie cache' },
         { path: '/debug/lines', description: 'Podgląd linii' },
         { path: '/debug/areas', description: 'Podgląd obszarów' },
         { path: '/debug/apps', description: 'Podgląd aplikacji' },
-        // Nowe endpointy
-        { path: '/reports/trip/current', description: 'Aktualna pozycja i status pojazdu' },
-        { path: '/reports/stop-usage', description: 'Statystyki wykorzystania przystanków' },
-        { path: '/reports/on-demand-stops', description: 'Statystyki przystanków na żądanie' },
-        { path: '/stops', method: 'POST', description: 'Dodaje nowy przystanek' },
-        { path: '/schedules', method: 'POST', description: 'Dodaje/aktualizuje rozkład jazdy' },
+        { path: '/raw', description: 'Pobiera dane bezpośrednio z API (pomija cache)' },
       ],
       filters: {
         preset: 'np. LAST_1_HOUR, LAST_1_DAY, THIS_YEAR, ...',
@@ -1205,14 +804,12 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // ------------------------------------------------------------
-  // 2. HEALTH
-  // ------------------------------------------------------------
+  // GET /health
   if (req.method === 'GET' && url.pathname === '/health') {
     return sendJson(res, 200, {
       ok: true,
-      service: 'Isarsoft Dashboard Cache + Symulacja GPS',
-      version: '3.0.0',
+      service: 'Isarsoft Dashboard Cache',
+      version: '2.2.0',
       cached: {
         available: !!cachedData,
         last_success: lastSuccess,
@@ -1227,9 +824,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // ------------------------------------------------------------
-  // 3. REFRESH CACHE
-  // ------------------------------------------------------------
+  // GET /refresh
   if (req.method === 'GET' && url.pathname === '/refresh') {
     const filters = parseFilters(url);
     await refreshCache(filters);
@@ -1247,20 +842,20 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // ------------------------------------------------------------
-  // 4. DANE Z CACHE
-  // ------------------------------------------------------------
+  // GET /data
   if (req.method === 'GET' && url.pathname === '/data') {
+    // Jeśli podano preset, możemy odświeżyć cache z tym presetem (ale to kosztowne)
+    // Dla uproszczenia zwracamy dane z cache, ale z informacją o aktualnym presetcie.
     const data = getCachedData();
     if (!data.ok) {
       return sendJson(res, 503, data);
     }
+    // Można dodać możliwość filtrowania po stronie serwera, ale to już zrobione w collectAllData
+    // – tutaj zwracamy to, co jest w cache.
     return sendJson(res, 200, data);
   }
 
-  // ------------------------------------------------------------
-  // 5. RAW – BEZPOŚREDNIO Z API
-  // ------------------------------------------------------------
+  // GET /raw – pobiera dane na żywo z API (pomija cache)
   if (req.method === 'GET' && url.pathname === '/raw') {
     try {
       const filters = parseFilters(url);
@@ -1275,12 +870,12 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ------------------------------------------------------------
-  // 6. DEBUG /lines, /areas, /apps
-  // ------------------------------------------------------------
+  // GET /debug/lines
   if (req.method === 'GET' && url.pathname === '/debug/lines') {
     const data = getCachedData();
-    if (!data.ok) return sendJson(res, 503, data);
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
     return sendJson(res, 200, {
       ok: true,
       generated_at: data.generated_at,
@@ -1291,9 +886,12 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // GET /debug/areas
   if (req.method === 'GET' && url.pathname === '/debug/areas') {
     const data = getCachedData();
-    if (!data.ok) return sendJson(res, 503, data);
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
     return sendJson(res, 200, {
       ok: true,
       generated_at: data.generated_at,
@@ -1304,9 +902,12 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  // GET /debug/apps
   if (req.method === 'GET' && url.pathname === '/debug/apps') {
     const data = getCachedData();
-    if (!data.ok) return sendJson(res, 503, data);
+    if (!data.ok) {
+      return sendJson(res, 503, data);
+    }
     return sendJson(res, 200, {
       ok: true,
       generated_at: data.generated_at,
@@ -1325,250 +926,49 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  // ------------------------------------------------------------
-  // 7. NOWE ENDPOINTY: /reports/trip/current
-  // ------------------------------------------------------------
-  if (req.method === 'GET' && url.pathname === '/reports/trip/current') {
-    try {
-      const db = await readDatabase();
-      const trip = db.trips || null;
-      if (!trip) {
-        return sendJson(res, 404, { ok: false, error: 'Brak danych o kursie' });
-      }
-      return sendJson(res, 200, {
-        ok: true,
-        vehicle_id: trip.vehicle_id,
-        current_position: trip.current_position,
-        next_stop: trip.next_stop,
-        planned_time: trip.planned_time,
-        actual_time: trip.actual_time,
-        status: trip.status,
-        delay_seconds: trip.delay_seconds,
-        last_update: trip.last_update,
-        data_quality: trip.data_quality,
-      });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // 8. ENDPOINT: /reports/stop-usage
-  // ------------------------------------------------------------
-  if (req.method === 'GET' && url.pathname === '/reports/stop-usage') {
-    try {
-      const db = await readDatabase();
-      const history = db.history || [];
-      const usageMap = {};
-      history.forEach((entry) => {
-        if (entry.stop_id) {
-          usageMap[entry.stop_id] = (usageMap[entry.stop_id] || 0) + 1;
-        }
-      });
-      // Dołącz nazwy przystanków
-      const stopsMap = {};
-      db.stops.forEach((s) => (stopsMap[s.stop_id] = s));
-      const result = Object.keys(usageMap).map((stopId) => ({
-        stop_id: stopId,
-        name: stopsMap[stopId]?.name || stopId,
-        count: usageMap[stopId],
-      }));
-      result.sort((a, b) => b.count - a.count);
-      return sendJson(res, 200, { ok: true, usage: result });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // 9. ENDPOINT: /reports/on-demand-stops
-  // ------------------------------------------------------------
-  if (req.method === 'GET' && url.pathname === '/reports/on-demand-stops') {
-    try {
-      const db = await readDatabase();
-      const onDemandIds = db.stops
-        .filter((s) => s.zone_type === 'na żądanie')
-        .map((s) => s.stop_id);
-      const history = db.history || [];
-      const usageMap = {};
-      history.forEach((entry) => {
-        if (entry.stop_id && onDemandIds.includes(entry.stop_id)) {
-          usageMap[entry.stop_id] = (usageMap[entry.stop_id] || 0) + 1;
-        }
-      });
-      const stopsMap = {};
-      db.stops.forEach((s) => (stopsMap[s.stop_id] = s));
-      const result = onDemandIds.map((stopId) => ({
-        stop_id: stopId,
-        name: stopsMap[stopId]?.name || stopId,
-        count: usageMap[stopId] || 0,
-      }));
-      result.sort((a, b) => b.count - a.count);
-      return sendJson(res, 200, { ok: true, on_demand_usage: result });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // 10. POST /stops – dodawanie przystanku
-  // ------------------------------------------------------------
-  if (req.method === 'POST' && url.pathname === '/stops') {
-    try {
-      const body = await readRequestBody(req);
-      // Walidacja wymaganych pól
-      const required = ['stop_id', 'name', 'number', 'latitude', 'longitude', 'admin_zone', 'zone_type'];
-      for (const field of required) {
-        if (!(field in body)) {
-          return sendJson(res, 400, { ok: false, error: `Brak wymaganego pola: ${field}` });
-        }
-      }
-      const db = await readDatabase();
-      // Sprawdzenie, czy stop_id już istnieje
-      if (db.stops.some((s) => s.stop_id === body.stop_id)) {
-        return sendJson(res, 400, { ok: false, error: `Przystanek o ID ${body.stop_id} już istnieje` });
-      }
-      db.stops.push({
-        stop_id: body.stop_id,
-        name: body.name,
-        number: body.number,
-        latitude: Number(body.latitude),
-        longitude: Number(body.longitude),
-        admin_zone: body.admin_zone,
-        zone_type: body.zone_type,
-      });
-      await writeDatabase(db);
-      return sendJson(res, 201, { ok: true, message: 'Przystanek dodany', stop: body });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // 11. POST /schedules – dodawanie/aktualizacja rozkładu
-  // ------------------------------------------------------------
-  if (req.method === 'POST' && url.pathname === '/schedules') {
-    try {
-      const body = await readRequestBody(req);
-      const required = ['line', 'direction', 'day_type', 'stops_sequence'];
-      for (const field of required) {
-        if (!(field in body)) {
-          return sendJson(res, 400, { ok: false, error: `Brak wymaganego pola: ${field}` });
-        }
-      }
-      // Walidacja stops_sequence
-      if (!Array.isArray(body.stops_sequence) || body.stops_sequence.length < 2) {
-        return sendJson(res, 400, { ok: false, error: 'stops_sequence musi być tablicą z co najmniej 2 elementami' });
-      }
-      for (const item of body.stops_sequence) {
-        if (!item.stop_id || !item.planned_time) {
-          return sendJson(res, 400, { ok: false, error: 'Każdy element stops_sequence wymaga stop_id i planned_time' });
-        }
-        // Sprawdzenie poprawności czasu HH:MM:SS
-        if (!/^\d{2}:\d{2}:\d{2}$/.test(item.planned_time)) {
-          return sendJson(res, 400, { ok: false, error: `Nieprawidłowy format czasu: ${item.planned_time}` });
-        }
-      }
-
-      const db = await readDatabase();
-      // Sprawdzenie, czy wszystkie stop_id istnieją
-      const existingIds = new Set(db.stops.map((s) => s.stop_id));
-      const missing = body.stops_sequence.filter((item) => !existingIds.has(item.stop_id));
-      if (missing.length > 0) {
-        return sendJson(res, 400, {
-          ok: false,
-          error: `Następujące stop_id nie istnieją: ${missing.map((m) => m.stop_id).join(', ')}`,
-        });
-      }
-
-      // Usuń istniejący rozkład dla tej samej linii, kierunku i dnia (aktualizacja)
-      const index = db.schedules.findIndex(
-        (s) => s.line === body.line && s.direction === body.direction && s.day_type === body.day_type
-      );
-      const newSchedule = {
-        line: body.line,
-        direction: body.direction,
-        day_type: body.day_type,
-        stops_sequence: body.stops_sequence,
-      };
-      if (index !== -1) {
-        db.schedules[index] = newSchedule;
-      } else {
-        db.schedules.push(newSchedule);
-      }
-      await writeDatabase(db);
-      return sendJson(res, 201, { ok: true, message: 'Rozkład zapisany', schedule: newSchedule });
-    } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
-    }
-  }
-
-  // ------------------------------------------------------------
-  // 12. 404
-  // ------------------------------------------------------------
+  // 404
   return sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
-// ============================
-// URUCHOMIENIE SERWERA
-// ============================
+// ============================================================
+// URUCHOMIENIE
+// ============================================================
 
 server.listen(CONFIG.port, async () => {
   console.log(JSON.stringify({
     ok: true,
-    message: 'Isarsoft Dashboard Cache + Symulacja GPS Server started',
-    version: '3.0.0',
+    message: 'Isarsoft Dashboard Cache Server started',
+    version: '2.2.0',
     port: CONFIG.port,
     baseUrl: CONFIG.baseUrl,
     defaultPreset: CONFIG.defaultPreset,
     defaultClasses: CONFIG.defaultClasses,
     pollIntervalMs: CONFIG.pollIntervalMs,
-    simulationIntervalMs: CONFIG.simulationIntervalMs,
     time: nowIso(),
   }, null, 2));
 
-  // Inicjalizacja bazy danych (jeśli nie istnieje)
   try {
-    await readDatabase(); // tworzy domyślną jeśli brak
-    console.log('[startup] Baza danych zainicjalizowana.');
-  } catch (err) {
-    console.error('[startup] Błąd inicjalizacji bazy:', err.message);
-  }
-
-  // Pierwsze odświeżenie cache Isarsoft
-  try {
-    console.log('[startup] Pierwsze odświeżenie cache Isarsoft...');
+    console.log('[startup] Pierwsze odświeżenie cache...');
     await refreshCache();
-    console.log('[startup] Cache Isarsoft zainicjalizowany.');
+    console.log('[startup] Cache zainicjalizowany.');
   } catch (err) {
     console.error('[startup] Błąd inicjalizacji cache:', err.message);
   }
 
-  // Cykliczne odświeżanie cache Isarsoft
   setInterval(async () => {
     try {
       await refreshCache();
     } catch (err) {
-      console.error('[interval] Błąd odświeżania cache:', err.message);
+      console.error('[interval] Błąd odświeżania:', err.message);
     }
   }, CONFIG.pollIntervalMs);
 
-  // Cykliczna symulacja pozycji GPS (co 5 sekund)
-  setInterval(async () => {
-    try {
-      await simulatePosition();
-    } catch (err) {
-      console.error('[simulation] Błąd symulacji:', err.message);
-    }
-  }, CONFIG.simulationIntervalMs);
-
-  console.log(`[startup] Serwer nasłuchuje na porcie ${CONFIG.port}, odświeżanie cache co ${CONFIG.pollIntervalMs / 1000}s, symulacja co ${CONFIG.simulationIntervalMs / 1000}s`);
+  console.log(`[startup] Serwer nasłuchuje na porcie ${CONFIG.port}, odświeżanie co ${CONFIG.pollIntervalMs / 1000}s`);
 });
 
-// ============================
-// ZAMKNIĘCIE SERWERA
-// ============================
-
+// ============================================================
+// ZAMKNIĘCIE
+// ============================================================
 process.on('SIGINT', () => {
   console.log('[shutdown] Otrzymano SIGINT, zamykam serwer...');
   server.close(() => {
