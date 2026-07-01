@@ -205,6 +205,6 @@ process.on('SIGTERM', () => {
   console.log('\n[serverRoom] Zamykam serwer...');
   server.close(() => {
     console.log('[serverRoom] Serwer zamknięty.');
-    process.exit(0);
+    process.exit(0); 
   });
 });
