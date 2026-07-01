@@ -1643,6 +1643,42 @@ async function handleGetStops(req, res) {
   });
 }
 
+// ---------- NOWE HANDLERY DLA PRZYSTANKÓW ----------
+async function handleGetStopById(req, res, stopId) {
+  const stop = findStopById(stopId);
+  if (!stop) {
+    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+  }
+  sendJson(res, 200, { ok: true, stop });
+}
+
+async function handleUpdateStop(req, res, stopId) {
+  const body = await readJsonBody(req);
+  const existingIndex = database.stops.findIndex(stop => getStopId(stop) === stopId);
+  if (existingIndex === -1) {
+    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+  }
+  const updatedStop = normalizeStop(body);
+  // wymuszamy to samo ID
+  updatedStop.stop_id = stopId;
+  updatedStop.id = stopId;
+  updatedStop.created_at = database.stops[existingIndex].created_at || updatedStop.created_at;
+  updatedStop.updated_at = new Date().toISOString();
+  database.stops[existingIndex] = updatedStop;
+  await saveDatabase();
+  sendJson(res, 200, { ok: true, message: 'Stop updated', stop: updatedStop });
+}
+
+async function handleDeleteStop(req, res, stopId) {
+  const index = database.stops.findIndex(stop => getStopId(stop) === stopId);
+  if (index === -1) {
+    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+  }
+  database.stops.splice(index, 1);
+  await saveDatabase();
+  sendJson(res, 200, { ok: true, message: 'Stop deleted' });
+}
+
 async function handleCreateSchedule(req, res) {
   const body = await readJsonBody(req);
   const schedule = normalizeSchedulePayload(body);
@@ -1702,6 +1738,45 @@ async function handleGetSchedules(req, res, query) {
     count: schedules.length,
     schedules
   });
+}
+
+// ---------- NOWE HANDLERY DLA ROZKŁADÓW ----------
+async function handleGetScheduleById(req, res, scheduleId) {
+  const schedule = database.schedules.find(s => s.schedule_id === scheduleId);
+  if (!schedule) {
+    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  }
+  sendJson(res, 200, { ok: true, schedule });
+}
+
+async function handleUpdateSchedule(req, res, scheduleId) {
+  const body = await readJsonBody(req);
+  const existingIndex = database.schedules.findIndex(s => s.schedule_id === scheduleId);
+  if (existingIndex === -1) {
+    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  }
+  const updatedSchedule = normalizeSchedulePayload(body);
+  updatedSchedule.schedule_id = scheduleId;
+  updatedSchedule.created_at = database.schedules[existingIndex].created_at || updatedSchedule.created_at;
+  updatedSchedule.updated_at = new Date().toISOString();
+  database.schedules[existingIndex] = updatedSchedule;
+  // aktualizacja vehicles
+  if (database.vehicles[updatedSchedule.pcName]) {
+    database.vehicles[updatedSchedule.pcName].has_schedule = true;
+    database.vehicles[updatedSchedule.pcName].pcId = updatedSchedule.pcId || database.vehicles[updatedSchedule.pcName].pcId || '';
+  }
+  await saveDatabase();
+  sendJson(res, 200, { ok: true, message: 'Schedule updated', schedule: updatedSchedule });
+}
+
+async function handleDeleteSchedule(req, res, scheduleId) {
+  const index = database.schedules.findIndex(s => s.schedule_id === scheduleId);
+  if (index === -1) {
+    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  }
+  database.schedules.splice(index, 1);
+  await saveDatabase();
+  sendJson(res, 200, { ok: true, message: 'Schedule deleted' });
 }
 
 async function handleReportsCurrent(req, res, query) {
@@ -1788,6 +1863,70 @@ async function handleGetHolidays(req, res) {
   });
 }
 
+// ---------- NOWY HANDLER DLA ŚWIĄT (DELETE) ----------
+async function handleDeleteHoliday(req, res, date) {
+  const index = database.holidays.findIndex(item => {
+    if (typeof item === 'string') return item === date;
+    return item && item.date === date;
+  });
+  if (index === -1) {
+    throw new Error(`Nie znaleziono święta o dacie: ${date}`);
+  }
+  database.holidays.splice(index, 1);
+  await saveDatabase();
+  sendJson(res, 200, { ok: true, message: 'Holiday deleted' });
+}
+
+// ---------- NOWE HANDLERY DLA ZDARZEŃ (TRIPS) ----------
+async function handleGetTrips(req, res, query) {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(1000, parseInt(query.limit, 10) || 100);
+  const events = getFilteredTripEvents(query);
+  const total = events.length;
+  const start = (page - 1) * limit;
+  const end = start + limit;
+  const rows = events.slice(start, end);
+  sendJson(res, 200, {
+    ok: true,
+    page,
+    limit,
+    total,
+    totalPages: Math.ceil(total / limit),
+    rows
+  });
+}
+
+async function handleDeleteTrips(req, res, query) {
+  const all = query.all === 'true';
+  const before = query.before; // format YYYY-MM-DD
+
+  if (all) {
+    const count = database.trips.length;
+    database.trips = [];
+    await saveDatabase();
+    sendJson(res, 200, { ok: true, message: `Usunięto wszystkie ${count} zdarzeń`, deletedCount: count });
+    return;
+  }
+
+  if (before) {
+    const beforeDate = new Date(before);
+    if (Number.isNaN(beforeDate.getTime())) {
+      throw new Error('Nieprawidłowy format before, oczekiwano YYYY-MM-DD');
+    }
+    const initialCount = database.trips.length;
+    database.trips = database.trips.filter(event => {
+      const eventDate = new Date(event.received_at || event.analyzed_at || event.timestamp);
+      return eventDate >= beforeDate;
+    });
+    const deleted = initialCount - database.trips.length;
+    await saveDatabase();
+    sendJson(res, 200, { ok: true, message: `Usunięto ${deleted} zdarzeń starszych niż ${before}`, deletedCount: deleted });
+    return;
+  }
+
+  throw new Error('Aby usunąć, podaj ?all=true lub ?before=YYYY-MM-DD');
+}
+
 // --------------------- ROUTER ---------------------
 async function routeRequest(req, res) {
   setCors(res);
@@ -1811,6 +1950,44 @@ async function routeRequest(req, res) {
   const query = parsedUrl.query || {};
 
   try {
+    // ---------- NOWE ŚCIEŻKI (dodane przed istniejącymi) ----------
+
+    // /stops/:id
+    if (pathname.startsWith('/stops/') && pathname !== '/stops') {
+      const stopId = pathname.substring('/stops/'.length);
+      if (!stopId) throw new Error('Brak ID przystanku');
+      if (req.method === 'GET') return await handleGetStopById(req, res, stopId);
+      if (req.method === 'PUT') return await handleUpdateStop(req, res, stopId);
+      if (req.method === 'DELETE') return await handleDeleteStop(req, res, stopId);
+      throw new Error('Metoda nieobsługiwana dla /stops/:id');
+    }
+
+    // /schedules/:id
+    if (pathname.startsWith('/schedules/') && pathname !== '/schedules') {
+      const scheduleId = pathname.substring('/schedules/'.length);
+      if (!scheduleId) throw new Error('Brak ID rozkładu');
+      if (req.method === 'GET') return await handleGetScheduleById(req, res, scheduleId);
+      if (req.method === 'PUT') return await handleUpdateSchedule(req, res, scheduleId);
+      if (req.method === 'DELETE') return await handleDeleteSchedule(req, res, scheduleId);
+      throw new Error('Metoda nieobsługiwana dla /schedules/:id');
+    }
+
+    // /holidays/:date (DELETE)
+    if (pathname.startsWith('/holidays/') && pathname !== '/holidays') {
+      const date = pathname.substring('/holidays/'.length);
+      if (!date) throw new Error('Brak daty święta');
+      if (req.method === 'DELETE') return await handleDeleteHoliday(req, res, date);
+      throw new Error('Metoda nieobsługiwana dla /holidays/:date');
+    }
+
+    // /trips (GET, DELETE)
+    if (pathname === '/trips') {
+      if (req.method === 'GET') return await handleGetTrips(req, res, query);
+      if (req.method === 'DELETE') return await handleDeleteTrips(req, res, query);
+      throw new Error('Metoda nieobsługiwana dla /trips');
+    }
+
+    // ---------- ISTNIEJĄCE ŚCIEŻKI ----------
     if (req.method === 'GET' && pathname === '/api/ip') return await handleApiIp(req, res);
     if (req.method === 'POST' && pathname === '/api/data') return await handleIncomingData(req, res);
 
@@ -1915,8 +2092,10 @@ async function startServer() {
     console.log('═'.repeat(70));
     console.log('║  📊 Serwer nasłuchuje na ścieżce: POST /api/data');
     console.log('║  📊 Endpoint pomocniczy: GET /api/ip');
-    console.log('║  📊 Przystanki: POST/GET /stops');
-    console.log('║  📊 Rozkłady: POST/GET /schedules');
+    console.log('║  📊 Przystanki: POST/GET /stops, GET/PUT/DELETE /stops/:id');
+    console.log('║  📊 Rozkłady: POST/GET /schedules, GET/PUT/DELETE /schedules/:id');
+    console.log('║  📊 Święta: POST/GET /holidays, DELETE /holidays/:date');
+    console.log('║  📊 Zdarzenia: GET /trips (z paginacją), DELETE /trips');
     console.log('║  📊 Dashboard: GET /reports/trip/current');
     console.log('═'.repeat(70) + '\n');
 
@@ -1944,8 +2123,19 @@ async function startServer() {
         serverIp: 'GET /api/ip',
         createStop: 'POST /stops',
         listStops: 'GET /stops',
+        getStop: 'GET /stops/:id',
+        updateStop: 'PUT /stops/:id',
+        deleteStop: 'DELETE /stops/:id',
         createSchedule: 'POST /schedules',
         listSchedules: 'GET /schedules',
+        getSchedule: 'GET /schedules/:id',
+        updateSchedule: 'PUT /schedules/:id',
+        deleteSchedule: 'DELETE /schedules/:id',
+        createHoliday: 'POST /holidays',
+        listHolidays: 'GET /holidays',
+        deleteHoliday: 'DELETE /holidays/:date',
+        getTrips: 'GET /trips?page=1&limit=100&pcName=...&line_id=...&stop_id=...&start=...&end=...',
+        deleteTrips: 'DELETE /trips?all=true lub ?before=YYYY-MM-DD',
         vehicles: 'GET /vehicles',
         currentTrip: 'GET /reports/trip/current',
         stopUsage: 'GET /reports/stop-usage',
