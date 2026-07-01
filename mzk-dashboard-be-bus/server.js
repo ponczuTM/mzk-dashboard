@@ -4,25 +4,26 @@ const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
 
-// --------------------- MODUŁY GPS ---------------------
 const { SerialPort } = require('serialport');
 const { GPS } = require('gps');
 
-// --------------------- KONFIGURACJA PC ---------------------
 const PC_ID = process.env.PC_ID || 1;
 const PC_NAME = process.env.PC_NAME || 'pc_number_113';
 
-const ROOM_SERVER_URL = process.env.ROOM_SERVER_URL || 'http://192.168.77.152:3001/api/data';
+const ROOM_SERVER_URL =
+  process.env.ROOM_SERVER_URL || 'http://192.168.77.152:3001/api/data';
 
 const REFRESH_INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS || 30 * 1000);
 const SEND_INTERVAL_MS = Number(process.env.SEND_INTERVAL_MS || 5 * 1000);
 
-// --------------------- KONFIGURACJA PORTU SZEREGOWEGO GPS ---------------------
-// Dla Windows: "COM3", dla Linux: "/dev/ttyUSB0" lub "/dev/ttyACM0"
 const GPS_PORT_PATH = process.env.GPS_PORT_PATH || '/dev/ttyUSB0';
 const GPS_BAUD_RATE = Number(process.env.GPS_BAUD_RATE || 9600);
 
-// --------------------- KONFIGURACJA ISARSOFT ---------------------
+const GPS_FIX_MAX_AGE_MS = Number(process.env.GPS_FIX_MAX_AGE_MS || 30 * 1000);
+const GPS_REOPEN_DELAY_MS = Number(process.env.GPS_REOPEN_DELAY_MS || 10 * 1000);
+const GEO_FALLBACK_URL = process.env.GEO_FALLBACK_URL || 'http://ip-api.com/json/';
+const ENABLE_IP_GEO_FALLBACK = process.env.ENABLE_IP_GEO_FALLBACK !== 'false';
+
 const CONFIG = {
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
   graphqlPath: process.env.ISARSOFT_GRAPHQL_PATH || '/isarsoft/api/graphql',
@@ -41,14 +42,24 @@ const CONFIG = {
     .filter(Boolean),
 };
 
-// --------------------- STAN GPS ---------------------
 let currentLatitude = null;
 let currentLongitude = null;
+let currentAltitude = null;
 let gpsFix = false;
 let gpsEnabled = false;
 let lastGpsLogTime = 0;
+let lastValidGpsAt = 0;
+let lastNmeaAt = 0;
+let gpsSource = 'none';
+let serialPortRef = null;
+let reopenTimer = null;
+let ipGeoCache = {
+  latitude: null,
+  longitude: null,
+  fetchedAt: 0,
+  source: 'none',
+};
 
-// --------------------- POMOCNICY ---------------------
 function nowIso() {
   return new Date().toISOString();
 }
@@ -78,12 +89,25 @@ function safeJson(text) {
   }
 }
 
-// --------------------- AGENT HTTPS ---------------------
+function isValidCoordinate(lat, lon) {
+  return Number.isFinite(lat) &&
+    Number.isFinite(lon) &&
+    Math.abs(lat) <= 90 &&
+    Math.abs(lon) <= 180;
+}
+
+function hasFreshGpsFix() {
+  return (
+    gpsFix &&
+    isValidCoordinate(currentLatitude, currentLongitude) &&
+    Date.now() - lastValidGpsAt <= GPS_FIX_MAX_AGE_MS
+  );
+}
+
 const httpsAgent = new https.Agent({
   rejectUnauthorized: CONFIG.verifyTls,
 });
 
-// --------------------- NISKOPOZIOMOWE ŻĄDANIA ---------------------
 function requestRaw(urlString, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
@@ -118,7 +142,9 @@ function requestRaw(urlString, options = {}, body = null) {
       }
     );
 
-    req.on('timeout', () => req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`)));
+    req.on('timeout', () =>
+      req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`))
+    );
     req.on('error', reject);
 
     if (body) req.write(body);
@@ -126,7 +152,6 @@ function requestRaw(urlString, options = {}, body = null) {
   });
 }
 
-// --------------------- TOKEN OAuth2 ---------------------
 let tokenCache = { token: null, expiresAt: 0 };
 
 async function getToken(force = false) {
@@ -166,7 +191,6 @@ async function getToken(force = false) {
   return tokenCache.token;
 }
 
-// --------------------- GRAPHQL ---------------------
 async function graphql(query, variables = null, retry = true) {
   const token = await getToken(false);
   const payload = JSON.stringify({ query, variables });
@@ -207,7 +231,6 @@ async function graphql(query, variables = null, retry = true) {
   return json.data || null;
 }
 
-// --------------------- ZAPYTANIA GRAPHQL (takie same jak w oryginale) ---------------------
 const QUERY_SCHEMA = `
 query {
   __schema {
@@ -313,7 +336,6 @@ query {
 }
 `;
 
-// --------------------- FUNKCJE POMOCNICZE DO PRZETWARZANIA ---------------------
 function getEnumValues(schema, typeName) {
   const type = toArray(schema?.types).find((x) => x.name === typeName);
   return toArray(type?.enumValues).map((x) => x.name).filter(Boolean);
@@ -351,8 +373,7 @@ function flattenRows(rows) {
 }
 
 function summarizeBuckets(rows) {
-  const flat = flattenRows(rows);
-  const raw = flat;
+  const raw = flattenRows(rows);
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
@@ -364,8 +385,7 @@ function summarizeBuckets(rows) {
 }
 
 function summarizeAreaBuckets(rows) {
-  const flat = flattenRows(rows);
-  const raw = flat;
+  const raw = flattenRows(rows);
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
@@ -379,8 +399,7 @@ function summarizeAreaBuckets(rows) {
 }
 
 function summarizeLive(rows) {
-  const flat = flattenRows(rows);
-  const raw = flat;
+  const raw = flattenRows(rows);
   return {
     total_in: sumBy(raw, (x) => x?.count_in),
     total_out: sumBy(raw, (x) => x?.count_out),
@@ -389,17 +408,23 @@ function summarizeLive(rows) {
 }
 
 function summarizeAreaLive(rows) {
-  const flat = flattenRows(rows);
-  const raw = flat;
+  const raw = flattenRows(rows);
   return {
     total_count: sumBy(raw, (x) => x?.count),
     raw,
   };
 }
 
-// --------------------- GŁÓWNA FUNKCJA ZBIERAJĄCA DANE ---------------------
 async function collectAllData(filters = {}) {
-  let allowedPresets = ['LAST_1_DAY', 'LAST_1_HOUR', 'LAST_12_HOUR', 'THIS_YEAR', 'THIS_WEEK', 'THIS_MONTH'];
+  let allowedPresets = [
+    'LAST_1_DAY',
+    'LAST_1_HOUR',
+    'LAST_12_HOUR',
+    'THIS_YEAR',
+    'THIS_WEEK',
+    'THIS_MONTH',
+  ];
+
   try {
     const schemaData = await graphql(QUERY_SCHEMA);
     const schema = schemaData?.__schema || null;
@@ -570,9 +595,7 @@ async function collectAllData(filters = {}) {
       }
     `);
     mqttSettings = mqttData?.getMQTTSettings || null;
-  } catch (err) {
-    // ignorujemy
-  }
+  } catch {}
 
   let kafkaSettings = null;
   try {
@@ -587,9 +610,7 @@ async function collectAllData(filters = {}) {
       }
     `);
     kafkaSettings = kafkaData?.getKafkaSettings || null;
-  } catch (err) {
-    // ignorujemy
-  }
+  } catch {}
 
   const lineRows = detailedApps.flatMap((app) =>
     app.lines.map((line) => ({
@@ -643,7 +664,9 @@ async function collectAllData(filters = {}) {
       objectflow_apps: detailedApps.length,
       selected_in: sumBy(detailedApps, (x) => x.totals.in),
       selected_out: sumBy(detailedApps, (x) => x.totals.out),
-      selected_area_avg: detailedApps.length ? sumBy(detailedApps, (x) => x.area_totals.avg) / detailedApps.length : 0,
+      selected_area_avg: detailedApps.length
+        ? sumBy(detailedApps, (x) => x.area_totals.avg) / detailedApps.length
+        : 0,
       selected_area_count: sumBy(detailedApps, (x) => x.area_totals.count),
     },
     applications: detailedApps,
@@ -658,7 +681,6 @@ async function collectAllData(filters = {}) {
   };
 }
 
-// --------------------- CACHE I WYSYŁANIE ---------------------
 let cachedData = null;
 let lastRefreshSuccess = null;
 
@@ -668,32 +690,261 @@ async function refreshCache() {
     const data = await collectAllData();
     cachedData = data;
     lastRefreshSuccess = nowIso();
-    console.log(`[refreshCache] Dane odświeżone. Aplikacji: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}`);
+    console.log(
+      `[refreshCache] Dane odświeżone. Aplikacji: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}`
+    );
   } catch (err) {
     console.error('[refreshCache] Błąd odświeżania:', err.message);
   }
 }
 
-// --------------------- WYSYŁANIE DO SERWERA POKOJOWEGO (z GPS) ---------------------
+function scheduleSerialReopen() {
+  if (reopenTimer) return;
+  reopenTimer = setTimeout(() => {
+    reopenTimer = null;
+    if (serialPortRef && !serialPortRef.isOpen) {
+      console.log('[GPS] Próba ponownego otwarcia portu...');
+      serialPortRef.open((err) => {
+        if (err) {
+          console.error(`[GPS] Ponowne otwarcie nieudane: ${err.message}`);
+          scheduleSerialReopen();
+        }
+      });
+    }
+  }, GPS_REOPEN_DELAY_MS);
+}
+
+function updateGpsFromState(gps, reason) {
+  const lat = Number(gps?.state?.lat);
+  const lon = Number(gps?.state?.lon);
+  const alt = Number(gps?.state?.alt);
+
+  if (isValidCoordinate(lat, lon)) {
+    currentLatitude = lat;
+    currentLongitude = lon;
+    currentAltitude = Number.isFinite(alt) ? alt : null;
+    gpsFix = true;
+    lastValidGpsAt = Date.now();
+    gpsSource = reason || 'gps';
+  }
+}
+
+function initGps() {
+  const gps = new GPS();
+
+  gps.on('data', (data) => {
+    lastNmeaAt = Date.now();
+
+    if (data?.valid === false) {
+      return;
+    }
+
+    if (data.type === 'GGA') {
+      if (data.quality !== undefined && data.quality > 0) {
+        updateGpsFromState(gps, 'gps-gga');
+        console.log(
+          `[GPS] Fix GGA: lat=${currentLatitude}, lon=${currentLongitude}, alt=${currentAltitude}`
+        );
+      }
+      return;
+    }
+
+    if (data.type === 'RMC') {
+      if (data.status === 'active' || data.status === 'A') {
+        updateGpsFromState(gps, 'gps-rmc');
+        console.log(`[GPS] Fix RMC: lat=${currentLatitude}, lon=${currentLongitude}`);
+      }
+      return;
+    }
+
+    if (data.type === 'GLL') {
+      if (data.status === 'active' || data.status === 'A') {
+        updateGpsFromState(gps, 'gps-gll');
+        console.log(`[GPS] Fix GLL: lat=${currentLatitude}, lon=${currentLongitude}`);
+      }
+      return;
+    }
+
+    updateGpsFromState(gps, 'gps-state');
+  });
+
+  gps.on('error', (err) => {
+    console.error('[GPS] Błąd parsera NMEA:', err.message);
+  });
+
+  const serialPort = new SerialPort({
+    path: GPS_PORT_PATH,
+    baudRate: GPS_BAUD_RATE,
+    autoOpen: false,
+    dataBits: 8,
+    parity: 'none',
+    stopBits: 1,
+    rtscts: false,
+  });
+
+  serialPortRef = serialPort;
+
+  serialPort.on('open', () => {
+    console.log(`[GPS] Port ${GPS_PORT_PATH} otwarty, prędkość ${GPS_BAUD_RATE} bps`);
+    gpsEnabled = true;
+  });
+
+  let rawDataBuffer = '';
+  serialPort.on('data', (chunk) => {
+    try {
+      const str = chunk.toString('utf8');
+      rawDataBuffer += str;
+
+      if (rawDataBuffer.length > 1024) {
+        const sample = rawDataBuffer.slice(0, 200).replace(/\r?\n/g, '\\n');
+        console.log(`[GPS] Próbka surowych danych: ${sample}...`);
+        rawDataBuffer = '';
+      }
+
+      gps.updatePartial(str);
+    } catch (err) {
+      console.error('[GPS] Błąd przetwarzania danych z portu:', err.message);
+    }
+  });
+
+  serialPort.on('error', (err) => {
+    console.error(`[GPS] Błąd portu ${GPS_PORT_PATH}: ${err.message}`);
+    gpsEnabled = false;
+    gpsFix = false;
+    scheduleSerialReopen();
+  });
+
+  serialPort.on('close', () => {
+    console.warn(`[GPS] Port ${GPS_PORT_PATH} zamknięty`);
+    gpsEnabled = false;
+    gpsFix = false;
+    scheduleSerialReopen();
+  });
+
+  serialPort.open((err) => {
+    if (err) {
+      console.error(`[GPS] Nie udało się otworzyć portu ${GPS_PORT_PATH}: ${err.message}`);
+      gpsEnabled = false;
+      scheduleSerialReopen();
+    }
+  });
+}
+
+async function getIpFallbackLocation() {
+  if (!ENABLE_IP_GEO_FALLBACK) return null;
+
+  const cacheFresh = Date.now() - ipGeoCache.fetchedAt < 10 * 60 * 1000;
+  if (
+    cacheFresh &&
+    isValidCoordinate(ipGeoCache.latitude, ipGeoCache.longitude)
+  ) {
+    return {
+      latitude: ipGeoCache.latitude,
+      longitude: ipGeoCache.longitude,
+      source: ipGeoCache.source,
+    };
+  }
+
+  try {
+    const res = await requestRaw(GEO_FALLBACK_URL, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'isarsoft-pc-client/1.0',
+      },
+    });
+
+    const json = res.json();
+    if (!res.ok || !json) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const lat = Number(json.lat ?? json.latitude);
+    const lon = Number(json.lon ?? json.longitude);
+
+    if (!isValidCoordinate(lat, lon)) {
+      throw new Error('Brak poprawnych współrzędnych w odpowiedzi fallback');
+    }
+
+    ipGeoCache = {
+      latitude: lat,
+      longitude: lon,
+      fetchedAt: Date.now(),
+      source: 'ip-geolocation',
+    };
+
+    console.warn(`[GPS] Używam fallback IP geolocation: lat=${lat}, lon=${lon}`);
+    return {
+      latitude: lat,
+      longitude: lon,
+      source: 'ip-geolocation',
+    };
+  } catch (err) {
+    console.error('[GPS] Fallback IP geolocation nieudany:', err.message);
+    return null;
+  }
+}
+
+async function resolveLocationForPayload() {
+  if (hasFreshGpsFix()) {
+    return {
+      latitude: currentLatitude,
+      longitude: currentLongitude,
+      source: gpsSource || 'gps',
+      gpsFix: true,
+    };
+  }
+
+  const fallback = await getIpFallbackLocation();
+  if (fallback) {
+    return {
+      latitude: fallback.latitude,
+      longitude: fallback.longitude,
+      source: fallback.source,
+      gpsFix: false,
+    };
+  }
+
+  if (isValidCoordinate(currentLatitude, currentLongitude)) {
+    return {
+      latitude: currentLatitude,
+      longitude: currentLongitude,
+      source: gpsSource || 'stale-gps',
+      gpsFix: false,
+    };
+  }
+
+  return {
+    latitude: 0,
+    longitude: 0,
+    source: 'none',
+    gpsFix: false,
+  };
+}
+
 async function sendDataToRoom() {
   if (!cachedData) {
     console.warn('[sendDataToRoom] Brak danych w cache, pomijam wysyłkę.');
     return;
   }
 
-  const lat = gpsFix ? currentLatitude : null;
-  const lon = gpsFix ? currentLongitude : null;
+  const location = await resolveLocationForPayload();
 
   const payload = {
     pcId: PC_ID,
     pcName: PC_NAME,
     timestamp: nowIso(),
-    latitude: lat,
-    longitude: lon,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    locationSource: location.source,
+    gpsFix: location.gpsFix,
+    lastValidGpsAt: lastValidGpsAt ? new Date(lastValidGpsAt).toISOString() : null,
     data: cachedData,
   };
 
-  console.log(`[sendDataToRoom] GPS fix: ${gpsFix ? 'TAK' : 'NIE'}, lat: ${lat}, lon: ${lon}`);
+  console.log(
+    `[sendDataToRoom] source=${location.source}, gpsFix=${location.gpsFix ? 'TAK' : 'NIE'}, lat=${location.latitude}, lon=${location.longitude}`
+  );
 
   try {
     const postData = JSON.stringify(payload);
@@ -712,11 +963,15 @@ async function sendDataToRoom() {
     const res = await new Promise((resolve, reject) => {
       const req = lib.request(url, options, (res) => {
         let raw = '';
-        res.on('data', (chunk) => raw += chunk);
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
         res.on('end', () => resolve({ status: res.statusCode, body: raw }));
       });
       req.on('error', reject);
-      req.on('timeout', () => req.destroy(new Error('Timeout wysyłania do serwera pokojowego')));
+      req.on('timeout', () =>
+        req.destroy(new Error('Timeout wysyłania do serwera pokojowego'))
+      );
       req.write(postData);
       req.end();
     });
@@ -731,158 +986,51 @@ async function sendDataToRoom() {
   }
 }
 
-// --------------------- INICJALIZACJA GPS (POPRAWIONA) ---------------------
-function initGps() {
-  const gps = new GPS();
-
-  // Nasłuch na zdarzenia parsera
-  gps.on('data', (data) => {
-    // Obsługa zdań GGA (zawiera jakość fixu)
-    if (data.type === 'GGA') {
-      if (data.quality !== undefined && data.quality > 0 && data.lat !== undefined && data.lon !== undefined) {
-        currentLatitude = data.lat;
-        currentLongitude = data.lon;
-        gpsFix = true;
-        console.log(`[GPS] Fix uzyskany (GGA): lat=${currentLatitude}, lon=${currentLongitude}`);
-      } else {
-        if (gpsFix) {
-          console.warn('[GPS] Fix utracony (GGA quality=0)');
-        }
-        gpsFix = false;
-      }
-    }
-    // Obsługa zdań RMC – alternatywne źródło współrzędnych
-    else if (data.type === 'RMC') {
-      if (data.status === 'A' && data.lat !== undefined && data.lon !== undefined) {
-        // RMC ma status 'A' = aktywny fix
-        currentLatitude = data.lat;
-        currentLongitude = data.lon;
-        gpsFix = true;
-        console.log(`[GPS] Fix uzyskany (RMC): lat=${currentLatitude}, lon=${currentLongitude}`);
-      } else {
-        if (gpsFix) {
-          console.warn('[GPS] Fix utracony (RMC status != A)');
-        }
-        gpsFix = false;
-      }
-    }
-  });
-
-  gps.on('error', (err) => {
-    console.error('[GPS] Błąd parsera NMEA:', err.message);
-  });
-
-  // Port szeregowy
-  const serialPort = new SerialPort({
-    path: GPS_PORT_PATH,
-    baudRate: GPS_BAUD_RATE,
-    autoOpen: false,
-    // Dodatkowe opcje dla stabilności
-    dataBits: 8,
-    parity: 'none',
-    stopBits: 1,
-    rtscts: false,
-  });
-
-  serialPort.on('open', () => {
-    console.log(`[GPS] Port ${GPS_PORT_PATH} otwarty, prędkość ${GPS_BAUD_RATE} bps`);
-    gpsEnabled = true;
-  });
-
-  // Logowanie surowych danych (pierwsze 100 bajtów) – pomocne przy diagnostyce
-  let rawDataBuffer = '';
-  serialPort.on('data', (chunk) => {
-    try {
-      const str = chunk.toString();
-      rawDataBuffer += str;
-
-      // Jeśli bufor przekroczy 1024 bajty, wyświetlamy próbkę
-      if (rawDataBuffer.length > 1024) {
-        const sample = rawDataBuffer.slice(0, 100).replace(/\r?\n/g, '\\n');
-        console.log(`[GPS] Próbka surowych danych: ${sample}...`);
-        rawDataBuffer = ''; // reset po zalogowaniu
-      }
-
-      // Przekazanie do parsera
-      gps.update(str);
-    } catch (err) {
-      console.error('[GPS] Błąd przetwarzania danych z portu:', err.message);
-    }
-  });
-
-  serialPort.on('error', (err) => {
-    console.error(`[GPS] Błąd portu ${GPS_PORT_PATH}:`, err.message);
-    gpsEnabled = false;
-    // Spróbuj ponownie otworzyć po 10 sekundach
-    setTimeout(() => {
-      if (!serialPort.isOpen) {
-        console.log('[GPS] Próba ponownego otwarcia portu...');
-        serialPort.open();
-      }
-    }, 10000);
-  });
-
-  serialPort.on('close', () => {
-    console.warn(`[GPS] Port ${GPS_PORT_PATH} zamknięty`);
-    gpsEnabled = false;
-    gpsFix = false;
-  });
-
-  // Otwarcie portu
-  serialPort.open((err) => {
-    if (err) {
-      console.error(`[GPS] Nie udało się otworzyć portu ${GPS_PORT_PATH}:`, err.message);
-      gpsEnabled = false;
-      // Spróbuj ponownie za 10 sekund
-      setTimeout(() => {
-        console.log('[GPS] Ponowna próba otwarcia portu...');
-        serialPort.open();
-      }, 10000);
-    }
-  });
-}
-
-// --------------------- OKRESOWE LOGOWANIE STANU GPS ---------------------
 function logGpsStatus() {
   const now = Date.now();
-  if (now - lastGpsLogTime > 10000) { // co 10 sekund
+  if (now - lastGpsLogTime > 10000) {
     lastGpsLogTime = now;
-    console.log(`[GPS] Status: enabled=${gpsEnabled}, fix=${gpsFix}, lat=${currentLatitude}, lon=${currentLongitude}`);
+    console.log(
+      `[GPS] Status: enabled=${gpsEnabled}, fix=${hasFreshGpsFix()}, source=${gpsSource}, lat=${currentLatitude}, lon=${currentLongitude}, lastNmeaAt=${lastNmeaAt ? new Date(lastNmeaAt).toISOString() : 'BRAK'}`
+    );
   }
 }
 
-// --------------------- URUCHOMIENIE ---------------------
 async function start() {
-  console.log(JSON.stringify({
-    ok: true,
-    message: 'Isarsoft PC Client started',
-    pcId: PC_ID,
-    pcName: PC_NAME,
-    roomServerUrl: ROOM_SERVER_URL,
-    refreshIntervalMs: REFRESH_INTERVAL_MS,
-    sendIntervalMs: SEND_INTERVAL_MS,
-    gpsPort: GPS_PORT_PATH,
-    gpsBaudRate: GPS_BAUD_RATE,
-    time: nowIso(),
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        message: 'Isarsoft PC Client started',
+        pcId: PC_ID,
+        pcName: PC_NAME,
+        roomServerUrl: ROOM_SERVER_URL,
+        refreshIntervalMs: REFRESH_INTERVAL_MS,
+        sendIntervalMs: SEND_INTERVAL_MS,
+        gpsPort: GPS_PORT_PATH,
+        gpsBaudRate: GPS_BAUD_RATE,
+        gpsFixMaxAgeMs: GPS_FIX_MAX_AGE_MS,
+        ipGeoFallback: ENABLE_IP_GEO_FALLBACK,
+        time: nowIso(),
+      },
+      null,
+      2
+    )
+  );
 
-  // Inicjalizacja GPS
   initGps();
-
-  // Cykliczne logowanie stanu GPS
   setInterval(logGpsStatus, 5000);
 
-  // Pierwsze odświeżenie danych z Isarsoft
   await refreshCache();
-
-  // Cykliczne odświeżanie danych z Isarsoft
   setInterval(refreshCache, REFRESH_INTERVAL_MS);
 
-  // Cykliczne wysyłanie do serwera pokojowego
-  setInterval(sendDataToRoom, SEND_INTERVAL_MS);
+  setInterval(() => {
+    sendDataToRoom().catch((err) => {
+      console.error('[sendDataToRoom] Błąd cykliczny:', err.message);
+    });
+  }, SEND_INTERVAL_MS);
 
-  // Dodatkowo wyślij od razu po starcie
   await sendDataToRoom();
 }
 
-start().catch(err => console.error('[start] Błąd krytyczny:', err));
+start().catch((err) => console.error('[start] Błąd krytyczny:', err));
