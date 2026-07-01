@@ -4,6 +4,12 @@ const http = require('http');
 const https = require('https');
 const { URL, URLSearchParams } = require('url');
 
+// --------------------- MODUŁY GPS ---------------------
+// Wymagane pakiety: serialport i gps
+// Instalacja: npm install serialport gps
+const { SerialPort } = require('serialport');
+const { GPS } = require('gps');
+
 // --------------------- KONFIGURACJA PC ---------------------
 const PC_ID = process.env.PC_ID || 1;
 const PC_NAME = process.env.PC_NAME || 'pc_number_113';
@@ -16,6 +22,12 @@ const REFRESH_INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS || 30 * 1000)
 
 // Interwał wysyłania do serwera pokojowego (co ile wysyłać aktualny cache)
 const SEND_INTERVAL_MS = Number(process.env.SEND_INTERVAL_MS || 5 * 1000);
+
+// --------------------- KONFIGURACJA PORTU SZEREGOWEGO GPS ---------------------
+// Ścieżka do portu – na Linux /dev/ttyUSB0, /dev/ttyACM0, na Windows COMx
+const GPS_PORT_PATH = process.env.GPS_PORT_PATH || '/dev/ttyUSB0';
+// Prędkość transmisji – typowo 9600 lub 4800, zależnie od modułu
+const GPS_BAUD_RATE = Number(process.env.GPS_BAUD_RATE || 9600);
 
 // --------------------- KONFIGURACJA ISARSOFT ---------------------
 const CONFIG = {
@@ -35,6 +47,12 @@ const CONFIG = {
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
 };
+
+// --------------------- STAN GPS ---------------------
+let currentLatitude = null;   // szerokość geograficzna (stopnie dziesiętne)
+let currentLongitude = null;  // długość geograficzna (stopnie dziesiętne)
+let gpsFix = false;           // czy aktualnie mamy poprawny fix
+let gpsEnabled = false;       // czy udało się otworzyć port i uruchomić GPS
 
 // --------------------- POMOCNICY ---------------------
 function nowIso() {
@@ -662,18 +680,28 @@ async function refreshCache() {
   }
 }
 
+// --------------------- WYSYŁANIE DO SERWERA POKOJOWEGO (z GPS) ---------------------
 async function sendDataToRoom() {
   if (!cachedData) {
     console.warn('[sendDataToRoom] Brak danych w cache, pomijam wysyłkę.');
     return;
   }
 
+  // Pobierz aktualne współrzędne z GPS (odczytane w tle)
+  const lat = gpsFix ? currentLatitude : null;
+  const lon = gpsFix ? currentLongitude : null;
+
   const payload = {
     pcId: PC_ID,
     pcName: PC_NAME,
     timestamp: nowIso(),
+    latitude: lat,      // <-- dodane
+    longitude: lon,     // <-- dodane
     data: cachedData,
   };
+
+  // Opcjonalnie loguj stan GPS
+  console.log(`[sendDataToRoom] GPS fix: ${gpsFix ? 'TAK' : 'NIE'}, lat: ${lat}, lon: ${lon}`);
 
   try {
     const postData = JSON.stringify(payload);
@@ -711,6 +739,80 @@ async function sendDataToRoom() {
   }
 }
 
+// --------------------- INICJALIZACJA GPS ---------------------
+function initGps() {
+  // Utwórz parser NMEA
+  const gps = new GPS();
+
+  // Nasłuchuj na zdarzenia danych z parsera
+  gps.on('data', (data) => {
+    // Interesują nas zdania GGA (zawierają informację o jakości fixu)
+    if (data.type === 'GGA') {
+      // quality > 0 oznacza poprawny fix (1 = GPS, 2 = DGPS, itp.)
+      if (data.quality !== undefined && data.quality > 0 && data.lat !== undefined && data.lon !== undefined) {
+        currentLatitude = data.lat;
+        currentLongitude = data.lon;
+        gpsFix = true;
+      } else {
+        // Jeśli fix został utracony, oznaczamy brak
+        gpsFix = false;
+      }
+    }
+    // Można też nasłuchiwać na RMC, ale GGA jest wystarczające
+  });
+
+  // Obsługa błędów parsera (raczej nie występują)
+  gps.on('error', (err) => {
+    console.error('[GPS] Błąd parsera NMEA:', err.message);
+  });
+
+  // Otwórz port szeregowy
+  const serialPort = new SerialPort({
+    path: GPS_PORT_PATH,
+    baudRate: GPS_BAUD_RATE,
+    autoOpen: false,
+  });
+
+  // Obsługa otwarcia portu
+  serialPort.on('open', () => {
+    console.log(`[GPS] Port ${GPS_PORT_PATH} otwarty, prędkość ${GPS_BAUD_RATE} bps`);
+    gpsEnabled = true;
+  });
+
+  // Obsługa danych z portu – przekazujemy do parsera
+  serialPort.on('data', (chunk) => {
+    try {
+      // Konwersja Buffer na string (zakładamy ASCII/NMEA)
+      gps.update(chunk.toString());
+    } catch (err) {
+      console.error('[GPS] Błąd przetwarzania danych z portu:', err.message);
+    }
+  });
+
+  // Obsługa błędów portu
+  serialPort.on('error', (err) => {
+    console.error(`[GPS] Błąd portu ${GPS_PORT_PATH}:`, err.message);
+    gpsEnabled = false;
+    // Można dodać logikę ponownego otwarcia, ale dla uproszczenia pozostawiamy
+  });
+
+  // Obsługa zamknięcia portu
+  serialPort.on('close', () => {
+    console.warn(`[GPS] Port ${GPS_PORT_PATH} zamknięty`);
+    gpsEnabled = false;
+    gpsFix = false;
+  });
+
+  // Próba otwarcia portu
+  serialPort.open((err) => {
+    if (err) {
+      console.error(`[GPS] Nie udało się otworzyć portu ${GPS_PORT_PATH}:`, err.message);
+      gpsEnabled = false;
+    }
+    // else: otwarcie zostanie zgłoszone przez zdarzenie 'open'
+  });
+}
+
 // --------------------- URUCHOMIENIE ---------------------
 async function start() {
   console.log(JSON.stringify({
@@ -721,10 +823,15 @@ async function start() {
     roomServerUrl: ROOM_SERVER_URL,
     refreshIntervalMs: REFRESH_INTERVAL_MS,
     sendIntervalMs: SEND_INTERVAL_MS,
+    gpsPort: GPS_PORT_PATH,
+    gpsBaudRate: GPS_BAUD_RATE,
     time: nowIso(),
   }, null, 2));
 
-  // Pierwsze odświeżenie
+  // Inicjalizacja GPS (odczyt w tle)
+  initGps();
+
+  // Pierwsze odświeżenie danych z Isarsoft
   await refreshCache();
 
   // Cykliczne odświeżanie danych z Isarsoft
