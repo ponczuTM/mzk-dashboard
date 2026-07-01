@@ -13,6 +13,7 @@
     "axios": "^1.18.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "https-proxy-agent": "^9.1.0"
+    "https-proxy-agent": "^9.1.0",
+    "serialport": "^13.0.0"
   }
 }
