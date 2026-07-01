@@ -89,6 +89,10 @@ const server = http.createServer((req, res) => {
       const timestamp = payload.timestamp;
       const data = payload.data;
 
+      // Pobieramy współrzędne GPS (mogą być null, jeśli brak fixu)
+      const latitude = payload.latitude !== undefined ? payload.latitude : null;
+      const longitude = payload.longitude !== undefined ? payload.longitude : null;
+
       if (pcId == null || pcName == null) {
         throw new Error('Brak wymaganych pól: pcId, pcName');
       }
@@ -97,11 +101,13 @@ const server = http.createServer((req, res) => {
       pcDataStore.set(String(pcId), {
         pcName,
         timestamp,
+        latitude,
+        longitude,
         data,
         receivedAt: new Date().toISOString()
       });
 
-      // Wypisujemy w konsoli czytelne podsumowanie
+      // ---------- WYŚWIETLANIE W KONSOLI (z GPS) ----------
       console.log('\n╔════════════════════════════════════════════════════════════════╗');
       console.log('║                    📥 ODEBRANO DANE Z PC                    ║');
       console.log('╠════════════════════════════════════════════════════════════════╣');
@@ -109,6 +115,11 @@ const server = http.createServer((req, res) => {
       console.log(`║  PC Name:        ${String(pcName).padEnd(40)}║`);
       console.log(`║  Czas nadania:   ${String(timestamp).padEnd(40)}║`);
       console.log(`║  Czas odbioru:   ${new Date().toISOString().padEnd(40)}║`);
+      // Wyświetlamy współrzędne GPS
+      const latStr = latitude !== null && latitude !== undefined ? latitude.toFixed(6) : 'BRAK';
+      const lonStr = longitude !== null && longitude !== undefined ? longitude.toFixed(6) : 'BRAK';
+      console.log(`║  Szerokość GPS:  ${String(latStr).padEnd(40)}║`);
+      console.log(`║  Długość GPS:    ${String(lonStr).padEnd(40)}║`);
       console.log('╠════════════════════════════════════════════════════════════════╣');
       if (data && data.totals) {
         console.log(`║  Aplikacje:      ${String(data.totals.objectflow_apps).padEnd(40)}║`);
@@ -123,8 +134,8 @@ const server = http.createServer((req, res) => {
 
       // Odpowiedź
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ 
-        ok: true, 
+      res.end(JSON.stringify({
+        ok: true,
         message: 'Data received',
         receivedAt: new Date().toISOString()
       }));
@@ -139,7 +150,7 @@ const server = http.createServer((req, res) => {
 // --------------------- URUCHOMIENIE ---------------------
 server.listen(PORT, () => {
   const ips = getLocalIPs();
-  
+
   console.log('\n' + '═'.repeat(70));
   console.log('║     🚀 SERWER POKOJOWY (Isarsoft Room Server) URUCHOMIONY     ║');
   console.log('═'.repeat(70));
@@ -148,7 +159,7 @@ server.listen(PORT, () => {
   console.log('║');
   console.log('║  📍 DOSTĘPNE ADRESY URL DO KOPIOWANIA:');
   console.log('║');
-  
+
   if (ips.length === 0) {
     console.log('║  ⚠️  Nie znaleziono żadnych zewnętrznych adresów IPv4!');
     console.log('║  Sprawdź połączenie sieciowe.');
@@ -161,7 +172,7 @@ server.listen(PORT, () => {
       console.log('║');
     });
   }
-  
+
   console.log('║  💡 WSKAZÓWKI:');
   console.log('║  1. Wybierz odpowiedni adres IP z listy powyżej');
   console.log('║  2. Skopiuj komendę export i wklej w terminalu serverPc.js');
@@ -173,7 +184,7 @@ server.listen(PORT, () => {
   console.log('║  📊 Serwer nasłuchuje na ścieżce: POST /api/data');
   console.log('║  📊 Endpoint pomocniczy: GET /api/ip (pokaże adresy IP)');
   console.log('═'.repeat(70) + '\n');
-  
+
   // Dodatkowo wyświetlamy w formacie JSON dla łatwiejszego parsowania
   console.log('📋 ŁATWE KOPIOWANIE (JSON):');
   console.log(JSON.stringify({
@@ -205,6 +216,6 @@ process.on('SIGTERM', () => {
   console.log('\n[serverRoom] Zamykam serwer...');
   server.close(() => {
     console.log('[serverRoom] Serwer zamknięty.');
-    process.exit(0); 
+    process.exit(0);
   });
 });
