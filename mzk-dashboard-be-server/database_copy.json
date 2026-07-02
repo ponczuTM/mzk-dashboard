@@ -1,0 +1,299 @@
+{
+  "stops": [
+    {
+      "stop_id": "stop_1",
+      "name": "Plac Rapackiego",
+      "number": "01",
+      "latitude": 53.0138,
+      "longitude": 18.5982,
+      "admin_zone": "Toruń",
+      "zone_type": "stały"
+    },
+    {
+      "stop_id": "stop_2",
+      "name": "Dworzec Główny",
+      "number": "02",
+      "latitude": 53.0146,
+      "longitude": 18.5998,
+      "admin_zone": "Toruń",
+      "zone_type": "stały"
+    },
+    {
+      "stop_id": "stop_3",
+      "name": "Bydgoska",
+      "number": "03",
+      "latitude": 53.0133,
+      "longitude": 18.6022,
+      "admin_zone": "Toruń",
+      "zone_type": "stały"
+    },
+    {
+      "stop_id": "stop_4",
+      "name": "Szosa Chełmińska",
+      "number": "04",
+      "latitude": 53.0106,
+      "longitude": 18.6015,
+      "admin_zone": "Toruń",
+      "zone_type": "stały"
+    },
+    {
+      "stop_id": "stop_5",
+      "name": "Włocławska",
+      "number": "05",
+      "latitude": 53.0088,
+      "longitude": 18.5983,
+      "admin_zone": "Toruń",
+      "zone_type": "na żądanie"
+    }
+  ],
+  "schedules": [
+    {
+      "line": "113",
+      "direction": "Dworzec Główny → Włocławska",
+      "day_type": "weekday",
+      "stops_sequence": [
+        {
+          "stop_id": "stop_1",
+          "planned_time": "06:00:00"
+        },
+        {
+          "stop_id": "stop_2",
+          "planned_time": "06:05:00"
+        },
+        {
+          "stop_id": "stop_3",
+          "planned_time": "06:10:00"
+        },
+        {
+          "stop_id": "stop_4",
+          "planned_time": "06:15:00"
+        },
+        {
+          "stop_id": "stop_5",
+          "planned_time": "06:20:00"
+        }
+      ]
+    },
+    {
+      "line": "113",
+      "direction": "Dworzec Główny → Włocławska",
+      "day_type": "weekend",
+      "stops_sequence": [
+        {
+          "stop_id": "stop_1",
+          "planned_time": "07:00:00"
+        },
+        {
+          "stop_id": "stop_2",
+          "planned_time": "07:06:00"
+        },
+        {
+          "stop_id": "stop_3",
+          "planned_time": "07:12:00"
+        },
+        {
+          "stop_id": "stop_4",
+          "planned_time": "07:18:00"
+        },
+        {
+          "stop_id": "stop_5",
+          "planned_time": "07:24:00"
+        }
+      ]
+    }
+  ],
+  "trips": {
+    "vehicle_id": "first_bus_line_113",
+    "current_stop_index": 4,
+    "current_position": {
+      "lat": 53.0088,
+      "lng": 18.5983
+    },
+    "next_stop": {
+      "stop_id": "stop_5",
+      "name": "Włocławska",
+      "planned_time": "06:20:00"
+    },
+    "planned_time": "06:20:00",
+    "actual_time": "2026-06-29T13:15:54.348Z",
+    "status": "opóźniony",
+    "delay_seconds": 32154,
+    "last_update": "2026-06-29T13:15:54.348Z",
+    "data_quality": {
+      "complete": false,
+      "errors": [
+        "Brak danych z Isarsoft – pomiar wadliwy"
+      ]
+    }
+  },
+  "history": [
+    {
+      "timestamp": "2026-06-29T13:04:39.317Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31479
+    },
+    {
+      "timestamp": "2026-06-29T13:04:44.316Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31484
+    },
+    {
+      "timestamp": "2026-06-29T13:04:49.317Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31489
+    },
+    {
+      "timestamp": "2026-06-29T13:04:54.318Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31494
+    },
+    {
+      "timestamp": "2026-06-29T13:04:59.318Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31499
+    },
+    {
+      "timestamp": "2026-06-29T13:05:04.320Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31504
+    },
+    {
+      "timestamp": "2026-06-29T13:05:09.321Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31509
+    },
+    {
+      "timestamp": "2026-06-29T13:05:14.322Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31514
+    },
+    {
+      "timestamp": "2026-06-29T13:05:19.322Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31519
+    },
+    {
+      "timestamp": "2026-06-29T13:05:24.323Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31524
+    },
+    {
+      "timestamp": "2026-06-29T13:05:29.324Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31529
+    },
+    {
+      "timestamp": "2026-06-29T13:05:34.325Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 31534
+    },
+    {
+      "timestamp": "2026-06-29T13:15:14.342Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32114
+    },
+    {
+      "timestamp": "2026-06-29T13:15:19.343Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32119
+    },
+    {
+      "timestamp": "2026-06-29T13:15:24.344Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32124
+    },
+    {
+      "timestamp": "2026-06-29T13:15:29.346Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32129
+    },
+    {
+      "timestamp": "2026-06-29T13:15:34.346Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32134
+    },
+    {
+      "timestamp": "2026-06-29T13:15:39.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32139
+    },
+    {
+      "timestamp": "2026-06-29T13:15:44.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32144
+    },
+    {
+      "timestamp": "2026-06-29T13:15:49.347Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32149
+    },
+    {
+      "timestamp": "2026-06-29T13:15:54.348Z",
+      "lat": 53.0088,
+      "lng": 18.5983,
+      "stop_id": "stop_5",
+      "status": "opóźniony",
+      "delay_seconds": 32154
+    }
+  ]
+}
