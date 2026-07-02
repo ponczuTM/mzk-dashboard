@@ -72,6 +72,7 @@ async function handleApiIp(req, res) {
 
 async function handleIncomingData(req, res) {
   const payload = await readJsonBody(req);
+  console.log(JSON.stringify(payload, null, 2));
 
   const pcId = payload.pcId;
   const pcName = payload.pcName;
