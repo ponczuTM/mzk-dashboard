@@ -84,6 +84,9 @@ const api = {
 
   // Settings
   getSettings: () => fetchApi('/settings'),
+
+  // ---------- NOWA METODA: dane Isarsoft (cache) ----------
+  getIsarsoftLatest: () => fetchApi('/api/isarsoft/latest'),
 };
 
 const BackendContext = createContext(null);

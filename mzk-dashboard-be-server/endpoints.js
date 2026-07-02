@@ -52,6 +52,9 @@ const {
   logReceivedDataConsole
 } = funcs;
 
+// ---------- CACHE dla ostatnich danych Isarsoft ----------
+let latestIsarsoftData = null;   // przechowuje pełny payload z Isarsoft
+
 // --------------------- HANDLERY API ---------------------
 async function handleApiIp(req, res) {
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -73,6 +76,9 @@ async function handleApiIp(req, res) {
 async function handleIncomingData(req, res) {
   const payload = await readJsonBody(req);
   console.log(JSON.stringify(payload, null, 2));
+
+  // --- Zapisujemy ostatni payload w pamięci (cache) ---
+  latestIsarsoftData = payload;
 
   const pcId = payload.pcId;
   const pcName = payload.pcName;
@@ -126,6 +132,21 @@ async function handleIncomingData(req, res) {
     savedRawFrame: `sqlite:raw_frames:${result.rawFrameId}`,
     savedFrame: minimalFrame,
     currentStatus: result.status
+  });
+}
+
+// ---------- NOWY ENDPOINT: pobranie ostatnich danych Isarsoft ----------
+async function handleGetIsarsoftLatest(req, res) {
+  if (!latestIsarsoftData) {
+    sendJson(res, 404, {
+      ok: false,
+      error: 'Brak danych Isarsoft – jeszcze nie odebrano żadnego pakietu.'
+    });
+    return;
+  }
+  sendJson(res, 200, {
+    ok: true,
+    data: latestIsarsoftData
   });
 }
 
@@ -998,7 +1019,8 @@ async function handleRoot(req, res) {
       stopUsage: 'GET /reports/stop-usage',
       onDemandStops: 'GET /reports/on-demand-stops',
       linePerformance: 'GET /reports/line-performance',
-      adminZone: 'GET /reports/admin-zone'
+      adminZone: 'GET /reports/admin-zone',
+      isarsoftLatest: 'GET /api/isarsoft/latest'
     }
   });
 }
@@ -1013,7 +1035,6 @@ async function routeRequest(req, res) {
     return;
   }
 
-  // Sprawdzamy stan bazy danych przez dbState.ready oraz czy connection istnieje
   if (!dbState.ready || !db.connection) {
     sendJson(res, 503, {
       ok: false,
@@ -1030,6 +1051,11 @@ async function routeRequest(req, res) {
     if (req.method === 'GET' && pathname === '/') return await handleRoot(req, res);
     if (req.method === 'GET' && pathname === '/api/ip') return await handleApiIp(req, res);
     if (req.method === 'POST' && pathname === '/api/data') return await handleIncomingData(req, res);
+
+    // NOWY ENDPOINT
+    if (req.method === 'GET' && pathname === '/api/isarsoft/latest') {
+      return await handleGetIsarsoftLatest(req, res);
+    }
 
     if (pathname.startsWith('/stops/') && pathname !== '/stops') {
       const stopId = decodeURIComponent(pathname.substring('/stops/'.length));
