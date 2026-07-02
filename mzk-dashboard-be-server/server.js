@@ -4,119 +4,265 @@ const http = require('http');
 const url = require('url');
 const os = require('os');
 const fs = require('fs');
-const fsp = fs.promises;
 const path = require('path');
 const crypto = require('crypto');
+const Database = require('better-sqlite3');
 
 // --------------------- KONFIGURACJA ---------------------
 const PORT = Number(process.env.ROOM_PORT || 3001);
-const DB_ROOT = path.join(__dirname, 'database');
-const DB_FILE = path.join(DB_ROOT, 'database.json');
-const DB_TMP_SUFFIX = '.tmp';
-const SYNC_INTERVAL_MS = 5000;
+const DB_ROOT = process.env.ROOM_DB_ROOT || path.join(__dirname, 'database');
+const DB_FILE = process.env.ROOM_DB_FILE || path.join(DB_ROOT, 'production.db');
+const SYNC_INTERVAL_MS = Number(process.env.ROOM_SYNC_INTERVAL_MS || 5000);
 const MAX_BODY_BYTES = Number(process.env.ROOM_MAX_BODY_BYTES || 100 * 1024 * 1024);
 const GEOFENCE_RADIUS_METERS = Number(process.env.ROOM_GEOFENCE_RADIUS_METERS || 55);
 const PUNCTUALITY_TOLERANCE_SECONDS = Number(process.env.ROOM_PUNCTUALITY_TOLERANCE_SECONDS || 60);
 const FRAME_HISTORY_LIMIT_IN_DB = Number(process.env.ROOM_FRAME_HISTORY_LIMIT_IN_DB || 50000);
 const DAY_TYPES = ['weekday', 'weekend', 'holiday'];
 
-let database = createEmptyDatabase();
-let databaseWriteQueue = Promise.resolve();
+let db = null;
 let databaseReady = false;
+let server = null;
 
-// Przechowujemy ostatnie dane dla każdego PC
-const pcDataStore = new Map();
+// --------------------- BAZA SQLITE ---------------------
+function ensureDatabaseReady() {
+  fs.mkdirSync(DB_ROOT, { recursive: true });
 
-// --------------------- FUNKCJE POMOCNICZE ---------------------
-function createEmptyDatabase() {
-  return {
-    version: 1,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    stops: [],
-    schedules: [],
-    trips: [],
-    current_status: {},
-    vehicles: {},
-    holidays: [],
-    settings: {
-      geofence_radius_meters: GEOFENCE_RADIUS_METERS,
-      punctuality_tolerance_seconds: PUNCTUALITY_TOLERANCE_SECONDS,
-      sync_interval_ms: SYNC_INTERVAL_MS
-    }
-  };
-}
-
-function ensureDatabaseShape(input) {
-  const db = input && typeof input === 'object' ? input : createEmptyDatabase();
-
-  if (!Array.isArray(db.stops)) db.stops = [];
-  if (!Array.isArray(db.schedules)) db.schedules = [];
-  if (!Array.isArray(db.trips)) db.trips = [];
-  if (!db.current_status || typeof db.current_status !== 'object' || Array.isArray(db.current_status)) db.current_status = {};
-  if (!db.vehicles || typeof db.vehicles !== 'object' || Array.isArray(db.vehicles)) db.vehicles = {};
-  if (!Array.isArray(db.holidays)) db.holidays = [];
-  if (!db.settings || typeof db.settings !== 'object' || Array.isArray(db.settings)) db.settings = {};
-
-  db.version = Number(db.version || 1);
-  db.created_at = db.created_at || new Date().toISOString();
-  db.updated_at = db.updated_at || new Date().toISOString();
-  db.settings.geofence_radius_meters = Number(db.settings.geofence_radius_meters || GEOFENCE_RADIUS_METERS);
-  db.settings.punctuality_tolerance_seconds = Number(db.settings.punctuality_tolerance_seconds || PUNCTUALITY_TOLERANCE_SECONDS);
-  db.settings.sync_interval_ms = Number(db.settings.sync_interval_ms || SYNC_INTERVAL_MS);
-
-  return db;
-}
-
-async function ensureDatabaseReady() {
-  await fsp.mkdir(DB_ROOT, { recursive: true });
+  db = new Database(DB_FILE);
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000');
 
   try {
-    const file = await atomicReadJson(DB_FILE);
-    database = ensureDatabaseShape(file);
+    db.function('haversine_meters', { deterministic: true }, haversineMeters);
   } catch (err) {
-    if (err.code !== 'ENOENT') {
-      console.error('[serverRoom] Nie udało się odczytać database.json, tworzę nową bazę:', err.message);
-    }
-
-    database = createEmptyDatabase();
-    await saveDatabase();
+    // Funkcja może być już zarejestrowana po hot-reloadzie w niektórych środowiskach.
   }
+
+  initSchema();
+  seedDefaultSettings();
 
   databaseReady = true;
 }
 
-async function atomicReadJson(filePath) {
-  const raw = await fsp.readFile(filePath, 'utf8');
-  return JSON.parse(raw);
+function initSchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stops (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      latitude REAL,
+      longitude REAL,
+      zone TEXT,
+      metadata TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      line_id TEXT,
+      route_name TEXT,
+      day_type TEXT,
+      sequence_json TEXT,
+      metadata TEXT,
+      pcName TEXT,
+      pcId TEXT,
+      active INTEGER DEFAULT 1,
+      updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS vehicles (
+      pcName TEXT PRIMARY KEY,
+      pcId TEXT,
+      last_lat REAL,
+      last_lng REAL,
+      first_seen TEXT,
+      last_seen TEXT,
+      metadata TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS current_status (
+      pcName TEXT PRIMARY KEY,
+      line_id TEXT,
+      current_stop_id TEXT,
+      nearest_stop_id TEXT,
+      punctuality_status TEXT,
+      delay_seconds INTEGER,
+      geo_distance REAL,
+      passengers_in INTEGER,
+      passengers_out INTEGER,
+      passengers_onboard INTEGER,
+      camera_quality_json TEXT,
+      updated_at TEXT,
+      status TEXT,
+      pcId TEXT,
+      day_type TEXT,
+      timestamp TEXT,
+      received_at TEXT,
+      latitude REAL,
+      longitude REAL,
+      payload_json TEXT,
+      status_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS raw_frames (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pcName TEXT,
+      pcId TEXT,
+      timestamp TEXT,
+      latitude REAL,
+      longitude REAL,
+      received_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS trips (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pcName TEXT,
+      line_id TEXT,
+      stop_id TEXT,
+      timestamp TEXT,
+      day_type TEXT,
+      passengers_in INTEGER,
+      passengers_out INTEGER,
+      passengers_onboard INTEGER,
+      delay_seconds INTEGER,
+      punctuality_status TEXT,
+      camera_error_detected INTEGER,
+      distance_to_stop REAL,
+      is_at_stop INTEGER,
+      pcId TEXT,
+      line_number TEXT,
+      brigade TEXT,
+      schedule_id TEXT,
+      trip_id TEXT,
+      received_at TEXT,
+      analyzed_at TEXT,
+      latitude REAL,
+      longitude REAL,
+      planned_time TEXT,
+      delay_abs_seconds INTEGER,
+      passenger_events INTEGER,
+      camera_count INTEGER,
+      selected_area_avg REAL,
+      selected_area_count INTEGER,
+      metadata TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS holidays (
+      date TEXT PRIMARY KEY,
+      description TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
+    CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON schedules(pcName, pcId, day_type, active, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_schedules_line ON schedules(line_id, day_type);
+    CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
+    CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
+    CREATE INDEX IF NOT EXISTS idx_raw_frames_id ON raw_frames(id);
+    CREATE INDEX IF NOT EXISTS idx_trips_filters ON trips(pcName, line_id, stop_id, day_type, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_line_vehicle ON trips(line_id, pcName, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_stop ON trips(stop_id, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_id ON trips(id);
+    CREATE INDEX IF NOT EXISTS idx_trips_quality ON trips(camera_error_detected);
+  `);
+
+  ensureColumn('schedules', 'pcName', 'TEXT');
+  ensureColumn('schedules', 'pcId', 'TEXT');
+  ensureColumn('schedules', 'active', 'INTEGER DEFAULT 1');
+  ensureColumn('schedules', 'updated_at', 'TEXT');
+
+  ensureColumn('current_status', 'status', 'TEXT');
+  ensureColumn('current_status', 'pcId', 'TEXT');
+  ensureColumn('current_status', 'day_type', 'TEXT');
+  ensureColumn('current_status', 'timestamp', 'TEXT');
+  ensureColumn('current_status', 'received_at', 'TEXT');
+  ensureColumn('current_status', 'latitude', 'REAL');
+  ensureColumn('current_status', 'longitude', 'REAL');
+  ensureColumn('current_status', 'payload_json', 'TEXT');
+  ensureColumn('current_status', 'status_json', 'TEXT');
+
+  ensureColumn('trips', 'pcId', 'TEXT');
+  ensureColumn('trips', 'line_number', 'TEXT');
+  ensureColumn('trips', 'brigade', 'TEXT');
+  ensureColumn('trips', 'schedule_id', 'TEXT');
+  ensureColumn('trips', 'trip_id', 'TEXT');
+  ensureColumn('trips', 'received_at', 'TEXT');
+  ensureColumn('trips', 'analyzed_at', 'TEXT');
+  ensureColumn('trips', 'latitude', 'REAL');
+  ensureColumn('trips', 'longitude', 'REAL');
+  ensureColumn('trips', 'planned_time', 'TEXT');
+  ensureColumn('trips', 'delay_abs_seconds', 'INTEGER');
+  ensureColumn('trips', 'passenger_events', 'INTEGER');
+  ensureColumn('trips', 'camera_count', 'INTEGER');
+  ensureColumn('trips', 'selected_area_avg', 'REAL');
+  ensureColumn('trips', 'selected_area_count', 'INTEGER');
+  ensureColumn('trips', 'metadata', 'TEXT');
 }
 
-async function atomicWriteJson(filePath, value) {
-  const dir = path.dirname(filePath);
-  await fsp.mkdir(dir, { recursive: true });
-
-  const tmpFile = path.join(
-    dir,
-    `${path.basename(filePath)}.${process.pid}.${Date.now()}.${crypto.randomUUID()}${DB_TMP_SUFFIX}`
-  );
-
-  const json = JSON.stringify(value, null, 2);
-  await fsp.writeFile(tmpFile, json, 'utf8');
-  await fsp.rename(tmpFile, filePath);
+function ensureColumn(tableName, columnName, columnSql) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  const exists = columns.some(column => column.name === columnName);
+  if (!exists) db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnSql}`);
 }
 
-async function saveDatabase() {
-  const snapshot = JSON.parse(JSON.stringify(database));
-  snapshot.updated_at = new Date().toISOString();
-  database.updated_at = snapshot.updated_at;
+function seedDefaultSettings() {
+  const upsert = db.prepare(`
+    INSERT INTO settings(key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
 
-  databaseWriteQueue = databaseWriteQueue
-    .catch(err => {
-      console.error('[serverRoom] Poprzedni zapis database.json nie powiódł się:', err.message);
-    })
-    .then(() => atomicWriteJson(DB_FILE, snapshot));
+  const tx = db.transaction(() => {
+    upsert.run('geofence_radius_meters', String(GEOFENCE_RADIUS_METERS));
+    upsert.run('punctuality_tolerance_seconds', String(PUNCTUALITY_TOLERANCE_SECONDS));
+    upsert.run('sync_interval_ms', String(SYNC_INTERVAL_MS));
+    upsert.run('frame_history_limit_in_db', String(FRAME_HISTORY_LIMIT_IN_DB));
+    upsert.run('database_file', DB_FILE);
+  });
 
-  return databaseWriteQueue;
+  tx();
+}
+
+function pruneHistory() {
+  const tx = db.transaction(() => {
+    db.prepare(`
+      DELETE FROM raw_frames
+      WHERE id NOT IN (
+        SELECT id FROM raw_frames
+        ORDER BY id DESC
+        LIMIT ?
+      )
+    `).run(FRAME_HISTORY_LIMIT_IN_DB);
+
+    db.prepare(`
+      DELETE FROM trips
+      WHERE id NOT IN (
+        SELECT id FROM trips
+        ORDER BY id DESC
+        LIMIT ?
+      )
+    `).run(FRAME_HISTORY_LIMIT_IN_DB);
+  });
+
+  tx();
+}
+
+// --------------------- FUNKCJE POMOCNICZE ---------------------
+function jsonStringify(value) {
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function jsonParse(raw, fallback) {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return fallback;
+  }
 }
 
 function getLocalIPs() {
@@ -156,11 +302,13 @@ function readRequestBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
     let totalBytes = 0;
+    let rejected = false;
 
     req.on('data', chunk => {
       totalBytes += chunk.length;
 
       if (totalBytes > MAX_BODY_BYTES) {
+        rejected = true;
         reject(new Error(`Przekroczono maksymalny rozmiar żądania: ${MAX_BODY_BYTES} bajtów`));
         req.destroy();
         return;
@@ -169,7 +317,9 @@ function readRequestBody(req) {
       body += chunk;
     });
 
-    req.on('end', () => resolve(body));
+    req.on('end', () => {
+      if (!rejected) resolve(body);
+    });
     req.on('error', reject);
   });
 }
@@ -201,15 +351,10 @@ function toFiniteNumber(value) {
 }
 
 function requiredString(value, fieldName) {
-  if (value === null || value === undefined) {
-    throw new Error(`Brak wymaganego pola: ${fieldName}`);
-  }
+  if (value === null || value === undefined) throw new Error(`Brak wymaganego pola: ${fieldName}`);
 
   const text = String(value).trim();
-
-  if (!text) {
-    throw new Error(`Pole ${fieldName} nie może być puste`);
-  }
+  if (!text) throw new Error(`Pole ${fieldName} nie może być puste`);
 
   return text;
 }
@@ -239,22 +384,6 @@ function sanitizeFileSegment(value) {
 
 function pad2(value) {
   return String(value).padStart(2, '0');
-}
-
-function pad3(value) {
-  return String(value).padStart(3, '0');
-}
-
-function formatFrameTimestamp(date) {
-  return [
-    pad2(date.getDate()),
-    pad2(date.getMonth() + 1),
-    date.getFullYear(),
-    pad2(date.getHours()),
-    pad2(date.getMinutes()),
-    pad2(date.getSeconds()),
-    pad3(date.getMilliseconds())
-  ].join('-');
 }
 
 function formatDateKey(date) {
@@ -308,16 +437,23 @@ function getPunctualityStatus(diffSeconds) {
 }
 
 function haversineMeters(lat1, lon1, lat2, lon2) {
+  const aLat1 = Number(lat1);
+  const aLon1 = Number(lon1);
+  const aLat2 = Number(lat2);
+  const aLon2 = Number(lon2);
+
+  if (![aLat1, aLon1, aLat2, aLon2].every(Number.isFinite)) return null;
+
   const earthRadiusMeters = 6371000;
   const toRadians = degrees => degrees * Math.PI / 180;
 
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
+  const dLat = toRadians(aLat2 - aLat1);
+  const dLon = toRadians(aLon2 - aLon1);
 
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) *
-    Math.cos(toRadians(lat2)) *
+    Math.cos(toRadians(aLat1)) *
+    Math.cos(toRadians(aLat2)) *
     Math.sin(dLon / 2) *
     Math.sin(dLon / 2);
 
@@ -389,10 +525,34 @@ function getStopId(stop) {
   return String(stop.stop_id || stop.id || '').trim();
 }
 
+function stopFromRow(row) {
+  if (!row) return null;
+  const metadata = jsonParse(row.metadata, {});
+
+  return {
+    stop_id: row.id,
+    id: row.id,
+    name: row.name || '',
+    number: metadata.number || '',
+    latitude: row.latitude,
+    longitude: row.longitude,
+    lat: row.latitude,
+    lng: row.longitude,
+    admin_zone: metadata.admin_zone || metadata.adminZone || row.zone || 'nieokreślona',
+    zone: row.zone || metadata.admin_zone || 'nieokreślona',
+    zone_type: metadata.zone_type || metadata.zoneType || 'nieokreślony',
+    description: metadata.description || '',
+    created_at: metadata.created_at || null,
+    updated_at: metadata.updated_at || null,
+    metadata
+  };
+}
+
 function findStopById(stopId) {
   const id = String(stopId || '').trim();
   if (!id) return null;
-  return database.stops.find(stop => getStopId(stop) === id) || null;
+  const row = db.prepare('SELECT * FROM stops WHERE id = ?').get(id);
+  return stopFromRow(row);
 }
 
 function normalizeStop(input) {
@@ -403,21 +563,49 @@ function normalizeStop(input) {
   if (!Number.isFinite(longitude)) throw new Error('Pole longitude/lng musi być poprawną liczbą');
 
   const stopId = normalizeUuid(input.stop_id || input.id);
+  const now = new Date().toISOString();
+  const zone = optionalString(
+    firstDefined(input.zone, input.admin_zone, input.adminZone),
+    'nieokreślona'
+  );
 
-  return {
-    stop_id: stopId,
-    id: stopId,
-    name: requiredString(input.name, 'name'),
+  const metadata = {
     number: optionalString(input.number, ''),
-    latitude,
-    longitude,
-    lat: latitude,
-    lng: longitude,
-    admin_zone: optionalString(input.admin_zone, optionalString(input.adminZone, 'nieokreślona')),
+    admin_zone: zone,
     zone_type: optionalString(input.zone_type, optionalString(input.zoneType, 'nieokreślony')),
     description: optionalString(input.description, optionalString(input.decription, '')),
-    created_at: input.created_at || new Date().toISOString(),
-    updated_at: new Date().toISOString()
+    created_at: input.created_at || now,
+    updated_at: now,
+    original: input.metadata && typeof input.metadata === 'object' ? input.metadata : undefined
+  };
+
+  return {
+    id: stopId,
+    name: requiredString(input.name, 'name'),
+    latitude,
+    longitude,
+    zone,
+    metadata
+  };
+}
+
+function stopPublicView(stop, distanceMeters, plannedTime) {
+  if (!stop) return null;
+
+  return {
+    stop_id: getStopId(stop),
+    id: getStopId(stop),
+    name: stop.name,
+    number: stop.number || '',
+    latitude: stop.latitude,
+    longitude: stop.longitude,
+    lat: stop.latitude,
+    lng: stop.longitude,
+    admin_zone: stop.admin_zone || stop.zone || 'nieokreślona',
+    zone: stop.zone || stop.admin_zone || 'nieokreślona',
+    zone_type: stop.zone_type || 'nieokreślony',
+    planned_time: plannedTime || null,
+    distance_meters: Number.isFinite(distanceMeters) ? Number(distanceMeters.toFixed(2)) : null
   };
 }
 
@@ -426,7 +614,10 @@ function normalizeScheduleSequence(sequence, dayType) {
     throw new Error(`Sekwencja przystanków dla ${dayType} musi być tablicą`);
   }
 
-  return sequence.map((entry, index) => {
+  const result = [];
+
+  for (let index = 0; index < sequence.length; index += 1) {
+    const entry = sequence[index];
     const stopId = requiredString(firstDefined(entry.stop_id, entry.id), `${dayType}[${index}].stop_id`);
     const stop = findStopById(stopId);
 
@@ -434,7 +625,7 @@ function normalizeScheduleSequence(sequence, dayType) {
       throw new Error(`Nie znaleziono przystanku stop_id=${stopId} dla ${dayType}[${index}]`);
     }
 
-    return {
+    result.push({
       stop_id: getStopId(stop),
       planned_time: normalizeTimeToHHMMSS(entry.planned_time),
       sequence_index: index,
@@ -442,13 +633,16 @@ function normalizeScheduleSequence(sequence, dayType) {
       stop_number: stop.number || '',
       latitude: stop.latitude,
       longitude: stop.longitude,
-      admin_zone: stop.admin_zone || 'nieokreślona',
+      admin_zone: stop.admin_zone || stop.zone || 'nieokreślona',
+      zone: stop.zone || stop.admin_zone || 'nieokreślona',
       zone_type: stop.zone_type || 'nieokreślony'
-    };
-  });
+    });
+  }
+
+  return result;
 }
 
-function normalizeSchedulePayload(input) {
+function normalizeSchedulePayload(input, forcedScheduleId) {
   const pcName = requiredString(
     firstDefined(input.pcName, input.pc_name, input.vehicle_pc_name, input.vehicle_id, input.bus, input.bus_id),
     'pcName'
@@ -472,6 +666,8 @@ function normalizeSchedulePayload(input) {
       rawSequence = rawDay;
     } else if (rawDay && typeof rawDay === 'object') {
       rawSequence = rawDay.stops_sequence || rawDay.stopsSequence || rawDay.stops || [];
+    } else if (Array.isArray(input.stops_sequence) && DAY_TYPES.length === 3) {
+      rawSequence = input.stops_sequence;
     } else {
       rawSequence = [];
     }
@@ -482,22 +678,171 @@ function normalizeSchedulePayload(input) {
     };
   }
 
-  return {
-    schedule_id: normalizeUuid(input.schedule_id || input.id),
+  const scheduleId = forcedScheduleId || normalizeUuid(input.schedule_id || input.id);
+  const metadata = {
+    schedule_id: scheduleId,
     pcName,
     pcId: optionalString(firstDefined(input.pcId, input.pc_id), ''),
     vehicle_id: pcName,
-    line_id: lineId,
     line_number: optionalString(firstDefined(input.line_number, input.lineNumber, input.line), lineId),
     brigade: optionalString(input.brigade, ''),
-    route_name: optionalString(input.route_name, ''),
     description: optionalString(input.description, ''),
     expected_cameras: toFiniteNumber(firstDefined(input.expected_cameras, input.expectedCameras, input.camera_count, input.cameraCount)),
-    day_types: dayTypes,
     active: input.active !== false,
     created_at: input.created_at || now,
     updated_at: now
   };
+
+  return {
+    schedule_id: scheduleId,
+    pcName,
+    pcId: metadata.pcId,
+    line_id: lineId,
+    route_name: optionalString(input.route_name, ''),
+    day_types: dayTypes,
+    metadata
+  };
+}
+
+function scheduleFromRows(rows) {
+  if (!rows || rows.length === 0) return null;
+
+  const first = rows[0];
+  const meta = jsonParse(first.metadata, {});
+  const result = {
+    schedule_id: meta.schedule_id || String(first.id).split(':')[0],
+    id: meta.schedule_id || String(first.id).split(':')[0],
+    pcName: meta.pcName || first.pcName || '',
+    pcId: meta.pcId || first.pcId || '',
+    vehicle_id: meta.vehicle_id || meta.pcName || first.pcName || '',
+    line_id: first.line_id,
+    line_number: meta.line_number || first.line_id,
+    brigade: meta.brigade || '',
+    route_name: first.route_name || '',
+    description: meta.description || '',
+    expected_cameras: meta.expected_cameras === undefined ? null : meta.expected_cameras,
+    active: first.active !== 0,
+    created_at: meta.created_at || null,
+    updated_at: meta.updated_at || first.updated_at || null,
+    day_types: {}
+  };
+
+  for (const dayType of DAY_TYPES) {
+    result.day_types[dayType] = {
+      day_type: dayType,
+      stops_sequence: []
+    };
+  }
+
+  for (const row of rows) {
+    const dayType = row.day_type || 'weekday';
+    result.day_types[dayType] = {
+      day_type: dayType,
+      stops_sequence: jsonParse(row.sequence_json, [])
+    };
+  }
+
+  return result;
+}
+
+function findScheduleRowsByBaseId(scheduleId) {
+  return db.prepare(`
+    SELECT *
+    FROM schedules
+    WHERE id = ? OR id LIKE ?
+    ORDER BY CASE day_type
+      WHEN 'weekday' THEN 1
+      WHEN 'weekend' THEN 2
+      WHEN 'holiday' THEN 3
+      ELSE 4
+    END
+  `).all(scheduleId, `${scheduleId}:%`);
+}
+
+function findActiveScheduleForVehicle(pcName, pcId, dayType) {
+  const pcNameValue = String(pcName || '').trim();
+  const pcIdValue = String(pcId || '').trim();
+
+  const row = db.prepare(`
+    SELECT *
+    FROM schedules
+    WHERE day_type = ?
+      AND active = 1
+      AND (
+        (? <> '' AND pcName = ?)
+        OR (? <> '' AND pcId = ?)
+      )
+    ORDER BY updated_at DESC, id DESC
+    LIMIT 1
+  `).get(dayType, pcNameValue, pcNameValue, pcIdValue, pcIdValue);
+
+  if (!row) return null;
+
+  const baseId = jsonParse(row.metadata, {}).schedule_id || String(row.id).split(':')[0];
+  return scheduleFromRows(findScheduleRowsByBaseId(baseId));
+}
+
+function getScheduleSequence(schedule, dayType) {
+  if (!schedule || !schedule.day_types || !schedule.day_types[dayType]) return [];
+  const sequence = schedule.day_types[dayType].stops_sequence;
+  return Array.isArray(sequence) ? sequence : [];
+}
+
+function enrichSequenceWithStops(sequence) {
+  const result = [];
+
+  for (const entry of sequence) {
+    const stop = findStopById(entry.stop_id);
+    if (!stop) continue;
+
+    result.push({
+      ...entry,
+      stop,
+      planned_seconds: timeToSeconds(entry.planned_time)
+    });
+  }
+
+  return result;
+}
+
+function findNearestStopByDistance(sequence, latitude, longitude) {
+  let nearest = null;
+
+  for (const entry of sequence) {
+    const distanceMeters = haversineMeters(latitude, longitude, entry.stop.latitude, entry.stop.longitude);
+
+    if (!Number.isFinite(distanceMeters)) continue;
+
+    if (!nearest || distanceMeters < nearest.distance_meters) {
+      nearest = {
+        entry,
+        stop: entry.stop,
+        distance_meters: distanceMeters
+      };
+    }
+  }
+
+  return nearest;
+}
+
+function findNearestStopByPlannedTime(sequence, currentSeconds) {
+  let nearest = null;
+
+  for (const entry of sequence) {
+    const diff = signedTimeDiffSeconds(currentSeconds, entry.planned_seconds);
+    const absDiff = Math.abs(diff);
+
+    if (!nearest || absDiff < nearest.abs_diff_seconds) {
+      nearest = {
+        entry,
+        stop: entry.stop,
+        diff_seconds: diff,
+        abs_diff_seconds: absDiff
+      };
+    }
+  }
+
+  return nearest;
 }
 
 function getEasterDate(year) {
@@ -550,99 +895,15 @@ function getPolishPublicHolidayKeys(year) {
 
 function determineDayType(date) {
   const dateKey = formatDateKey(date);
+  const customHoliday = db.prepare('SELECT date FROM holidays WHERE date = ?').get(dateKey);
 
-  const customHolidays = new Set(database.holidays.map(item => {
-    if (typeof item === 'string') return item;
-    if (item && typeof item === 'object') return item.date;
-    return '';
-  }).filter(Boolean));
-
-  if (customHolidays.has(dateKey)) return 'holiday';
+  if (customHoliday) return 'holiday';
 
   const publicHolidays = getPolishPublicHolidayKeys(date.getFullYear());
   if (publicHolidays.has(dateKey)) return 'holiday';
 
   const weekday = date.getDay();
   return weekday === 0 || weekday === 6 ? 'weekend' : 'weekday';
-}
-
-function findActiveScheduleForVehicle(pcName, pcId) {
-  const byUpdated = [...database.schedules]
-    .filter(schedule => schedule && schedule.active !== false)
-    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
-
-  const pcNameValue = String(pcName || '').trim();
-  const pcIdValue = String(pcId || '').trim();
-
-  return byUpdated.find(schedule => {
-    const schedulePcName = String(
-      firstDefined(schedule.pcName, schedule.pc_name, schedule.vehicle_pc_name, schedule.vehicle_id) || ''
-    ).trim();
-
-    const schedulePcId = String(firstDefined(schedule.pcId, schedule.pc_id) || '').trim();
-
-    return (
-      (pcNameValue && schedulePcName === pcNameValue) ||
-      (pcIdValue && schedulePcId && schedulePcId === pcIdValue)
-    );
-  }) || null;
-}
-
-function getScheduleSequence(schedule, dayType) {
-  if (!schedule || !schedule.day_types || !schedule.day_types[dayType]) return [];
-  const sequence = schedule.day_types[dayType].stops_sequence;
-  return Array.isArray(sequence) ? sequence : [];
-}
-
-function enrichSequenceWithStops(sequence) {
-  return sequence.map(entry => {
-    const stop = findStopById(entry.stop_id);
-    if (!stop) return null;
-
-    return {
-      ...entry,
-      stop,
-      planned_seconds: timeToSeconds(entry.planned_time)
-    };
-  }).filter(Boolean);
-}
-
-function findNearestStopByDistance(sequence, latitude, longitude) {
-  let nearest = null;
-
-  for (const entry of sequence) {
-    const distanceMeters = haversineMeters(latitude, longitude, entry.stop.latitude, entry.stop.longitude);
-
-    if (!nearest || distanceMeters < nearest.distance_meters) {
-      nearest = {
-        entry,
-        stop: entry.stop,
-        distance_meters: distanceMeters
-      };
-    }
-  }
-
-  return nearest;
-}
-
-function findNearestStopByPlannedTime(sequence, currentSeconds) {
-  let nearest = null;
-
-  for (const entry of sequence) {
-    const diff = signedTimeDiffSeconds(currentSeconds, entry.planned_seconds);
-    const absDiff = Math.abs(diff);
-
-    if (!nearest || absDiff < nearest.abs_diff_seconds) {
-      nearest = {
-        entry,
-        stop: entry.stop,
-        diff_seconds: diff,
-        abs_diff_seconds: absDiff
-      };
-    }
-  }
-
-  return nearest;
 }
 
 function extractPassengerStats(payload) {
@@ -717,7 +978,13 @@ function getCameraCollections(payload) {
     data.objectflow_apps
   ];
 
-  return collections.filter(Array.isArray);
+  const result = [];
+
+  for (const collection of collections) {
+    if (Array.isArray(collection)) result.push(collection);
+  }
+
+  return result;
 }
 
 function isCameraOnline(camera) {
@@ -779,10 +1046,11 @@ function extractCameraQuality(payload, schedule) {
   let offlineCameras = 0;
 
   for (const collection of collections) {
-    if (!Array.isArray(collection)) continue;
-
     detectedCameras = Math.max(detectedCameras || 0, collection.length);
-    offlineCameras += collection.filter(camera => !isCameraOnline(camera)).length;
+
+    for (const camera of collection) {
+      if (!isCameraOnline(camera)) offlineCameras += 1;
+    }
   }
 
   const explicitComplete = firstDefined(
@@ -833,54 +1101,207 @@ function buildTripId(schedule, pcName, date) {
   return `${sanitizeFileSegment(pcName)}_${sanitizeFileSegment(line)}_${dateKey}`;
 }
 
-function stopPublicView(stop, distanceMeters, plannedTime) {
-  if (!stop) return null;
+function buildMinimalVehicleFrame(pcName, payload, receivedAt) {
+  const coordinates = extractCoordinates(payload);
 
   return {
-    stop_id: getStopId(stop),
-    id: getStopId(stop),
-    name: stop.name,
-    number: stop.number || '',
-    latitude: stop.latitude,
-    longitude: stop.longitude,
-    lat: stop.latitude,
-    lng: stop.longitude,
-    admin_zone: stop.admin_zone || 'nieokreślona',
-    zone_type: stop.zone_type || 'nieokreślony',
-    planned_time: plannedTime || null,
-    distance_meters: Number.isFinite(distanceMeters) ? Number(distanceMeters.toFixed(2)) : null
+    pcId: payload.pcId,
+    pcName,
+    timestamp: optionalString(payload.timestamp, receivedAt.toISOString()),
+    latitude: Number.isFinite(coordinates.latitude) ? coordinates.latitude : null,
+    longitude: Number.isFinite(coordinates.longitude) ? coordinates.longitude : null
   };
+}
+
+// --------------------- WARSTWA ZAPISU ANALIZY ---------------------
+function upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, hasSchedule) {
+  const existing = db.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
+  const existingMetadata = existing ? jsonParse(existing.metadata, {}) : {};
+
+  const nextMetadata = {
+    ...existingMetadata,
+    last_payload_timestamp: timestamp,
+    has_schedule: Boolean(hasSchedule),
+    last_payload: payload,
+    last_payload_metadata: metadata,
+    updated_at: nowIso
+  };
+
+  db.prepare(`
+    INSERT INTO vehicles(pcName, pcId, last_lat, last_lng, first_seen, last_seen, metadata)
+    VALUES(@pcName, @pcId, @last_lat, @last_lng, @first_seen, @last_seen, @metadata)
+    ON CONFLICT(pcName) DO UPDATE SET
+      pcId = excluded.pcId,
+      last_lat = excluded.last_lat,
+      last_lng = excluded.last_lng,
+      last_seen = excluded.last_seen,
+      metadata = excluded.metadata
+  `).run({
+    pcName,
+    pcId: pcId || (existing ? existing.pcId : ''),
+    last_lat: Number.isFinite(coordinates.latitude) ? coordinates.latitude : null,
+    last_lng: Number.isFinite(coordinates.longitude) ? coordinates.longitude : null,
+    first_seen: existing && existing.first_seen ? existing.first_seen : nowIso,
+    last_seen: nowIso,
+    metadata: jsonStringify(nextMetadata)
+  });
+}
+
+function upsertCurrentStatus(status, payload) {
+  const passengers = status.passengers || {};
+  const currentStopId = status.current_stop ? status.current_stop.stop_id : null;
+  const nearestStopId = status.nearest_stop ? status.nearest_stop.stop_id : null;
+  const distance = status.nearest_stop && Number.isFinite(status.nearest_stop.distance_meters)
+    ? status.nearest_stop.distance_meters
+    : null;
+
+  db.prepare(`
+    INSERT INTO current_status(
+      pcName, line_id, current_stop_id, nearest_stop_id, punctuality_status,
+      delay_seconds, geo_distance, passengers_in, passengers_out, passengers_onboard,
+      camera_quality_json, updated_at, status, pcId, day_type, timestamp, received_at,
+      latitude, longitude, payload_json, status_json
+    )
+    VALUES(
+      @pcName, @line_id, @current_stop_id, @nearest_stop_id, @punctuality_status,
+      @delay_seconds, @geo_distance, @passengers_in, @passengers_out, @passengers_onboard,
+      @camera_quality_json, @updated_at, @status, @pcId, @day_type, @timestamp, @received_at,
+      @latitude, @longitude, @payload_json, @status_json
+    )
+    ON CONFLICT(pcName) DO UPDATE SET
+      line_id = excluded.line_id,
+      current_stop_id = excluded.current_stop_id,
+      nearest_stop_id = excluded.nearest_stop_id,
+      punctuality_status = excluded.punctuality_status,
+      delay_seconds = excluded.delay_seconds,
+      geo_distance = excluded.geo_distance,
+      passengers_in = excluded.passengers_in,
+      passengers_out = excluded.passengers_out,
+      passengers_onboard = excluded.passengers_onboard,
+      camera_quality_json = excluded.camera_quality_json,
+      updated_at = excluded.updated_at,
+      status = excluded.status,
+      pcId = excluded.pcId,
+      day_type = excluded.day_type,
+      timestamp = excluded.timestamp,
+      received_at = excluded.received_at,
+      latitude = excluded.latitude,
+      longitude = excluded.longitude,
+      payload_json = excluded.payload_json,
+      status_json = excluded.status_json
+  `).run({
+    pcName: status.pcName,
+    line_id: status.line_id || null,
+    current_stop_id: currentStopId,
+    nearest_stop_id: nearestStopId,
+    punctuality_status: status.punctuality_status || null,
+    delay_seconds: Number.isFinite(status.delay_seconds) ? status.delay_seconds : null,
+    geo_distance: distance,
+    passengers_in: Number(passengers.selected_in || 0),
+    passengers_out: Number(passengers.selected_out || 0),
+    passengers_onboard: passengers.onboard === null || passengers.onboard === undefined ? null : Number(passengers.onboard),
+    camera_quality_json: jsonStringify(status.data_quality || null),
+    updated_at: status.updated_at,
+    status: status.status || null,
+    pcId: status.pcId || '',
+    day_type: status.day_type || null,
+    timestamp: status.timestamp || null,
+    received_at: status.received_at || null,
+    latitude: Number.isFinite(status.latitude) ? status.latitude : null,
+    longitude: Number.isFinite(status.longitude) ? status.longitude : null,
+    payload_json: jsonStringify(payload),
+    status_json: jsonStringify(status)
+  });
+}
+
+function appendTripEventIfNeeded(status, schedule, date, appendTripEvent) {
+  if (!appendTripEvent) return;
+
+  const stop = status.current_stop || status.nearest_stop || status.time_reference_stop;
+  const passengers = status.passengers || {};
+  const quality = status.data_quality || {};
+  const passengerEvents = Number(passengers.passenger_events || 0);
+
+  const metadata = {
+    trip_event_id: crypto.randomUUID(),
+    stop_name: stop ? stop.name : null,
+    stop_number: stop ? stop.number : null,
+    admin_zone: stop ? (stop.admin_zone || stop.zone || null) : null,
+    zone_type: stop ? stop.zone_type : null,
+    data_quality: quality,
+    passengers,
+    raw_frame_id: status.raw_frame_id || null
+  };
+
+  db.prepare(`
+    INSERT INTO trips(
+      pcName, line_id, stop_id, timestamp, day_type, passengers_in, passengers_out,
+      passengers_onboard, delay_seconds, punctuality_status, camera_error_detected,
+      distance_to_stop, is_at_stop, pcId, line_number, brigade, schedule_id, trip_id,
+      received_at, analyzed_at, latitude, longitude, planned_time, delay_abs_seconds,
+      passenger_events, camera_count, selected_area_avg, selected_area_count, metadata
+    )
+    VALUES(
+      @pcName, @line_id, @stop_id, @timestamp, @day_type, @passengers_in, @passengers_out,
+      @passengers_onboard, @delay_seconds, @punctuality_status, @camera_error_detected,
+      @distance_to_stop, @is_at_stop, @pcId, @line_number, @brigade, @schedule_id, @trip_id,
+      @received_at, @analyzed_at, @latitude, @longitude, @planned_time, @delay_abs_seconds,
+      @passenger_events, @camera_count, @selected_area_avg, @selected_area_count, @metadata
+    )
+  `).run({
+    pcName: status.pcName,
+    line_id: schedule ? schedule.line_id : null,
+    stop_id: stop ? stop.stop_id : null,
+    timestamp: status.timestamp,
+    day_type: status.day_type,
+    passengers_in: Number(passengers.selected_in || 0),
+    passengers_out: Number(passengers.selected_out || 0),
+    passengers_onboard: passengers.onboard === null || passengers.onboard === undefined ? null : Number(passengers.onboard),
+    delay_seconds: Number.isFinite(status.delay_seconds) ? status.delay_seconds : null,
+    punctuality_status: status.punctuality_status || null,
+    camera_error_detected: quality.complete === false ? 1 : 0,
+    distance_to_stop: stop && Number.isFinite(stop.distance_meters) ? stop.distance_meters : null,
+    is_at_stop: status.current_stop ? 1 : 0,
+    pcId: status.pcId || '',
+    line_number: schedule ? schedule.line_number : null,
+    brigade: schedule ? schedule.brigade : null,
+    schedule_id: schedule ? schedule.schedule_id : null,
+    trip_id: buildTripId(schedule, status.pcName, date),
+    received_at: status.received_at,
+    analyzed_at: status.updated_at,
+    latitude: Number.isFinite(status.latitude) ? status.latitude : null,
+    longitude: Number.isFinite(status.longitude) ? status.longitude : null,
+    planned_time: stop ? stop.planned_time : null,
+    delay_abs_seconds: Number.isFinite(status.delay_abs_seconds) ? status.delay_abs_seconds : null,
+    passenger_events: passengerEvents,
+    camera_count: passengers.objectflow_apps === null || passengers.objectflow_apps === undefined ? null : Number(passengers.objectflow_apps),
+    selected_area_avg: passengers.selected_area_avg,
+    selected_area_count: passengers.selected_area_count,
+    metadata: jsonStringify(metadata)
+  });
 }
 
 function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
   const now = metadata.analysisDate || new Date();
+  const nowIso = now.toISOString();
   const pcName = requiredString(payload.pcName, 'pcName');
   const pcId = optionalString(payload.pcId, '');
-  const timestamp = optionalString(payload.timestamp, now.toISOString());
+  const timestamp = optionalString(payload.timestamp, nowIso);
   const coordinates = extractCoordinates(payload);
   const stats = extractPassengerStats(payload);
-  const schedule = findActiveScheduleForVehicle(pcName, pcId);
   const dayType = determineDayType(now);
+  const schedule = findActiveScheduleForVehicle(pcName, pcId, dayType);
   const currentSeconds = secondsSinceMidnight(now);
 
-  database.vehicles[pcName] = {
-    pcName,
-    pcId,
-    first_seen_at: database.vehicles[pcName] ? database.vehicles[pcName].first_seen_at : now.toISOString(),
-    last_seen_at: now.toISOString(),
-    last_payload_timestamp: timestamp,
-    last_latitude: coordinates.latitude,
-    last_longitude: coordinates.longitude,
-    has_schedule: Boolean(schedule)
-  };
+  upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, Boolean(schedule));
 
   const baseStatus = {
     pcName,
     pcId,
     timestamp,
-    received_at: metadata.receivedAt || now.toISOString(),
-    updated_at: now.toISOString(),
-    raw_file: metadata.rawFileRelativePath || null,
+    received_at: metadata.receivedAt || nowIso,
+    updated_at: nowIso,
+    raw_frame_id: metadata.rawFrameId || null,
     latitude: coordinates.latitude,
     longitude: coordinates.longitude,
     schedule_defined: Boolean(schedule),
@@ -904,10 +1325,12 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       delay_abs_seconds: null,
       current_stop: null,
       nearest_stop: null,
+      time_reference_stop: null,
+      is_on_stop: false,
       data_quality: quality
     };
 
-    database.current_status[pcName] = status;
+    upsertCurrentStatus(status, payload);
     return status;
   }
 
@@ -924,10 +1347,12 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       delay_abs_seconds: null,
       current_stop: null,
       nearest_stop: null,
+      time_reference_stop: null,
+      is_on_stop: false,
       data_quality: quality
     };
 
-    database.current_status[pcName] = status;
+    upsertCurrentStatus(status, payload);
     appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
     return status;
   }
@@ -942,10 +1367,12 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       delay_abs_seconds: null,
       current_stop: null,
       nearest_stop: null,
+      time_reference_stop: null,
+      is_on_stop: false,
       data_quality: quality
     };
 
-    database.current_status[pcName] = status;
+    upsertCurrentStatus(status, payload);
     appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
     return status;
   }
@@ -975,103 +1402,13 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
     data_quality: quality
   };
 
-  database.current_status[pcName] = status;
+  upsertCurrentStatus(status, payload);
   appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
 
   return status;
 }
 
-function appendTripEventIfNeeded(status, schedule, date, appendTripEvent) {
-  if (!appendTripEvent) return;
-
-  const stop = status.current_stop || status.nearest_stop || status.time_reference_stop;
-
-  const event = {
-    trip_event_id: crypto.randomUUID(),
-    trip_id: buildTripId(schedule, status.pcName, date),
-    pcName: status.pcName,
-    pcId: status.pcId,
-    line_id: schedule ? schedule.line_id : null,
-    line_number: schedule ? schedule.line_number : null,
-    brigade: schedule ? schedule.brigade : null,
-    schedule_id: schedule ? schedule.schedule_id : null,
-    day_type: status.day_type,
-    timestamp: status.timestamp,
-    received_at: status.received_at,
-    analyzed_at: status.updated_at,
-    raw_file: status.raw_file,
-    latitude: status.latitude,
-    longitude: status.longitude,
-    stop_id: stop ? stop.stop_id : null,
-    stop_name: stop ? stop.name : null,
-    stop_number: stop ? stop.number : null,
-    admin_zone: stop ? stop.admin_zone : null,
-    zone_type: stop ? stop.zone_type : null,
-    planned_time: stop ? stop.planned_time : null,
-    distance_meters: stop ? stop.distance_meters : null,
-    is_on_stop: Boolean(status.current_stop),
-    punctuality_status: status.punctuality_status,
-    delay_seconds: status.delay_seconds,
-    delay_abs_seconds: status.delay_abs_seconds,
-    passenger_in: status.passengers.selected_in,
-    passenger_out: status.passengers.selected_out,
-    passenger_events: status.passengers.passenger_events,
-    onboard: status.passengers.onboard,
-    camera_count: status.passengers.objectflow_apps,
-    selected_area_avg: status.passengers.selected_area_avg,
-    selected_area_count: status.passengers.selected_area_count,
-    data_quality: status.data_quality
-  };
-
-  database.trips.push(event);
-
-  if (database.trips.length > FRAME_HISTORY_LIMIT_IN_DB) {
-    database.trips.splice(0, database.trips.length - FRAME_HISTORY_LIMIT_IN_DB);
-  }
-}
-
-function buildMinimalVehicleFrame(pcName, payload, receivedAt) {
-  const coordinates = extractCoordinates(payload);
-
-  return {
-    pcId: payload.pcId,
-    pcName,
-    timestamp: optionalString(payload.timestamp, receivedAt.toISOString()),
-    latitude: Number.isFinite(coordinates.latitude) ? coordinates.latitude : null,
-    longitude: Number.isFinite(coordinates.longitude) ? coordinates.longitude : null
-  };
-}
-
-async function saveRawFrameForVehicle(pcName, payload, receivedAt) {
-  const safePcName = sanitizeFileSegment(pcName);
-  const vehicleDir = path.join(DB_ROOT, safePcName);
-  await fsp.mkdir(vehicleDir, { recursive: true });
-
-  const baseName = `${safePcName}_${formatFrameTimestamp(receivedAt)}`;
-  let finalPath = path.join(vehicleDir, `${baseName}.json`);
-  let counter = 1;
-
-  while (true) {
-    try {
-      await fsp.access(finalPath);
-      finalPath = path.join(vehicleDir, `${baseName}_${counter}.json`);
-      counter += 1;
-    } catch (err) {
-      if (err.code === 'ENOENT') break;
-      throw err;
-    }
-  }
-
-  const minimalFrame = buildMinimalVehicleFrame(pcName, payload, receivedAt);
-  await atomicWriteJson(finalPath, minimalFrame);
-
-  return {
-    absolutePath: finalPath,
-    relativePath: path.relative(__dirname, finalPath).split(path.sep).join('/'),
-    savedFrame: minimalFrame
-  };
-}
-
+// --------------------- LOGOWANIE ---------------------
 function logReceivedDataConsole(payload, status) {
   const pcId = payload.pcId;
   const pcName = payload.pcName;
@@ -1085,7 +1422,7 @@ function logReceivedDataConsole(payload, status) {
   console.log('╠════════════════════════════════════════════════════════════════╣');
   console.log(`║  PC ID:          ${String(pcId).padEnd(40)}║`);
   console.log(`║  PC Name:        ${String(pcName).padEnd(40)}║`);
-  console.log(`║  Czas nadania:   ${String(timestamp).padEnd(40)}║`);
+  console.log(`║  Czas nadania:   ${String(timestamp || 'BRAK').padEnd(40)}║`);
   console.log(`║  Czas odbioru:   ${new Date().toISOString().padEnd(40)}║`);
 
   const latStr = latitude !== null && latitude !== undefined && Number.isFinite(latitude) ? latitude.toFixed(6) : 'BRAK';
@@ -1136,37 +1473,53 @@ function logStatusTick(status) {
   console.log(`Zaktualizowano pozycję komputera pokładowego (${status.pcName}). Współrzędne: [${lat}, ${lng}]. Status: ${status.punctuality_status} o ${seconds} sek względem przystanku ${referenceStop.name} (Rozkład: ${status.day_type})`);
 }
 
-async function analyzeAllCurrentVehicles() {
+function analyzeAllCurrentVehicles() {
   if (!databaseReady) return;
-  if (pcDataStore.size === 0) return;
 
-  let changed = false;
+  const rows = db.prepare(`
+    SELECT pcName, pcId, metadata
+    FROM vehicles
+    WHERE metadata IS NOT NULL
+      AND last_seen IS NOT NULL
+    ORDER BY last_seen DESC
+  `).all();
+
+  if (rows.length === 0) return;
+
   const analysisDate = new Date();
 
-  for (const [pcName, record] of pcDataStore.entries()) {
-    try {
-      const status = analyzeVehiclePayload(record.payload, {
-        ...record.metadata,
-        analysisDate
-      }, false);
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      try {
+        const metadataJson = jsonParse(row.metadata, {});
+        const payload = metadataJson.last_payload;
 
-      logStatusTick(status);
-      changed = true;
-    } catch (err) {
-      console.error(`[serverRoom] Błąd analizy cyklicznej dla ${pcName}:`, err.message);
-    }
-  }
+        if (!payload || typeof payload !== 'object') continue;
 
-  if (changed) {
-    try {
-      await saveDatabase();
-    } catch (err) {
-      console.error('[serverRoom] Błąd zapisu database.json po cyklicznej analizie:', err.message);
+        const status = analyzeVehiclePayload(payload, {
+          ...(metadataJson.last_payload_metadata || {}),
+          analysisDate,
+          receivedAt: metadataJson.last_payload_metadata
+            ? metadataJson.last_payload_metadata.receivedAt
+            : analysisDate.toISOString()
+        }, false);
+
+        logStatusTick(status);
+      } catch (err) {
+        console.error(`[serverRoom] Błąd analizy cyklicznej dla ${row.pcName}:`, err.message);
+      }
     }
-  }
+  });
+
+  tx();
 }
 
-function getFilteredTripEvents(query) {
+// --------------------- SQL FILTER BUILDER ---------------------
+function buildTripsWhere(query, alias = 't') {
+  const prefix = alias ? `${alias}.` : '';
+  const clauses = [];
+  const params = {};
+
   const pcName = optionalString(query.pcName || query.pc_name, '');
   const lineId = optionalString(query.line_id || query.lineId || query.line, '');
   const dayType = optionalString(query.day_type || query.dayType, '');
@@ -1174,387 +1527,144 @@ function getFilteredTripEvents(query) {
   const startDate = optionalString(query.start || query.from || query.date_from || query.dateFrom, '');
   const endDate = optionalString(query.end || query.to || query.date_to || query.dateTo, '');
 
-  const startTime = startDate ? new Date(startDate).getTime() : null;
-  const endTime = endDate ? new Date(endDate).getTime() : null;
+  if (pcName) {
+    clauses.push(`${prefix}pcName = @pcName`);
+    params.pcName = pcName;
+  }
 
-  return database.trips.filter(event => {
-    if (pcName && event.pcName !== pcName) return false;
-    if (lineId && String(event.line_id) !== lineId) return false;
-    if (dayType && event.day_type !== dayType) return false;
-    if (stopId && event.stop_id !== stopId) return false;
+  if (lineId) {
+    clauses.push(`${prefix}line_id = @lineId`);
+    params.lineId = lineId;
+  }
 
-    const eventTime = new Date(event.received_at || event.analyzed_at || event.timestamp).getTime();
+  if (dayType) {
+    clauses.push(`${prefix}day_type = @dayType`);
+    params.dayType = dayType;
+  }
 
-    if (startTime !== null && Number.isFinite(startTime) && eventTime < startTime) return false;
-    if (endTime !== null && Number.isFinite(endTime) && eventTime > endTime) return false;
+  if (stopId) {
+    clauses.push(`${prefix}stop_id = @stopId`);
+    params.stopId = stopId;
+  }
 
-    return true;
-  });
-}
+  if (startDate) {
+    clauses.push(`datetime(COALESCE(${prefix}received_at, ${prefix}timestamp)) >= datetime(@startDate)`);
+    params.startDate = startDate;
+  }
 
-function summarizeDataQuality(events) {
-  const badEvents = events.filter(event => event.data_quality && event.data_quality.complete === false);
-
-  if (badEvents.length === 0) {
-    return {
-      complete: true,
-      error: null,
-      bad_events_count: 0,
-      total_events_count: events.length
-    };
+  if (endDate) {
+    clauses.push(`datetime(COALESCE(${prefix}received_at, ${prefix}timestamp)) <= datetime(@endDate)`);
+    params.endDate = endDate;
   }
 
   return {
-    complete: false,
-    error: 'Wadliwość pomiaru: Brak obrazu ze wszystkich kamer',
-    bad_events_count: badEvents.length,
-    total_events_count: events.length
+    whereSql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '',
+    andSql: clauses.length ? `AND ${clauses.join(' AND ')}` : '',
+    params
   };
 }
 
-function getHourFromTimestamp(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'unknown';
-  return pad2(date.getHours());
-}
+function summarizeDataQualitySql(query) {
+  const { whereSql, params } = buildTripsWhere(query, 't');
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) AS total_events_count,
+      COALESCE(SUM(CASE WHEN camera_error_detected = 1 THEN 1 ELSE 0 END), 0) AS bad_events_count
+    FROM trips t
+    ${whereSql}
+  `).get(params);
 
-function getWeekdayFromTimestamp(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'unknown';
+  const total = Number(row.total_events_count || 0);
+  const bad = Number(row.bad_events_count || 0);
 
-  const names = ['niedziela', 'poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek', 'sobota'];
-  return names[date.getDay()];
-}
-
-function groupKey(parts) {
-  return parts.map(part => String(part === null || part === undefined ? '' : part)).join('||');
-}
-
-function buildStopUsageReport(events) {
-  const totalPassengerEvents = events.reduce((sum, event) => sum + Number(event.passenger_events || 0), 0);
-  const map = new Map();
-
-  for (const event of events) {
-    if (!event.stop_id) continue;
-
-    const key = event.stop_id;
-
-    if (!map.has(key)) {
-      map.set(key, {
-        stop_id: event.stop_id,
-        name: event.stop_name || '',
-        number: event.stop_number || '',
-        admin_zone: event.admin_zone || 'nieokreślona',
-        zone_type: event.zone_type || 'nieokreślony',
-        total_boardings: 0,
-        total_alightings: 0,
-        total_passenger_events: 0,
-        course_ids: new Set(),
-        hours: {},
-        weekdays: {},
-        day_types: {}
-      });
-    }
-
-    const row = map.get(key);
-    const timestamp = event.received_at || event.analyzed_at || event.timestamp;
-    const hour = getHourFromTimestamp(timestamp);
-    const weekday = getWeekdayFromTimestamp(timestamp);
-    const dayType = event.day_type || 'unknown';
-    const passengerEvents = Number(event.passenger_events || 0);
-
-    row.total_boardings += Number(event.passenger_in || 0);
-    row.total_alightings += Number(event.passenger_out || 0);
-    row.total_passenger_events += passengerEvents;
-
-    if (event.trip_id) row.course_ids.add(event.trip_id);
-
-    row.hours[hour] = (row.hours[hour] || 0) + passengerEvents;
-    row.weekdays[weekday] = (row.weekdays[weekday] || 0) + passengerEvents;
-    row.day_types[dayType] = (row.day_types[dayType] || 0) + passengerEvents;
-  }
-
-  return [...map.values()].map(row => ({
-    stop_id: row.stop_id,
-    name: row.name,
-    number: row.number,
-    admin_zone: row.admin_zone,
-    zone_type: row.zone_type,
-    total_boardings: row.total_boardings,
-    total_alightings: row.total_alightings,
-    total_passenger_events: row.total_passenger_events,
-    share_of_all_passengers_percent: totalPassengerEvents > 0
-      ? Number(((row.total_passenger_events / totalPassengerEvents) * 100).toFixed(2))
-      : 0,
-    course_count: row.course_ids.size,
-    by_hour: row.hours,
-    by_weekday: row.weekdays,
-    by_day_type: row.day_types
-  })).sort((a, b) => b.total_passenger_events - a.total_passenger_events);
-}
-
-function buildOnDemandStopsReport(events) {
-  const map = new Map();
-
-  for (const event of events) {
-    if (!event.stop_id || !event.trip_id) continue;
-
-    const key = event.stop_id;
-
-    if (!map.has(key)) {
-      map.set(key, {
-        stop_id: event.stop_id,
-        name: event.stop_name || '',
-        number: event.stop_number || '',
-        admin_zone: event.admin_zone || 'nieokreślona',
-        courses: new Map()
-      });
-    }
-
-    const row = map.get(key);
-
-    if (!row.courses.has(event.trip_id)) {
-      row.courses.set(event.trip_id, {
-        passenger_events: 0,
-        boardings: 0,
-        alightings: 0
-      });
-    }
-
-    const course = row.courses.get(event.trip_id);
-    course.passenger_events += Number(event.passenger_events || 0);
-    course.boardings += Number(event.passenger_in || 0);
-    course.alightings += Number(event.passenger_out || 0);
-  }
-
-  return [...map.values()].map(row => {
-    const courses = [...row.courses.values()];
-    const coursesTotal = courses.length;
-    const coursesWithPassengers = courses.filter(course => course.passenger_events > 0).length;
-
-    return {
-      stop_id: row.stop_id,
-      name: row.name,
-      number: row.number,
-      admin_zone: row.admin_zone,
-      courses_total: coursesTotal,
-      courses_with_passengers: coursesWithPassengers,
-      percent_courses_with_passengers: coursesTotal > 0
-        ? Number(((coursesWithPassengers / coursesTotal) * 100).toFixed(2))
-        : 0,
-      suggested_status: coursesTotal > 0 && (coursesWithPassengers / coursesTotal) < 0.25
-        ? 'kandydat na przystanek na żądanie'
-        : 'regularny'
-    };
-  }).sort((a, b) => a.percent_courses_with_passengers - b.percent_courses_with_passengers);
-}
-
-function buildLinePerformanceReport(events) {
-  const map = new Map();
-
-  for (const event of events) {
-    const key = groupKey([event.line_id || 'brak_linii', event.pcName || 'brak_pc']);
-
-    if (!map.has(key)) {
-      map.set(key, {
-        line_id: event.line_id || null,
-        line_number: event.line_number || null,
-        pcName: event.pcName || null,
-        total_boardings: 0,
-        total_alightings: 0,
-        total_passenger_events: 0,
-        delay_sum: 0,
-        delay_abs_sum: 0,
-        delay_count: 0,
-        on_time_count: 0,
-        delayed_count: 0,
-        early_count: 0,
-        event_count: 0,
-        course_ids: new Set(),
-        by_hour: {},
-        by_weekday: {},
-        by_day_type: {}
-      });
-    }
-
-    const row = map.get(key);
-    const passengerEvents = Number(event.passenger_events || 0);
-    const timestamp = event.received_at || event.analyzed_at || event.timestamp;
-    const hour = getHourFromTimestamp(timestamp);
-    const weekday = getWeekdayFromTimestamp(timestamp);
-    const dayType = event.day_type || 'unknown';
-
-    row.total_boardings += Number(event.passenger_in || 0);
-    row.total_alightings += Number(event.passenger_out || 0);
-    row.total_passenger_events += passengerEvents;
-    row.event_count += 1;
-
-    if (event.trip_id) row.course_ids.add(event.trip_id);
-
-    if (Number.isFinite(event.delay_seconds)) {
-      row.delay_sum += Number(event.delay_seconds);
-      row.delay_abs_sum += Math.abs(Number(event.delay_seconds));
-      row.delay_count += 1;
-    }
-
-    if (event.punctuality_status === 'o czasie') row.on_time_count += 1;
-    if (event.punctuality_status === 'opóźniony') row.delayed_count += 1;
-    if (event.punctuality_status === 'za szybko') row.early_count += 1;
-
-    row.by_hour[hour] = (row.by_hour[hour] || 0) + passengerEvents;
-    row.by_weekday[weekday] = (row.by_weekday[weekday] || 0) + passengerEvents;
-    row.by_day_type[dayType] = (row.by_day_type[dayType] || 0) + passengerEvents;
-  }
-
-  return [...map.values()].map(row => ({
-    line_id: row.line_id,
-    line_number: row.line_number,
-    pcName: row.pcName,
-    total_boardings: row.total_boardings,
-    total_alightings: row.total_alightings,
-    total_passenger_events: row.total_passenger_events,
-    event_count: row.event_count,
-    course_count: row.course_ids.size,
-    average_delay_seconds: row.delay_count > 0 ? Number((row.delay_sum / row.delay_count).toFixed(2)) : null,
-    average_absolute_delay_seconds: row.delay_count > 0 ? Number((row.delay_abs_sum / row.delay_count).toFixed(2)) : null,
-    on_time_percent: row.delay_count > 0 ? Number(((row.on_time_count / row.delay_count) * 100).toFixed(2)) : null,
-    delayed_percent: row.delay_count > 0 ? Number(((row.delayed_count / row.delay_count) * 100).toFixed(2)) : null,
-    early_percent: row.delay_count > 0 ? Number(((row.early_count / row.delay_count) * 100).toFixed(2)) : null,
-    by_hour: row.by_hour,
-    by_weekday: row.by_weekday,
-    by_day_type: row.by_day_type
-  })).sort((a, b) => b.total_passenger_events - a.total_passenger_events);
-}
-
-function computeRouteKilometersByAdminZone() {
-  const result = {};
-
-  for (const schedule of database.schedules) {
-    for (const dayType of DAY_TYPES) {
-      const sequence = enrichSequenceWithStops(getScheduleSequence(schedule, dayType));
-      if (sequence.length < 2) continue;
-
-      for (let i = 0; i < sequence.length - 1; i += 1) {
-        const current = sequence[i].stop;
-        const next = sequence[i + 1].stop;
-        const zone = current.admin_zone || 'nieokreślona';
-        const key = groupKey([schedule.line_id, dayType, zone]);
-        const distanceKm = haversineMeters(current.latitude, current.longitude, next.latitude, next.longitude) / 1000;
-
-        result[key] = (result[key] || 0) + distanceKm;
-      }
-    }
-  }
-
-  return result;
-}
-
-function buildAdminZoneReport(events) {
-  const routeKm = computeRouteKilometersByAdminZone();
-  const map = new Map();
-
-  for (const event of events) {
-    const zone = event.admin_zone || 'nieokreślona';
-    const key = groupKey([event.line_id || 'brak_linii', event.day_type || 'unknown', zone]);
-
-    if (!map.has(key)) {
-      map.set(key, {
-        line_id: event.line_id || null,
-        line_number: event.line_number || null,
-        day_type: event.day_type || 'unknown',
-        admin_zone: zone,
-        total_boardings: 0,
-        total_alightings: 0,
-        total_passenger_events: 0,
-        event_count: 0,
-        stops: new Set(),
-        course_ids: new Set(),
-        by_hour: {},
-        by_weekday: {}
-      });
-    }
-
-    const row = map.get(key);
-    const passengerEvents = Number(event.passenger_events || 0);
-    const timestamp = event.received_at || event.analyzed_at || event.timestamp;
-    const hour = getHourFromTimestamp(timestamp);
-    const weekday = getWeekdayFromTimestamp(timestamp);
-
-    row.total_boardings += Number(event.passenger_in || 0);
-    row.total_alightings += Number(event.passenger_out || 0);
-    row.total_passenger_events += passengerEvents;
-    row.event_count += 1;
-
-    if (event.stop_id) row.stops.add(event.stop_id);
-    if (event.trip_id) row.course_ids.add(event.trip_id);
-
-    row.by_hour[hour] = (row.by_hour[hour] || 0) + passengerEvents;
-    row.by_weekday[weekday] = (row.by_weekday[weekday] || 0) + passengerEvents;
-  }
-
-  return [...map.values()].map(row => {
-    const kmKey = groupKey([row.line_id || 'brak_linii', row.day_type || 'unknown', row.admin_zone]);
-    const kilometers = routeKm[kmKey] || null;
-
-    return {
-      line_id: row.line_id,
-      line_number: row.line_number,
-      day_type: row.day_type,
-      admin_zone: row.admin_zone,
-      total_boardings: row.total_boardings,
-      total_alightings: row.total_alightings,
-      total_passenger_events: row.total_passenger_events,
-      event_count: row.event_count,
-      stop_count: row.stops.size,
-      course_count: row.course_ids.size,
-      estimated_route_km: kilometers === null ? null : Number(kilometers.toFixed(3)),
-      passengers_per_km: kilometers && kilometers > 0
-        ? Number((row.total_passenger_events / kilometers).toFixed(2))
-        : null,
-      by_hour: row.by_hour,
-      by_weekday: row.by_weekday
-    };
-  }).sort((a, b) => b.total_passenger_events - a.total_passenger_events);
+  return {
+    complete: bad === 0,
+    error: bad === 0 ? null : 'Wadliwość pomiaru: Brak obrazu ze wszystkich kamer',
+    bad_events_count: bad,
+    total_events_count: total
+  };
 }
 
 function reportResponse(query, rows) {
-  const events = getFilteredTripEvents(query);
-
   return {
     ok: true,
     generated_at: new Date().toISOString(),
     filters: query,
-    data_quality: summarizeDataQuality(events),
+    data_quality: summarizeDataQualitySql(query),
     rows
   };
 }
 
-function listVehicles() {
-  const fromCurrent = Object.values(database.vehicles || {});
+function weekdayNameSqlExpression(timestampExpression) {
+  return `CASE strftime('%w', ${timestampExpression})
+    WHEN '0' THEN 'niedziela'
+    WHEN '1' THEN 'poniedziałek'
+    WHEN '2' THEN 'wtorek'
+    WHEN '3' THEN 'środa'
+    WHEN '4' THEN 'czwartek'
+    WHEN '5' THEN 'piątek'
+    WHEN '6' THEN 'sobota'
+    ELSE 'unknown'
+  END`;
+}
 
-  const scheduled = database.schedules.map(schedule => ({
-    pcName: schedule.pcName,
-    pcId: schedule.pcId || '',
-    line_id: schedule.line_id,
-    line_number: schedule.line_number,
-    brigade: schedule.brigade || '',
-    has_schedule: true,
-    schedule_id: schedule.schedule_id,
-    active: schedule.active !== false
-  }));
+function addDistribution(targetRows, keyField, outputField, distributionRows, valueField) {
+  const byKey = new Map();
 
-  const map = new Map();
-
-  for (const item of scheduled) map.set(item.pcName, item);
-
-  for (const item of fromCurrent) {
-    map.set(item.pcName, {
-      ...(map.get(item.pcName) || {}),
-      ...item
-    });
+  for (const row of distributionRows) {
+    const key = String(row[keyField] || '');
+    if (!byKey.has(key)) byKey.set(key, {});
+    byKey.get(key)[String(row.bucket || 'unknown')] = Number(row[valueField] || 0);
   }
 
-  return [...map.values()].sort((a, b) => String(a.pcName).localeCompare(String(b.pcName)));
+  for (const row of targetRows) {
+    row[outputField] = byKey.get(String(row[keyField] || '')) || {};
+  }
+}
+
+// --------------------- KONWERSJA WIERSZY ---------------------
+function tripFromRow(row) {
+  const metadata = jsonParse(row.metadata, {});
+
+  return {
+    id: row.id,
+    trip_event_id: metadata.trip_event_id || String(row.id),
+    trip_id: row.trip_id,
+    pcName: row.pcName,
+    pcId: row.pcId || '',
+    line_id: row.line_id,
+    line_number: row.line_number || row.line_id,
+    brigade: row.brigade || '',
+    schedule_id: row.schedule_id,
+    day_type: row.day_type,
+    timestamp: row.timestamp,
+    received_at: row.received_at,
+    analyzed_at: row.analyzed_at,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    stop_id: row.stop_id,
+    stop_name: metadata.stop_name || '',
+    stop_number: metadata.stop_number || '',
+    admin_zone: metadata.admin_zone || 'nieokreślona',
+    zone_type: metadata.zone_type || 'nieokreślony',
+    planned_time: row.planned_time,
+    distance_meters: row.distance_to_stop,
+    is_on_stop: Boolean(row.is_at_stop),
+    punctuality_status: row.punctuality_status,
+    delay_seconds: row.delay_seconds,
+    delay_abs_seconds: row.delay_abs_seconds,
+    passenger_in: row.passengers_in,
+    passenger_out: row.passengers_out,
+    passenger_events: row.passenger_events,
+    onboard: row.passengers_onboard,
+    camera_count: row.camera_count,
+    selected_area_avg: row.selected_area_avg,
+    selected_area_count: row.selected_area_count,
+    data_quality: metadata.data_quality || {
+      complete: row.camera_error_detected !== 1,
+      error: row.camera_error_detected === 1 ? 'Wadliwość pomiaru: Brak obrazu ze wszystkich kamer' : null
+    }
+  };
 }
 
 // --------------------- HANDLERY API ---------------------
@@ -1588,35 +1698,48 @@ async function handleIncomingData(req, res) {
   const normalizedPcName = requiredString(pcName, 'pcName');
   const receivedAtDate = new Date();
   const receivedAt = receivedAtDate.toISOString();
+  const minimalFrame = buildMinimalVehicleFrame(normalizedPcName, payload, receivedAtDate);
 
-  const rawFile = await saveRawFrameForVehicle(normalizedPcName, payload, receivedAtDate);
+  const processIncomingTx = db.transaction(() => {
+    const raw = db.prepare(`
+      INSERT INTO raw_frames(pcName, pcId, timestamp, latitude, longitude, received_at)
+      VALUES(@pcName, @pcId, @timestamp, @latitude, @longitude, @received_at)
+    `).run({
+      pcName: normalizedPcName,
+      pcId: optionalString(pcId, ''),
+      timestamp: minimalFrame.timestamp,
+      latitude: minimalFrame.latitude,
+      longitude: minimalFrame.longitude,
+      received_at: receivedAt
+    });
 
-  const metadata = {
-    receivedAt,
-    remoteAddress: req.socket.remoteAddress,
-    rawFileAbsolutePath: rawFile.absolutePath,
-    rawFileRelativePath: rawFile.relativePath,
-    analysisDate: receivedAtDate
-  };
+    const metadata = {
+      receivedAt,
+      remoteAddress: req.socket.remoteAddress,
+      rawFrameId: raw.lastInsertRowid,
+      analysisDate: receivedAtDate
+    };
 
-  pcDataStore.set(normalizedPcName, {
-    payload,
-    metadata
+    const status = analyzeVehiclePayload(payload, metadata, true);
+    pruneHistory();
+
+    return {
+      rawFrameId: raw.lastInsertRowid,
+      status
+    };
   });
 
-  const status = analyzeVehiclePayload(payload, metadata, true);
+  const result = processIncomingTx();
 
-  logReceivedDataConsole(payload, status);
-
-  await saveDatabase();
+  logReceivedDataConsole(payload, result.status);
 
   sendJson(res, 200, {
     ok: true,
     message: 'Data received',
     receivedAt,
-    savedRawFrame: rawFile.relativePath,
-    savedFrame: rawFile.savedFrame,
-    currentStatus: status
+    savedRawFrame: `sqlite:raw_frames:${result.rawFrameId}`,
+    savedFrame: minimalFrame,
+    currentStatus: result.status
   });
 }
 
@@ -1624,114 +1747,253 @@ async function handleCreateStop(req, res) {
   const body = await readJsonBody(req);
   const stop = normalizeStop(body);
 
-  database.stops.push(stop);
-
-  await saveDatabase();
+  db.prepare(`
+    INSERT INTO stops(id, name, latitude, longitude, zone, metadata)
+    VALUES(@id, @name, @latitude, @longitude, @zone, @metadata)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      latitude = excluded.latitude,
+      longitude = excluded.longitude,
+      zone = excluded.zone,
+      metadata = excluded.metadata
+  `).run({
+    ...stop,
+    metadata: jsonStringify(stop.metadata)
+  });
 
   sendJson(res, 201, {
     ok: true,
     message: 'Stop created',
-    stop
+    stop: stopFromRow(db.prepare('SELECT * FROM stops WHERE id = ?').get(stop.id))
   });
 }
 
-async function handleGetStops(req, res) {
+async function handleGetStops(req, res, query) {
+  const clauses = [];
+  const params = {};
+
+  const id = optionalString(query.id || query.stop_id, '');
+  const zone = optionalString(query.zone || query.admin_zone || query.adminZone, '');
+  const q = optionalString(query.q || query.search || query.name, '');
+
+  if (id) {
+    clauses.push('id = @id');
+    params.id = id;
+  }
+
+  if (zone) {
+    clauses.push('(zone = @zone OR metadata LIKE @zoneLike)');
+    params.zone = zone;
+    params.zoneLike = `%"admin_zone":"${zone.replace(/"/g, '\\"')}"%`;
+  }
+
+  if (q) {
+    clauses.push('(name LIKE @q OR id LIKE @q)');
+    params.q = `%${q}%`;
+  }
+
+  const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db.prepare(`SELECT * FROM stops ${whereSql} ORDER BY name COLLATE NOCASE, id`).all(params);
+  const stops = rows.map(stopFromRow);
+
   sendJson(res, 200, {
     ok: true,
-    count: database.stops.length,
-    stops: database.stops
+    count: stops.length,
+    stops
   });
 }
 
-// ---------- NOWE HANDLERY DLA PRZYSTANKÓW ----------
 async function handleGetStopById(req, res, stopId) {
   const stop = findStopById(stopId);
-  if (!stop) {
-    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
-  }
+  if (!stop) throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+
   sendJson(res, 200, { ok: true, stop });
 }
 
 async function handleUpdateStop(req, res, stopId) {
+  const existing = findStopById(stopId);
+  if (!existing) throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+
   const body = await readJsonBody(req);
-  const existingIndex = database.stops.findIndex(stop => getStopId(stop) === stopId);
-  if (existingIndex === -1) {
-    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
-  }
-  const updatedStop = normalizeStop(body);
-  // wymuszamy to samo ID
-  updatedStop.stop_id = stopId;
-  updatedStop.id = stopId;
-  updatedStop.created_at = database.stops[existingIndex].created_at || updatedStop.created_at;
-  updatedStop.updated_at = new Date().toISOString();
-  database.stops[existingIndex] = updatedStop;
-  await saveDatabase();
-  sendJson(res, 200, { ok: true, message: 'Stop updated', stop: updatedStop });
+  const updatedStop = normalizeStop({ ...body, id: stopId, stop_id: stopId });
+  updatedStop.metadata.created_at = existing.created_at || updatedStop.metadata.created_at;
+  updatedStop.metadata.updated_at = new Date().toISOString();
+
+  db.prepare(`
+    UPDATE stops
+    SET name = @name,
+        latitude = @latitude,
+        longitude = @longitude,
+        zone = @zone,
+        metadata = @metadata
+    WHERE id = @id
+  `).run({
+    ...updatedStop,
+    metadata: jsonStringify(updatedStop.metadata)
+  });
+
+  sendJson(res, 200, {
+    ok: true,
+    message: 'Stop updated',
+    stop: findStopById(stopId)
+  });
 }
 
 async function handleDeleteStop(req, res, stopId) {
-  const index = database.stops.findIndex(stop => getStopId(stop) === stopId);
-  if (index === -1) {
-    throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
-  }
-  database.stops.splice(index, 1);
-  await saveDatabase();
-  sendJson(res, 200, { ok: true, message: 'Stop deleted' });
+  const info = db.prepare('DELETE FROM stops WHERE id = ?').run(stopId);
+  if (info.changes === 0) throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
+
+  sendJson(res, 200, { ok: true, message: 'Stop deleted', deletedCount: info.changes });
+}
+
+function saveSchedule(schedule) {
+  const insert = db.prepare(`
+    INSERT INTO schedules(id, line_id, route_name, day_type, sequence_json, metadata, pcName, pcId, active, updated_at)
+    VALUES(@id, @line_id, @route_name, @day_type, @sequence_json, @metadata, @pcName, @pcId, @active, @updated_at)
+    ON CONFLICT(id) DO UPDATE SET
+      line_id = excluded.line_id,
+      route_name = excluded.route_name,
+      day_type = excluded.day_type,
+      sequence_json = excluded.sequence_json,
+      metadata = excluded.metadata,
+      pcName = excluded.pcName,
+      pcId = excluded.pcId,
+      active = excluded.active,
+      updated_at = excluded.updated_at
+  `);
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(schedule.schedule_id, `${schedule.schedule_id}:%`);
+
+    for (const dayType of DAY_TYPES) {
+      const meta = {
+        ...schedule.metadata,
+        day_type: dayType
+      };
+
+      insert.run({
+        id: `${schedule.schedule_id}:${dayType}`,
+        line_id: schedule.line_id,
+        route_name: schedule.route_name,
+        day_type: dayType,
+        sequence_json: jsonStringify(schedule.day_types[dayType].stops_sequence),
+        metadata: jsonStringify(meta),
+        pcName: schedule.pcName,
+        pcId: schedule.pcId,
+        active: schedule.metadata.active ? 1 : 0,
+        updated_at: schedule.metadata.updated_at
+      });
+    }
+
+    const existingVehicle = db.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(schedule.pcName);
+    const existingMetadata = existingVehicle ? jsonParse(existingVehicle.metadata, {}) : {};
+
+    db.prepare(`
+      INSERT INTO vehicles(pcName, pcId, last_lat, last_lng, first_seen, last_seen, metadata)
+      VALUES(@pcName, @pcId, @last_lat, @last_lng, @first_seen, @last_seen, @metadata)
+      ON CONFLICT(pcName) DO UPDATE SET
+        pcId = CASE WHEN excluded.pcId <> '' THEN excluded.pcId ELSE vehicles.pcId END,
+        metadata = excluded.metadata
+    `).run({
+      pcName: schedule.pcName,
+      pcId: schedule.pcId || '',
+      last_lat: existingVehicle ? existingVehicle.last_lat : null,
+      last_lng: existingVehicle ? existingVehicle.last_lng : null,
+      first_seen: existingVehicle ? existingVehicle.first_seen : null,
+      last_seen: existingVehicle ? existingVehicle.last_seen : null,
+      metadata: jsonStringify({
+        ...existingMetadata,
+        has_schedule: true,
+        schedule_id: schedule.schedule_id,
+        line_id: schedule.line_id,
+        line_number: schedule.metadata.line_number,
+        brigade: schedule.metadata.brigade,
+        updated_at: schedule.metadata.updated_at
+      })
+    });
+  });
+
+  tx();
 }
 
 async function handleCreateSchedule(req, res) {
   const body = await readJsonBody(req);
-  const schedule = normalizeSchedulePayload(body);
+  const normalized = normalizeSchedulePayload(body);
 
-  const existingIndex = database.schedules.findIndex(item => item.schedule_id === schedule.schedule_id);
+  if (body.replace_existing !== false) {
+    const existingRows = db.prepare(`
+      SELECT id
+      FROM schedules
+      WHERE line_id = @lineId
+        AND pcName = @pcName
+    `).all({ lineId: normalized.line_id, pcName: normalized.pcName });
 
-  if (existingIndex >= 0) {
-    schedule.created_at = database.schedules[existingIndex].created_at || schedule.created_at;
-    database.schedules[existingIndex] = schedule;
-  } else {
-    const sameVehicleLineIndex = database.schedules.findIndex(item => (
-      item.pcName === schedule.pcName && item.line_id === schedule.line_id
-    ));
-
-    if (sameVehicleLineIndex >= 0 && body.replace_existing !== false) {
-      schedule.created_at = database.schedules[sameVehicleLineIndex].created_at || schedule.created_at;
-      database.schedules[sameVehicleLineIndex] = schedule;
-    } else {
-      database.schedules.push(schedule);
+    for (const row of existingRows) {
+      const baseId = String(row.id).split(':')[0];
+      if (baseId !== normalized.schedule_id) {
+        db.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(baseId, `${baseId}:%`);
+      }
     }
   }
 
-  if (!database.vehicles[schedule.pcName]) {
-    database.vehicles[schedule.pcName] = {
-      pcName: schedule.pcName,
-      pcId: schedule.pcId || '',
-      first_seen_at: null,
-      last_seen_at: null,
-      has_schedule: true
-    };
-  } else {
-    database.vehicles[schedule.pcName].has_schedule = true;
-    database.vehicles[schedule.pcName].pcId = schedule.pcId || database.vehicles[schedule.pcName].pcId || '';
-  }
-
-  await saveDatabase();
+  saveSchedule(normalized);
 
   sendJson(res, 201, {
     ok: true,
     message: 'Schedule saved',
-    schedule
+    schedule: scheduleFromRows(findScheduleRowsByBaseId(normalized.schedule_id))
   });
 }
 
 async function handleGetSchedules(req, res, query) {
+  const clauses = [];
+  const params = {};
+
   const pcName = optionalString(query.pcName || query.pc_name, '');
   const lineId = optionalString(query.line_id || query.lineId || query.line, '');
+  const dayType = optionalString(query.day_type || query.dayType, '');
+  const active = optionalString(query.active, '');
 
-  const schedules = database.schedules.filter(schedule => {
-    if (pcName && schedule.pcName !== pcName) return false;
-    if (lineId && String(schedule.line_id) !== lineId) return false;
-    return true;
-  });
+  if (pcName) {
+    clauses.push('pcName = @pcName');
+    params.pcName = pcName;
+  }
+
+  if (lineId) {
+    clauses.push('line_id = @lineId');
+    params.lineId = lineId;
+  }
+
+  if (dayType) {
+    clauses.push('day_type = @dayType');
+    params.dayType = dayType;
+  }
+
+  if (active === 'true' || active === '1') {
+    clauses.push('active = 1');
+  } else if (active === 'false' || active === '0') {
+    clauses.push('active = 0');
+  }
+
+  const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db.prepare(`
+    SELECT *
+    FROM schedules
+    ${whereSql}
+    ORDER BY updated_at DESC, id
+  `).all(params);
+
+  const grouped = new Map();
+  for (const row of rows) {
+    const baseId = jsonParse(row.metadata, {}).schedule_id || String(row.id).split(':')[0];
+    if (!grouped.has(baseId)) grouped.set(baseId, []);
+    grouped.get(baseId).push(row);
+  }
+
+  const schedules = [];
+  for (const groupRows of grouped.values()) {
+    schedules.push(scheduleFromRows(groupRows));
+  }
 
   sendJson(res, 200, {
     ok: true,
@@ -1740,87 +2002,39 @@ async function handleGetSchedules(req, res, query) {
   });
 }
 
-// ---------- NOWE HANDLERY DLA ROZKŁADÓW ----------
 async function handleGetScheduleById(req, res, scheduleId) {
-  const schedule = database.schedules.find(s => s.schedule_id === scheduleId);
-  if (!schedule) {
-    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
-  }
+  const schedule = scheduleFromRows(findScheduleRowsByBaseId(scheduleId));
+  if (!schedule) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+
   sendJson(res, 200, { ok: true, schedule });
 }
 
 async function handleUpdateSchedule(req, res, scheduleId) {
+  const existing = scheduleFromRows(findScheduleRowsByBaseId(scheduleId));
+  if (!existing) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+
   const body = await readJsonBody(req);
-  const existingIndex = database.schedules.findIndex(s => s.schedule_id === scheduleId);
-  if (existingIndex === -1) {
-    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
-  }
-  const updatedSchedule = normalizeSchedulePayload(body);
-  updatedSchedule.schedule_id = scheduleId;
-  updatedSchedule.created_at = database.schedules[existingIndex].created_at || updatedSchedule.created_at;
-  updatedSchedule.updated_at = new Date().toISOString();
-  database.schedules[existingIndex] = updatedSchedule;
-  // aktualizacja vehicles
-  if (database.vehicles[updatedSchedule.pcName]) {
-    database.vehicles[updatedSchedule.pcName].has_schedule = true;
-    database.vehicles[updatedSchedule.pcName].pcId = updatedSchedule.pcId || database.vehicles[updatedSchedule.pcName].pcId || '';
-  }
-  await saveDatabase();
-  sendJson(res, 200, { ok: true, message: 'Schedule updated', schedule: updatedSchedule });
+  const updatedSchedule = normalizeSchedulePayload({
+    ...body,
+    schedule_id: scheduleId,
+    id: scheduleId,
+    created_at: existing.created_at || body.created_at
+  }, scheduleId);
+
+  saveSchedule(updatedSchedule);
+
+  sendJson(res, 200, {
+    ok: true,
+    message: 'Schedule updated',
+    schedule: scheduleFromRows(findScheduleRowsByBaseId(scheduleId))
+  });
 }
 
 async function handleDeleteSchedule(req, res, scheduleId) {
-  const index = database.schedules.findIndex(s => s.schedule_id === scheduleId);
-  if (index === -1) {
-    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
-  }
-  database.schedules.splice(index, 1);
-  await saveDatabase();
-  sendJson(res, 200, { ok: true, message: 'Schedule deleted' });
-}
+  const info = db.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(scheduleId, `${scheduleId}:%`);
+  if (info.changes === 0) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
 
-async function handleReportsCurrent(req, res, query) {
-  const pcName = optionalString(query.pcName || query.pc_name, '');
-
-  const statuses = pcName
-    ? Object.fromEntries(Object.entries(database.current_status).filter(([key]) => key === pcName))
-    : database.current_status;
-
-  sendJson(res, 200, {
-    ok: true,
-    generated_at: new Date().toISOString(),
-    current_status: statuses
-  });
-}
-
-async function handleStopUsageReport(req, res, query) {
-  const events = getFilteredTripEvents(query);
-  sendJson(res, 200, reportResponse(query, buildStopUsageReport(events)));
-}
-
-async function handleOnDemandStopsReport(req, res, query) {
-  const events = getFilteredTripEvents(query);
-  sendJson(res, 200, reportResponse(query, buildOnDemandStopsReport(events)));
-}
-
-async function handleLinePerformanceReport(req, res, query) {
-  const events = getFilteredTripEvents(query);
-  sendJson(res, 200, reportResponse(query, buildLinePerformanceReport(events)));
-}
-
-async function handleAdminZoneReport(req, res, query) {
-  const events = getFilteredTripEvents(query);
-  sendJson(res, 200, reportResponse(query, buildAdminZoneReport(events)));
-}
-
-async function handleVehicles(req, res) {
-  const vehicles = listVehicles();
-
-  sendJson(res, 200, {
-    ok: true,
-    count: vehicles.length,
-    vehicles
-  });
+  sendJson(res, 200, { ok: true, message: 'Schedule deleted', deletedCount: info.changes });
 }
 
 async function handleCreateHoliday(req, res) {
@@ -1831,80 +2045,77 @@ async function handleCreateHoliday(req, res) {
     throw new Error('Pole date musi mieć format YYYY-MM-DD');
   }
 
-  const item = {
-    date,
-    name: optionalString(body.name, 'święto'),
-    created_at: new Date().toISOString()
-  };
+  const description = optionalString(firstDefined(body.description, body.name), 'święto');
 
-  const existingIndex = database.holidays.findIndex(holiday => {
-    if (typeof holiday === 'string') return holiday === date;
-    return holiday && holiday.date === date;
-  });
-
-  if (existingIndex >= 0) {
-    database.holidays[existingIndex] = item;
-  } else {
-    database.holidays.push(item);
-  }
-
-  await saveDatabase();
+  db.prepare(`
+    INSERT INTO holidays(date, description)
+    VALUES(?, ?)
+    ON CONFLICT(date) DO UPDATE SET description = excluded.description
+  `).run(date, description);
 
   sendJson(res, 201, {
     ok: true,
-    holiday: item
+    holiday: { date, description }
   });
 }
 
 async function handleGetHolidays(req, res) {
+  const rows = db.prepare('SELECT date, description FROM holidays ORDER BY date').all();
+
   sendJson(res, 200, {
     ok: true,
-    holidays: database.holidays
+    holidays: rows
   });
 }
 
-// ---------- NOWY HANDLER DLA ŚWIĄT (DELETE) ----------
 async function handleDeleteHoliday(req, res, date) {
-  const index = database.holidays.findIndex(item => {
-    if (typeof item === 'string') return item === date;
-    return item && item.date === date;
-  });
-  if (index === -1) {
-    throw new Error(`Nie znaleziono święta o dacie: ${date}`);
-  }
-  database.holidays.splice(index, 1);
-  await saveDatabase();
-  sendJson(res, 200, { ok: true, message: 'Holiday deleted' });
+  const info = db.prepare('DELETE FROM holidays WHERE date = ?').run(date);
+  if (info.changes === 0) throw new Error(`Nie znaleziono święta o dacie: ${date}`);
+
+  sendJson(res, 200, { ok: true, message: 'Holiday deleted', deletedCount: info.changes });
 }
 
-// ---------- NOWE HANDLERY DLA ZDARZEŃ (TRIPS) ----------
 async function handleGetTrips(req, res, query) {
   const page = Math.max(1, parseInt(query.page, 10) || 1);
-  const limit = Math.min(1000, parseInt(query.limit, 10) || 100);
-  const events = getFilteredTripEvents(query);
-  const total = events.length;
-  const start = (page - 1) * limit;
-  const end = start + limit;
-  const rows = events.slice(start, end);
+  const limit = Math.min(1000, Math.max(1, parseInt(query.limit, 10) || 100));
+  const offset = (page - 1) * limit;
+  const { whereSql, params } = buildTripsWhere(query, 't');
+
+  const totalRow = db.prepare(`SELECT COUNT(*) AS total FROM trips t ${whereSql}`).get(params);
+  const rows = db.prepare(`
+    SELECT *
+    FROM trips t
+    ${whereSql}
+    ORDER BY COALESCE(t.received_at, t.timestamp) DESC, t.id DESC
+    LIMIT @limit OFFSET @offset
+  `).all({ ...params, limit, offset });
+
+  const resultRows = rows.map(tripFromRow);
+  const total = Number(totalRow.total || 0);
+
   sendJson(res, 200, {
     ok: true,
     page,
     limit,
     total,
     totalPages: Math.ceil(total / limit),
-    rows
+    rows: resultRows
   });
 }
 
 async function handleDeleteTrips(req, res, query) {
   const all = query.all === 'true';
-  const before = query.before; // format YYYY-MM-DD
+  const before = query.before;
 
   if (all) {
-    const count = database.trips.length;
-    database.trips = [];
-    await saveDatabase();
-    sendJson(res, 200, { ok: true, message: `Usunięto wszystkie ${count} zdarzeń`, deletedCount: count });
+    const countRow = db.prepare('SELECT COUNT(*) AS total FROM trips').get();
+    db.prepare('DELETE FROM trips').run();
+
+    sendJson(res, 200, {
+      ok: true,
+      message: `Usunięto wszystkie ${countRow.total} zdarzeń`,
+      deletedCount: Number(countRow.total || 0)
+    });
     return;
   }
 
@@ -1913,18 +2124,496 @@ async function handleDeleteTrips(req, res, query) {
     if (Number.isNaN(beforeDate.getTime())) {
       throw new Error('Nieprawidłowy format before, oczekiwano YYYY-MM-DD');
     }
-    const initialCount = database.trips.length;
-    database.trips = database.trips.filter(event => {
-      const eventDate = new Date(event.received_at || event.analyzed_at || event.timestamp);
-      return eventDate >= beforeDate;
+
+    const info = db.prepare(`
+      DELETE FROM trips
+      WHERE datetime(COALESCE(received_at, timestamp)) < datetime(?)
+    `).run(before);
+
+    sendJson(res, 200, {
+      ok: true,
+      message: `Usunięto ${info.changes} zdarzeń starszych niż ${before}`,
+      deletedCount: info.changes
     });
-    const deleted = initialCount - database.trips.length;
-    await saveDatabase();
-    sendJson(res, 200, { ok: true, message: `Usunięto ${deleted} zdarzeń starszych niż ${before}`, deletedCount: deleted });
     return;
   }
 
   throw new Error('Aby usunąć, podaj ?all=true lub ?before=YYYY-MM-DD');
+}
+
+async function handleReportsCurrent(req, res, query) {
+  const pcName = optionalString(query.pcName || query.pc_name, '');
+  const rows = pcName
+    ? db.prepare('SELECT * FROM current_status WHERE pcName = ?').all(pcName)
+    : db.prepare('SELECT * FROM current_status ORDER BY updated_at DESC').all();
+
+  const statuses = {};
+
+  for (const row of rows) {
+    statuses[row.pcName] = jsonParse(row.status_json, {
+      pcName: row.pcName,
+      pcId: row.pcId,
+      status: row.status,
+      line_id: row.line_id,
+      current_stop_id: row.current_stop_id,
+      nearest_stop_id: row.nearest_stop_id,
+      punctuality_status: row.punctuality_status,
+      delay_seconds: row.delay_seconds,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      passengers: {
+        selected_in: row.passengers_in,
+        selected_out: row.passengers_out,
+        onboard: row.passengers_onboard
+      },
+      data_quality: jsonParse(row.camera_quality_json, null),
+      updated_at: row.updated_at
+    });
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    current_status: statuses
+  });
+}
+
+async function handleStopUsageReport(req, res, query) {
+  const { whereSql, params } = buildTripsWhere(query, 't');
+
+  const totalRow = db.prepare(`
+    SELECT COALESCE(SUM(passenger_events), 0) AS total_passenger_events
+    FROM trips t
+    ${whereSql}
+  `).get(params);
+
+  const totalPassengerEvents = Number(totalRow.total_passenger_events || 0);
+
+  const rows = db.prepare(`
+    SELECT
+      t.stop_id,
+      COALESCE(s.name, json_extract(t.metadata, '$.stop_name'), '') AS name,
+      COALESCE(json_extract(s.metadata, '$.number'), json_extract(t.metadata, '$.stop_number'), '') AS number,
+      COALESCE(s.zone, json_extract(s.metadata, '$.admin_zone'), json_extract(t.metadata, '$.admin_zone'), 'nieokreślona') AS admin_zone,
+      COALESCE(json_extract(s.metadata, '$.zone_type'), json_extract(t.metadata, '$.zone_type'), 'nieokreślony') AS zone_type,
+      COALESCE(SUM(t.passengers_in), 0) AS total_boardings,
+      COALESCE(SUM(t.passengers_out), 0) AS total_alightings,
+      COALESCE(SUM(t.passenger_events), 0) AS total_passenger_events,
+      COUNT(*) AS event_count,
+      COUNT(DISTINCT t.trip_id) AS course_count
+    FROM trips t
+    LEFT JOIN stops s ON s.id = t.stop_id
+    ${whereSql}
+      ${whereSql ? 'AND' : 'WHERE'} t.stop_id IS NOT NULL
+    GROUP BY t.stop_id
+    ORDER BY total_passenger_events DESC
+  `).all(params);
+
+  const reportRows = rows.map(row => ({
+    stop_id: row.stop_id,
+    name: row.name,
+    number: row.number,
+    admin_zone: row.admin_zone,
+    zone_type: row.zone_type,
+    total_boardings: Number(row.total_boardings || 0),
+    total_alightings: Number(row.total_alightings || 0),
+    total_passenger_events: Number(row.total_passenger_events || 0),
+    share_of_all_passengers_percent: totalPassengerEvents > 0
+      ? Number(((Number(row.total_passenger_events || 0) / totalPassengerEvents) * 100).toFixed(2))
+      : 0,
+    event_count: Number(row.event_count || 0),
+    course_count: Number(row.course_count || 0),
+    by_hour: {},
+    by_weekday: {},
+    by_day_type: {}
+  }));
+
+  const hourRows = db.prepare(`
+    SELECT
+      t.stop_id,
+      strftime('%H', COALESCE(t.received_at, t.timestamp)) AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+      ${whereSql ? 'AND' : 'WHERE'} t.stop_id IS NOT NULL
+    GROUP BY t.stop_id, bucket
+  `).all(params);
+
+  const weekdayRows = db.prepare(`
+    SELECT
+      t.stop_id,
+      ${weekdayNameSqlExpression('COALESCE(t.received_at, t.timestamp)')} AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+      ${whereSql ? 'AND' : 'WHERE'} t.stop_id IS NOT NULL
+    GROUP BY t.stop_id, bucket
+  `).all(params);
+
+  const dayTypeRows = db.prepare(`
+    SELECT
+      t.stop_id,
+      COALESCE(t.day_type, 'unknown') AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+      ${whereSql ? 'AND' : 'WHERE'} t.stop_id IS NOT NULL
+    GROUP BY t.stop_id, bucket
+  `).all(params);
+
+  addDistribution(reportRows, 'stop_id', 'by_hour', hourRows, 'value');
+  addDistribution(reportRows, 'stop_id', 'by_weekday', weekdayRows, 'value');
+  addDistribution(reportRows, 'stop_id', 'by_day_type', dayTypeRows, 'value');
+
+  sendJson(res, 200, reportResponse(query, reportRows));
+}
+
+async function handleOnDemandStopsReport(req, res, query) {
+  const { whereSql, params } = buildTripsWhere(query, 't');
+  const threshold = Number.isFinite(Number(query.threshold_percent))
+    ? Number(query.threshold_percent)
+    : 25;
+  const showAll = query.all === 'true';
+
+  const havingSql = showAll ? '' : `
+        HAVING ROUND((SUM(CASE WHEN cs.passenger_events > 0 THEN 1 ELSE 0 END) * 100.0) / NULLIF(COUNT(*), 0), 2) < @threshold
+      `;
+
+  const rows = db.prepare(`
+    WITH course_stop AS (
+      SELECT
+        t.stop_id,
+        COALESCE(t.trip_id, CAST(t.id AS TEXT)) AS course_id,
+        COALESCE(SUM(t.passenger_events), 0) AS passenger_events
+      FROM trips t
+      ${whereSql}
+        ${whereSql ? 'AND' : 'WHERE'} t.stop_id IS NOT NULL
+      GROUP BY t.stop_id, course_id
+    ),
+    stop_stats AS (
+      SELECT
+        cs.stop_id,
+        COUNT(*) AS courses_total,
+        SUM(CASE WHEN cs.passenger_events > 0 THEN 1 ELSE 0 END) AS courses_with_passengers,
+        ROUND((SUM(CASE WHEN cs.passenger_events > 0 THEN 1 ELSE 0 END) * 100.0) / NULLIF(COUNT(*), 0), 2) AS percent_courses_with_passengers
+      FROM course_stop cs
+      GROUP BY cs.stop_id
+      ${havingSql}
+    )
+    SELECT
+      ss.stop_id,
+      COALESCE(s.name, '') AS name,
+      COALESCE(json_extract(s.metadata, '$.number'), '') AS number,
+      COALESCE(s.zone, json_extract(s.metadata, '$.admin_zone'), 'nieokreślona') AS admin_zone,
+      ss.courses_total,
+      ss.courses_with_passengers,
+      COALESCE(ss.percent_courses_with_passengers, 0) AS percent_courses_with_passengers
+    FROM stop_stats ss
+    LEFT JOIN stops s ON s.id = ss.stop_id
+    ORDER BY percent_courses_with_passengers ASC, courses_total DESC
+  `).all({ ...params, threshold });
+
+  const reportRows = rows.map(row => ({
+    stop_id: row.stop_id,
+    name: row.name,
+    number: row.number,
+    admin_zone: row.admin_zone,
+    courses_total: Number(row.courses_total || 0),
+    courses_with_passengers: Number(row.courses_with_passengers || 0),
+    percent_courses_with_passengers: Number(row.percent_courses_with_passengers || 0),
+    threshold_percent: threshold,
+    suggested_status: Number(row.percent_courses_with_passengers || 0) < threshold
+      ? 'kandydat na przystanek na żądanie'
+      : 'regularny'
+  }));
+
+  sendJson(res, 200, reportResponse(query, reportRows));
+}
+
+async function handleLinePerformanceReport(req, res, query) {
+  const { whereSql, params } = buildTripsWhere(query, 't');
+
+  const rows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') AS group_line_id,
+      t.line_id,
+      t.line_number,
+      COALESCE(t.pcName, 'brak_pc') AS pcName,
+      COALESCE(SUM(t.passengers_in), 0) AS total_boardings,
+      COALESCE(SUM(t.passengers_out), 0) AS total_alightings,
+      COALESCE(SUM(t.passenger_events), 0) AS total_passenger_events,
+      COUNT(*) AS event_count,
+      COUNT(DISTINCT t.trip_id) AS course_count,
+      ROUND(AVG(t.delay_seconds), 2) AS average_delay_seconds,
+      ROUND(AVG(ABS(t.delay_seconds)), 2) AS average_absolute_delay_seconds,
+      ROUND(SUM(CASE WHEN t.punctuality_status = 'o czasie' THEN 1 ELSE 0 END) * 100.0 / NULLIF(SUM(CASE WHEN t.delay_seconds IS NOT NULL THEN 1 ELSE 0 END), 0), 2) AS on_time_percent,
+      ROUND(SUM(CASE WHEN t.punctuality_status = 'opóźniony' THEN 1 ELSE 0 END) * 100.0 / NULLIF(SUM(CASE WHEN t.delay_seconds IS NOT NULL THEN 1 ELSE 0 END), 0), 2) AS delayed_percent,
+      ROUND(SUM(CASE WHEN t.punctuality_status = 'za szybko' THEN 1 ELSE 0 END) * 100.0 / NULLIF(SUM(CASE WHEN t.delay_seconds IS NOT NULL THEN 1 ELSE 0 END), 0), 2) AS early_percent
+    FROM trips t
+    ${whereSql}
+    GROUP BY group_line_id, t.pcName
+    ORDER BY total_passenger_events DESC
+  `).all(params);
+
+  const reportRows = rows.map(row => ({
+    line_id: row.line_id,
+    line_number: row.line_number || row.line_id,
+    pcName: row.pcName === 'brak_pc' ? null : row.pcName,
+    total_boardings: Number(row.total_boardings || 0),
+    total_alightings: Number(row.total_alightings || 0),
+    total_passenger_events: Number(row.total_passenger_events || 0),
+    event_count: Number(row.event_count || 0),
+    course_count: Number(row.course_count || 0),
+    average_delay_seconds: row.average_delay_seconds === null ? null : Number(row.average_delay_seconds),
+    average_absolute_delay_seconds: row.average_absolute_delay_seconds === null ? null : Number(row.average_absolute_delay_seconds),
+    on_time_percent: row.on_time_percent === null ? null : Number(row.on_time_percent),
+    delayed_percent: row.delayed_percent === null ? null : Number(row.delayed_percent),
+    early_percent: row.early_percent === null ? null : Number(row.early_percent),
+    by_hour: {},
+    by_weekday: {},
+    by_day_type: {}
+  }));
+
+  const hourRows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') || '||' || COALESCE(t.pcName, 'brak_pc') AS row_key,
+      strftime('%H', COALESCE(t.received_at, t.timestamp)) AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+    GROUP BY row_key, bucket
+  `).all(params);
+
+  const weekdayRows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') || '||' || COALESCE(t.pcName, 'brak_pc') AS row_key,
+      ${weekdayNameSqlExpression('COALESCE(t.received_at, t.timestamp)')} AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+    GROUP BY row_key, bucket
+  `).all(params);
+
+  const dayRows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') || '||' || COALESCE(t.pcName, 'brak_pc') AS row_key,
+      COALESCE(t.day_type, 'unknown') AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    ${whereSql}
+    GROUP BY row_key, bucket
+  `).all(params);
+
+  for (const row of reportRows) {
+    row.row_key = `${row.line_id || 'brak_linii'}||${row.pcName || 'brak_pc'}`;
+  }
+
+  addDistribution(reportRows, 'row_key', 'by_hour', hourRows, 'value');
+  addDistribution(reportRows, 'row_key', 'by_weekday', weekdayRows, 'value');
+  addDistribution(reportRows, 'row_key', 'by_day_type', dayRows, 'value');
+
+  for (const row of reportRows) delete row.row_key;
+
+  sendJson(res, 200, reportResponse(query, reportRows));
+}
+
+async function handleAdminZoneReport(req, res, query) {
+  const { whereSql, params } = buildTripsWhere(query, 't');
+
+  const rows = db.prepare(`
+    WITH trip_agg AS (
+      SELECT
+        t.line_id,
+        t.line_number,
+        t.day_type,
+        COALESCE(s.zone, json_extract(s.metadata, '$.admin_zone'), json_extract(t.metadata, '$.admin_zone'), 'nieokreślona') AS admin_zone,
+        COALESCE(SUM(t.passengers_in), 0) AS total_boardings,
+        COALESCE(SUM(t.passengers_out), 0) AS total_alightings,
+        COALESCE(SUM(t.passenger_events), 0) AS total_passenger_events,
+        COUNT(*) AS event_count,
+        COUNT(DISTINCT t.stop_id) AS stop_count,
+        COUNT(DISTINCT t.trip_id) AS course_count
+      FROM trips t
+      LEFT JOIN stops s ON s.id = t.stop_id
+      ${whereSql}
+      GROUP BY t.line_id, t.day_type, admin_zone
+    ),
+    route_km AS (
+      SELECT
+        s.line_id,
+        s.day_type,
+        COALESCE(json_extract(a.value, '$.admin_zone'), json_extract(a.value, '$.zone'), 'nieokreślona') AS admin_zone,
+        SUM(haversine_meters(
+          json_extract(a.value, '$.latitude'),
+          json_extract(a.value, '$.longitude'),
+          json_extract(b.value, '$.latitude'),
+          json_extract(b.value, '$.longitude')
+        )) / 1000.0 AS estimated_route_km
+      FROM schedules s
+      JOIN json_each(s.sequence_json) a
+      JOIN json_each(s.sequence_json) b ON CAST(b.key AS INTEGER) = CAST(a.key AS INTEGER) + 1
+      WHERE s.active = 1
+      GROUP BY s.line_id, s.day_type, admin_zone
+    )
+    SELECT
+      ta.*,
+      ROUND(rk.estimated_route_km, 3) AS estimated_route_km,
+      CASE
+        WHEN rk.estimated_route_km IS NOT NULL AND rk.estimated_route_km > 0
+        THEN ROUND(ta.total_passenger_events / rk.estimated_route_km, 2)
+        ELSE NULL
+      END AS passengers_per_km
+    FROM trip_agg ta
+    LEFT JOIN route_km rk
+      ON rk.line_id = ta.line_id
+      AND rk.day_type = ta.day_type
+      AND rk.admin_zone = ta.admin_zone
+    ORDER BY ta.total_passenger_events DESC
+  `).all(params);
+
+  const reportRows = rows.map(row => ({
+    line_id: row.line_id,
+    line_number: row.line_number || row.line_id,
+    day_type: row.day_type || 'unknown',
+    admin_zone: row.admin_zone,
+    total_boardings: Number(row.total_boardings || 0),
+    total_alightings: Number(row.total_alightings || 0),
+    total_passenger_events: Number(row.total_passenger_events || 0),
+    event_count: Number(row.event_count || 0),
+    stop_count: Number(row.stop_count || 0),
+    course_count: Number(row.course_count || 0),
+    estimated_route_km: row.estimated_route_km === null ? null : Number(row.estimated_route_km),
+    passengers_per_km: row.passengers_per_km === null ? null : Number(row.passengers_per_km),
+    by_hour: {},
+    by_weekday: {}
+  }));
+
+  for (const row of reportRows) {
+    row.row_key = `${row.line_id || 'brak_linii'}||${row.day_type || 'unknown'}||${row.admin_zone || 'nieokreślona'}`;
+  }
+
+  const hourRows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') || '||' || COALESCE(t.day_type, 'unknown') || '||' ||
+        COALESCE(s.zone, json_extract(s.metadata, '$.admin_zone'), json_extract(t.metadata, '$.admin_zone'), 'nieokreślona') AS row_key,
+      strftime('%H', COALESCE(t.received_at, t.timestamp)) AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    LEFT JOIN stops s ON s.id = t.stop_id
+    ${whereSql}
+    GROUP BY row_key, bucket
+  `).all(params);
+
+  const weekdayRows = db.prepare(`
+    SELECT
+      COALESCE(t.line_id, 'brak_linii') || '||' || COALESCE(t.day_type, 'unknown') || '||' ||
+        COALESCE(s.zone, json_extract(s.metadata, '$.admin_zone'), json_extract(t.metadata, '$.admin_zone'), 'nieokreślona') AS row_key,
+      ${weekdayNameSqlExpression('COALESCE(t.received_at, t.timestamp)')} AS bucket,
+      COALESCE(SUM(t.passenger_events), 0) AS value
+    FROM trips t
+    LEFT JOIN stops s ON s.id = t.stop_id
+    ${whereSql}
+    GROUP BY row_key, bucket
+  `).all(params);
+
+  addDistribution(reportRows, 'row_key', 'by_hour', hourRows, 'value');
+  addDistribution(reportRows, 'row_key', 'by_weekday', weekdayRows, 'value');
+
+  for (const row of reportRows) delete row.row_key;
+
+  sendJson(res, 200, reportResponse(query, reportRows));
+}
+
+async function handleVehicles(req, res) {
+  const rows = db.prepare(`
+    SELECT
+      v.*,
+      cs.line_id AS status_line_id,
+      cs.status AS status,
+      cs.punctuality_status AS punctuality_status,
+      cs.updated_at AS status_updated_at
+    FROM vehicles v
+    LEFT JOIN current_status cs ON cs.pcName = v.pcName
+    ORDER BY v.pcName COLLATE NOCASE
+  `).all();
+
+  const vehicles = [];
+
+  for (const row of rows) {
+    const metadata = jsonParse(row.metadata, {});
+
+    vehicles.push({
+      pcName: row.pcName,
+      pcId: row.pcId || '',
+      first_seen_at: row.first_seen,
+      last_seen_at: row.last_seen,
+      last_latitude: row.last_lat,
+      last_longitude: row.last_lng,
+      has_schedule: Boolean(metadata.has_schedule),
+      schedule_id: metadata.schedule_id || null,
+      line_id: metadata.line_id || row.status_line_id || null,
+      line_number: metadata.line_number || null,
+      brigade: metadata.brigade || '',
+      status: row.status || null,
+      punctuality_status: row.punctuality_status || null,
+      status_updated_at: row.status_updated_at || null
+    });
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    count: vehicles.length,
+    vehicles
+  });
+}
+
+async function handleSettings(req, res) {
+  const rows = db.prepare('SELECT key, value FROM settings ORDER BY key').all();
+  const settings = {};
+
+  for (const row of rows) {
+    settings[row.key] = row.value;
+  }
+
+  sendJson(res, 200, { ok: true, settings });
+}
+
+async function handleRoot(req, res) {
+  sendJson(res, 200, {
+    ok: true,
+    name: 'Isarsoft Room Server SQLite',
+    database: {
+      file: DB_FILE,
+      engine: 'SQLite',
+      driver: 'better-sqlite3'
+    },
+    endpoints: {
+      apiIp: 'GET /api/ip',
+      dataSink: 'POST /api/data',
+      createStop: 'POST /stops',
+      listStops: 'GET /stops',
+      getStop: 'GET /stops/:id',
+      updateStop: 'PUT /stops/:id',
+      deleteStop: 'DELETE /stops/:id',
+      createSchedule: 'POST /schedules',
+      listSchedules: 'GET /schedules',
+      getSchedule: 'GET /schedules/:id',
+      updateSchedule: 'PUT /schedules/:id',
+      deleteSchedule: 'DELETE /schedules/:id',
+      createHoliday: 'POST /holidays',
+      listHolidays: 'GET /holidays',
+      deleteHoliday: 'DELETE /holidays/:date',
+      getTrips: 'GET /trips?page=1&limit=100&pcName=...&line_id=...&stop_id=...&start=...&end=...',
+      deleteTrips: 'DELETE /trips?all=true lub ?before=YYYY-MM-DD',
+      vehicles: 'GET /vehicles',
+      settings: 'GET /settings',
+      currentTrip: 'GET /reports/trip/current',
+      stopUsage: 'GET /reports/stop-usage',
+      onDemandStops: 'GET /reports/on-demand-stops',
+      linePerformance: 'GET /reports/line-performance',
+      adminZone: 'GET /reports/admin-zone'
+    }
+  });
 }
 
 // --------------------- ROUTER ---------------------
@@ -1950,11 +2639,12 @@ async function routeRequest(req, res) {
   const query = parsedUrl.query || {};
 
   try {
-    // ---------- NOWE ŚCIEŻKI (dodane przed istniejącymi) ----------
+    if (req.method === 'GET' && pathname === '/') return await handleRoot(req, res);
+    if (req.method === 'GET' && pathname === '/api/ip') return await handleApiIp(req, res);
+    if (req.method === 'POST' && pathname === '/api/data') return await handleIncomingData(req, res);
 
-    // /stops/:id
     if (pathname.startsWith('/stops/') && pathname !== '/stops') {
-      const stopId = pathname.substring('/stops/'.length);
+      const stopId = decodeURIComponent(pathname.substring('/stops/'.length));
       if (!stopId) throw new Error('Brak ID przystanku');
       if (req.method === 'GET') return await handleGetStopById(req, res, stopId);
       if (req.method === 'PUT') return await handleUpdateStop(req, res, stopId);
@@ -1962,9 +2652,8 @@ async function routeRequest(req, res) {
       throw new Error('Metoda nieobsługiwana dla /stops/:id');
     }
 
-    // /schedules/:id
     if (pathname.startsWith('/schedules/') && pathname !== '/schedules') {
-      const scheduleId = pathname.substring('/schedules/'.length);
+      const scheduleId = decodeURIComponent(pathname.substring('/schedules/'.length));
       if (!scheduleId) throw new Error('Brak ID rozkładu');
       if (req.method === 'GET') return await handleGetScheduleById(req, res, scheduleId);
       if (req.method === 'PUT') return await handleUpdateSchedule(req, res, scheduleId);
@@ -1972,35 +2661,30 @@ async function routeRequest(req, res) {
       throw new Error('Metoda nieobsługiwana dla /schedules/:id');
     }
 
-    // /holidays/:date (DELETE)
     if (pathname.startsWith('/holidays/') && pathname !== '/holidays') {
-      const date = pathname.substring('/holidays/'.length);
+      const date = decodeURIComponent(pathname.substring('/holidays/'.length));
       if (!date) throw new Error('Brak daty święta');
       if (req.method === 'DELETE') return await handleDeleteHoliday(req, res, date);
       throw new Error('Metoda nieobsługiwana dla /holidays/:date');
     }
 
-    // /trips (GET, DELETE)
     if (pathname === '/trips') {
       if (req.method === 'GET') return await handleGetTrips(req, res, query);
       if (req.method === 'DELETE') return await handleDeleteTrips(req, res, query);
       throw new Error('Metoda nieobsługiwana dla /trips');
     }
 
-    // ---------- ISTNIEJĄCE ŚCIEŻKI ----------
-    if (req.method === 'GET' && pathname === '/api/ip') return await handleApiIp(req, res);
-    if (req.method === 'POST' && pathname === '/api/data') return await handleIncomingData(req, res);
-
     if (req.method === 'POST' && pathname === '/stops') return await handleCreateStop(req, res);
-    if (req.method === 'GET' && pathname === '/stops') return await handleGetStops(req, res);
+    if (req.method === 'GET' && pathname === '/stops') return await handleGetStops(req, res, query);
 
     if (req.method === 'POST' && pathname === '/schedules') return await handleCreateSchedule(req, res);
     if (req.method === 'GET' && pathname === '/schedules') return await handleGetSchedules(req, res, query);
 
-    if (req.method === 'GET' && pathname === '/vehicles') return await handleVehicles(req, res);
-
     if (req.method === 'POST' && pathname === '/holidays') return await handleCreateHoliday(req, res);
     if (req.method === 'GET' && pathname === '/holidays') return await handleGetHolidays(req, res);
+
+    if (req.method === 'GET' && pathname === '/vehicles') return await handleVehicles(req, res);
+    if (req.method === 'GET' && pathname === '/settings') return await handleSettings(req, res);
 
     if (req.method === 'GET' && pathname === '/reports/trip/current') return await handleReportsCurrent(req, res, query);
     if (req.method === 'GET' && pathname === '/reports/stop-usage') return await handleStopUsageReport(req, res, query);
@@ -2008,25 +2692,13 @@ async function routeRequest(req, res) {
     if (req.method === 'GET' && pathname === '/reports/line-performance') return await handleLinePerformanceReport(req, res, query);
     if (req.method === 'GET' && pathname === '/reports/admin-zone') return await handleAdminZoneReport(req, res, query);
 
-    if (req.method === 'GET' && pathname === '/health') {
-      return sendJson(res, 200, {
-        ok: true,
-        status: 'active',
-        serverTime: new Date().toISOString(),
-        database: DB_FILE,
-        vehiclesInMemory: pcDataStore.size,
-        stops: database.stops.length,
-        schedules: database.schedules.length,
-        tripEvents: database.trips.length
-      });
-    }
-
     sendJson(res, 404, {
       ok: false,
-      error: 'Not found'
+      error: 'Not found',
+      path: pathname
     });
   } catch (err) {
-    console.error('[serverRoom] Błąd przetwarzania żądania:', err.message);
+    console.error('[serverRoom] Błąd obsługi żądania:', err.message);
 
     sendJson(res, 400, {
       ok: false,
@@ -2035,25 +2707,24 @@ async function routeRequest(req, res) {
   }
 }
 
-// --------------------- SERWER HTTP ---------------------
-const server = http.createServer((req, res) => {
-  routeRequest(req, res).catch(err => {
-    console.error('[serverRoom] Krytyczny błąd obsługi HTTP:', err);
-
-    if (!res.headersSent) {
-      sendJson(res, 500, {
-        ok: false,
-        error: 'Internal server error'
-      });
-    } else {
-      res.end();
-    }
-  });
-});
-
 // --------------------- URUCHOMIENIE ---------------------
 async function startServer() {
-  await ensureDatabaseReady();
+  ensureDatabaseReady();
+
+  server = http.createServer((req, res) => {
+    routeRequest(req, res).catch(err => {
+      console.error('[serverRoom] Krytyczny błąd obsługi HTTP:', err);
+
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          ok: false,
+          error: 'Internal server error'
+        });
+      } else {
+        res.end();
+      }
+    });
+  });
 
   server.listen(PORT, () => {
     const ips = getLocalIPs();
@@ -2063,8 +2734,8 @@ async function startServer() {
     console.log('═'.repeat(70));
     console.log(`║  Port: ${PORT}`);
     console.log('║  Status: Aktywny ✅');
-    console.log(`║  Baza danych: ${DB_FILE}`);
-    console.log(`║  Katalog ramek: ${DB_ROOT}`);
+    console.log(`║  Baza danych SQLite: ${DB_FILE}`);
+    console.log(`║  Tryb ramek: SQLite raw_frames, bez plików JSON`);
     console.log('║');
     console.log('║  📍 DOSTĘPNE ADRESY URL DO KOPIOWANIA:');
     console.log('║');
@@ -2085,17 +2756,17 @@ async function startServer() {
     console.log('║  💡 WSKAZÓWKI:');
     console.log('║  1. Wybierz odpowiedni adres IP z listy powyżej');
     console.log('║  2. Skopiuj komendę export i wklej w terminalu serverPc.js');
-    console.log('║  3. Przykład dla Windows (PowerShell):');
+    console.log('║  3. Windows PowerShell:');
     console.log('║     $env:ROOM_SERVER_URL="http://192.168.68.212:3001/api/data"');
-    console.log('║  4. Przykład dla Windows (CMD):');
+    console.log('║  4. Windows CMD:');
     console.log('║     set ROOM_SERVER_URL=http://192.168.68.212:3001/api/data');
     console.log('═'.repeat(70));
-    console.log('║  📊 Serwer nasłuchuje na ścieżce: POST /api/data');
-    console.log('║  📊 Endpoint pomocniczy: GET /api/ip');
+    console.log('║  📊 Sink: POST /api/data');
+    console.log('║  📊 IP: GET /api/ip');
     console.log('║  📊 Przystanki: POST/GET /stops, GET/PUT/DELETE /stops/:id');
     console.log('║  📊 Rozkłady: POST/GET /schedules, GET/PUT/DELETE /schedules/:id');
     console.log('║  📊 Święta: POST/GET /holidays, DELETE /holidays/:date');
-    console.log('║  📊 Zdarzenia: GET /trips (z paginacją), DELETE /trips');
+    console.log('║  📊 Zdarzenia: GET /trips, DELETE /trips');
     console.log('║  📊 Dashboard: GET /reports/trip/current');
     console.log('═'.repeat(70) + '\n');
 
@@ -2109,33 +2780,23 @@ async function startServer() {
         syncIntervalMs: SYNC_INTERVAL_MS,
         geofenceRadiusMeters: GEOFENCE_RADIUS_METERS,
         punctualityToleranceSeconds: PUNCTUALITY_TOLERANCE_SECONDS,
-        frameFileMode: 'minimal_vehicle_location'
+        frameStorageMode: 'sqlite_raw_frames'
       },
       availableUrls: ips.map(ip => ({
         interface: ip.interface,
         url: ip.url,
-        envExport: `export ROOM_SERVER_URL="${ip.url}"`,
-        windowsPowerShell: `$env:ROOM_SERVER_URL="${ip.url}"`,
-        windowsCmd: `set ROOM_SERVER_URL=${ip.url}`
+        envVariable: `export ROOM_SERVER_URL="${ip.url}"`
       })),
       endpoints: {
-        receiveData: 'POST /api/data',
-        serverIp: 'GET /api/ip',
+        dataSink: 'POST /api/data',
+        apiIp: 'GET /api/ip',
         createStop: 'POST /stops',
         listStops: 'GET /stops',
-        getStop: 'GET /stops/:id',
-        updateStop: 'PUT /stops/:id',
-        deleteStop: 'DELETE /stops/:id',
         createSchedule: 'POST /schedules',
         listSchedules: 'GET /schedules',
-        getSchedule: 'GET /schedules/:id',
-        updateSchedule: 'PUT /schedules/:id',
-        deleteSchedule: 'DELETE /schedules/:id',
         createHoliday: 'POST /holidays',
         listHolidays: 'GET /holidays',
-        deleteHoliday: 'DELETE /holidays/:date',
-        getTrips: 'GET /trips?page=1&limit=100&pcName=...&line_id=...&stop_id=...&start=...&end=...',
-        deleteTrips: 'DELETE /trips?all=true lub ?before=YYYY-MM-DD',
+        getTrips: 'GET /trips?page=1&limit=100',
         vehicles: 'GET /vehicles',
         currentTrip: 'GET /reports/trip/current',
         stopUsage: 'GET /reports/stop-usage',
@@ -2149,9 +2810,11 @@ async function startServer() {
   });
 
   setInterval(() => {
-    analyzeAllCurrentVehicles().catch(err => {
+    try {
+      analyzeAllCurrentVehicles();
+    } catch (err) {
       console.error('[serverRoom] Błąd pętli 5s:', err.message);
-    });
+    }
   }, SYNC_INTERVAL_MS);
 }
 
@@ -2161,13 +2824,21 @@ startServer().catch(err => {
 });
 
 // --------------------- ZAMYKANIE ---------------------
-async function gracefulShutdown(signal) {
+function gracefulShutdown(signal) {
   console.log(`\n[serverRoom] Otrzymano ${signal}. Zamykam serwer...`);
 
   try {
-    await saveDatabase();
+    if (db) {
+      db.close();
+      console.log('[serverRoom] Połączenie SQLite zamknięte.');
+    }
   } catch (err) {
-    console.error('[serverRoom] Błąd zapisu bazy przy zamykaniu:', err.message);
+    console.error('[serverRoom] Błąd zamykania SQLite:', err.message);
+  }
+
+  if (!server) {
+    process.exit(0);
+    return;
   }
 
   server.close(() => {
