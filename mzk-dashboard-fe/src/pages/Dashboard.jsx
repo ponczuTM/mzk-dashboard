@@ -111,7 +111,7 @@ export default function Dashboard() {
   });
 
   // Stan dla historycznych lokalizacji
-  const [historyRange, setHistoryRange] = useState('lastHour');
+  const [historyRange, setHistoryRange] = useState('last24h');
   const [historyData, setHistoryData] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
@@ -197,7 +197,7 @@ export default function Dashboard() {
   if (loading) {
     return (
       <div className={styles.container}>
-        <h1>📊 Dashboard serwera pokojowego</h1>
+        <h1>📊 Dashboard</h1>
         <div className={styles.loading}>Ładowanie danych z backendu…</div>
       </div>
     );
@@ -206,7 +206,7 @@ export default function Dashboard() {
   if (error) {
     return (
       <div className={styles.container}>
-        <h1>📊 Dashboard serwera pokojowego</h1>
+        <h1>📊 Dashboard</h1>
         <div className={styles.error}>
           <strong>Wystąpiły błędy podczas pobierania danych:</strong>
           <pre>{error}</pre>
@@ -219,7 +219,7 @@ export default function Dashboard() {
   return (
     <div className={styles.container}>
       <header className={styles.header}>
-        <h1>📊 Dashboard serwera pokojowego</h1>
+        <h1>📊 Dashboard</h1>
         <p className={styles.subtitle}>
           Podgląd wszystkich danych z backendu • Serwer: {BASE_URL}
         </p>

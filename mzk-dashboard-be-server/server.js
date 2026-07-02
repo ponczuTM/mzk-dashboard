@@ -1316,7 +1316,7 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
 
   if (!schedule) {
     const quality = extractCameraQuality(payload, null);
-
+  
     const status = {
       ...baseStatus,
       status: 'brak rozkładu',
@@ -1329,8 +1329,9 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-
+  
     upsertCurrentStatus(status, payload);
+    appendTripEventIfNeeded(status, schedule, now, appendTripEvent); // 👈 DODAJ
     return status;
   }
 
@@ -1351,9 +1352,9 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-
+  
     upsertCurrentStatus(status, payload);
-    appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+    appendTripEventIfNeeded(status, schedule, now, appendTripEvent); // 👈 DODAJ
     return status;
   }
 
@@ -1371,9 +1372,9 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-
+  
     upsertCurrentStatus(status, payload);
-    appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+    appendTripEventIfNeeded(status, schedule, now, appendTripEvent); // 👈 DODAJ
     return status;
   }
 
