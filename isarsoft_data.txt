@@ -1,0 +1,974 @@
+MZK Monitor
+System nadzoru floty
+Dashboard
+Kamery
+Rozkłady
+Pojazdy
+Statystyki
+📹 Kamery i status pojazdów
+🚌 Pojazdy
+Pojazd: 
+pc_number_113
+pc_number_113
+brak rozkładu
+Linia: —
+Opóźnienie: —
+Pasażerowie: IN: 2505, OUT: 3272, onboard: 0
+Lokalizacja: 52.22970, 21.01220
+Przystanek: —
+📷
+✅ Wszystkie kamery działają
+📊 Dane Isarsoft (na żywo)
+⚠️ Otrzymane dane nie zawierają oczekiwanych pól (applications, lines, areas, cameras)
+{
+  "pcId": 1,
+  "pcName": "pc_number_113",
+  "timestamp": "2026-07-02T13:14:10.956Z",
+  "latitude": 52.2297,
+  "longitude": 21.0122,
+  "locationSource": "ip-geolocation",
+  "gpsFix": false,
+  "lastValidGpsAt": null,
+  "data": {
+    "ok": true,
+    "generated_at": "2026-07-02T13:13:51.393Z",
+    "filters": {
+      "preset": "LAST_1_DAY",
+      "class": "PERSON,HEAD",
+      "app": "",
+      "camera": "",
+      "line": "",
+      "area": ""
+    },
+    "available_presets": [
+      "LAST_1_MIN",
+      "LAST_2_MIN",
+      "LAST_5_MIN",
+      "LAST_10_MIN",
+      "LAST_15_MIN",
+      "LAST_30_MIN",
+      "LAST_45_MIN",
+      "LAST_1_HOUR",
+      "LAST_2_HOUR",
+      "LAST_3_HOUR",
+      "LAST_6_HOUR",
+      "LAST_12_HOUR",
+      "LAST_1_DAY",
+      "LAST_2_DAY",
+      "LAST_3_DAY",
+      "LAST_7_DAY",
+      "LAST_14_DAY",
+      "LAST_1_MONTH",
+      "LAST_2_MONTH",
+      "LAST_3_MONTH",
+      "LAST_6_MONTH",
+      "LAST_1_YEAR",
+      "LAST_2_YEAR",
+      "LAST_5_YEAR",
+      "THIS_DAY",
+      "THIS_DAY_SO_FAR",
+      "THIS_WEEK",
+      "THIS_WEEK_SO_FAR",
+      "THIS_MONTH",
+      "THIS_MONTH_SO_FAR",
+      "THIS_YEAR",
+      "THIS_YEAR_SO_FAR",
+      "PREVIOUS_DAY",
+      "PREVIOUS_WEEK",
+      "PREVIOUS_MONTH",
+      "PREVIOUS_YEAR",
+      "CUSTOM"
+    ],
+    "totals": {
+      "objectflow_apps": 8,
+      "selected_in": 2505,
+      "selected_out": 3272,
+      "selected_area_avg": 0.0005710924704400174,
+      "selected_area_count": 0
+    },
+    "applications": [
+      {
+        "uuid": "a9b43643-9c4d-4cd5-9ee6-b752cdbfb4a3",
+        "name": "Office",
+        "tags": [],
+        "status": "Online",
+        "last_online": "2026-07-02T13:13:50.646Z",
+        "camera": {
+          "uuid": "83a114ba-7dcf-4c97-a8c1-d54ab4b36160",
+          "name": "office"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-05-26T09:35:18.007Z",
+        "updated_at": "2026-07-02T07:52:03.017Z",
+        "lines": [
+          {
+            "uuid": "4f1dc259-438f-434e-afca-167ec16919fc",
+            "name": "New Line",
+            "tags": [],
+            "coordinates": [
+              0.18910256410256412,
+              0.7874762808349146,
+              0.5833333333333334,
+              0.8842504743833017
+            ],
+            "totals": {
+              "in": 27,
+              "out": 23
+            },
+            "live": {
+              "total_in": 27,
+              "total_out": 23,
+              "raw": [
+                {
+                  "count_in": 22,
+                  "count_out": 18
+                },
+                {
+                  "count_in": 5,
+                  "count_out": 5
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 27,
+              "total_out": 23,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": 167,
+                  "count_in": 0,
+                  "count_out": 0
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 27,
+          "out": 23
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "da384203-7cfb-4bd8-8113-fde16903e859",
+        "name": "Intersection",
+        "tags": [],
+        "status": "Paused",
+        "last_online": "2026-05-26T09:34:59.740Z",
+        "camera": {
+          "uuid": "b7a4c9ec-869c-47ad-b371-84db64eaf6d0",
+          "name": "Intersection"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-01-28T10:59:47.324Z",
+        "updated_at": "2026-06-11T11:18:40.040Z",
+        "lines": [],
+        "areas": [
+          {
+            "uuid": "421c4dc8-4c44-4ec5-b8cb-4e94631bba87",
+            "name": "Crossing",
+            "tags": [],
+            "coordinates": [
+              0.378076062639821,
+              0.3339960238568589,
+              0.5838926174496644,
+              0.3717693836978131,
+              0.5111856823266219,
+              0.4652087475149105,
+              0.36465324384787473,
+              0.4572564612326043
+            ],
+            "totals": {
+              "min": 0,
+              "avg": 0,
+              "max": 0,
+              "samples": 0
+            },
+            "live": {
+              "total_count": 0,
+              "raw": [
+                {
+                  "count": null
+                },
+                {
+                  "count": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "avg_min": 0,
+              "avg_avg": 0,
+              "avg_max": 0,
+              "total_samples": 0,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_min": null,
+                  "count_avg": null,
+                  "count_max": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_min": null,
+                  "count_avg": null,
+                  "count_max": null
+                }
+              ]
+            }
+          }
+        ],
+        "totals": {
+          "in": 0,
+          "out": 0
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "07b30bce-7db1-4016-b1ed-358bc2c6e2ab",
+        "name": "Bus test",
+        "tags": [],
+        "status": "Paused",
+        "last_online": "2026-07-02T07:57:08.628Z",
+        "camera": {
+          "uuid": "0d0d8648-5595-484e-b859-ef206651957e",
+          "name": "Bus Test"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-05-22T12:37:18.808Z",
+        "updated_at": "2026-07-02T07:57:08.829Z",
+        "lines": [
+          {
+            "uuid": "8ed910e1-fa9d-44bb-a24e-97fea8b0b6f7",
+            "name": "New Line",
+            "tags": [],
+            "coordinates": [
+              0.5453125,
+              0.6292613636363636,
+              0.27890624999999997,
+              0.9090909090909092
+            ],
+            "totals": {
+              "in": 1021,
+              "out": 2666
+            },
+            "live": {
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 1021,
+              "total_out": 2666,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": 193,
+                  "count_in": 115,
+                  "count_out": 332
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 1021,
+          "out": 2666
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "76a57585-15a4-4310-9fe6-7215996e6c19",
+        "name": "Bridge",
+        "tags": [],
+        "status": "Paused",
+        "last_online": "2026-07-02T07:57:08.433Z",
+        "camera": {
+          "uuid": "c715581a-48c2-463e-9458-31ff4793459c",
+          "name": "Bridge"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-04-10T11:40:23.474Z",
+        "updated_at": "2026-07-02T07:57:08.862Z",
+        "lines": [],
+        "areas": [
+          {
+            "uuid": "2832d170-1a21-4486-ab47-562fd4e2faca",
+            "name": "Traffic Jam",
+            "tags": [],
+            "coordinates": [
+              0.47651006711409394,
+              0.48906560636182905,
+              0.6085011185682326,
+              0.4930417495029821,
+              0.5391498881431768,
+              0.6103379721669979,
+              0.3959731543624161,
+              0.5745526838966202
+            ],
+            "totals": {
+              "min": 0,
+              "avg": 0.004568739763520139,
+              "max": 0.12244897959183673,
+              "samples": 3152
+            },
+            "live": {
+              "total_count": 0,
+              "raw": [
+                {
+                  "count": null
+                },
+                {
+                  "count": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "avg_min": 0,
+              "avg_avg": 0.004568739763520139,
+              "avg_max": 0.12244897959183673,
+              "total_samples": 3152,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": 193,
+                  "count_min": 0,
+                  "count_avg": 0.09326424870466321,
+                  "count_max": 2
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_min": null,
+                  "count_avg": null,
+                  "count_max": null
+                }
+              ]
+            }
+          }
+        ],
+        "totals": {
+          "in": 0,
+          "out": 0
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0.004568739763520139,
+          "max": 0.12244897959183673,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "6d70e3b3-26fd-4178-b042-e2dfdf27943f",
+        "name": "Real Cam 4",
+        "tags": [],
+        "status": "Offline",
+        "last_online": "2026-07-01T12:33:06.096Z",
+        "camera": {
+          "uuid": "b48c1aad-f610-4257-9d62-0c20d846081c",
+          "name": "Real Cam 4"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-06-23T09:04:21.140Z",
+        "updated_at": "2026-07-02T11:10:20.637Z",
+        "lines": [
+          {
+            "uuid": "3d0d3585-4076-4e1c-9d20-6dc725a521c8",
+            "name": "walk1",
+            "tags": [],
+            "coordinates": [
+              0.3487394957983193,
+              0.3830845771144278,
+              0.3319327731092437,
+              0.4328358208955223
+            ],
+            "totals": {
+              "in": 0,
+              "out": 0
+            },
+            "live": {
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            }
+          },
+          {
+            "uuid": "8a58a54a-77fd-47ff-99c8-94fd6d5f7a1e",
+            "name": "walk2",
+            "tags": [],
+            "coordinates": [
+              0.6904761904761905,
+              0.527363184079602,
+              0.6330532212885154,
+              0.3457711442786069
+            ],
+            "totals": {
+              "in": 0,
+              "out": 0
+            },
+            "live": {
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 0,
+          "out": 0
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "630aa8c6-3c52-4e36-a180-ab83a31911c8",
+        "name": "Real Cam 3",
+        "tags": [],
+        "status": "Online",
+        "last_online": "2026-07-02T13:13:50.622Z",
+        "camera": {
+          "uuid": "9b8c8a37-a22b-4e9f-9988-da2d54f42f36",
+          "name": "Real Cam 3"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-06-17T07:43:07.657Z",
+        "updated_at": "2026-07-02T11:10:20.663Z",
+        "lines": [
+          {
+            "uuid": "768f9695-88ba-4f56-a0fe-5d92211c3950",
+            "name": "walk",
+            "tags": [],
+            "coordinates": [
+              0.08403361344537816,
+              0.4328358208955225,
+              0.047619047619047616,
+              0.8152985074626866
+            ],
+            "totals": {
+              "in": 1457,
+              "out": 583
+            },
+            "live": {
+              "total_in": 1457,
+              "total_out": 583,
+              "raw": [
+                {
+                  "count_in": 0,
+                  "count_out": 291
+                },
+                {
+                  "count_in": 1457,
+                  "count_out": 292
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 1457,
+              "total_out": 583,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": 167,
+                  "count_in": 165,
+                  "count_out": 33
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 1457,
+          "out": 583
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "1430c515-a258-46d4-9c86-3c120e9b3a4a",
+        "name": "Real Cam 2",
+        "tags": [],
+        "status": "Offline",
+        "last_online": "2026-07-01T12:35:06.479Z",
+        "camera": {
+          "uuid": "1375cc2d-14b9-480e-a076-2037b093d101",
+          "name": "Real Cam 2"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-06-17T08:11:42.224Z",
+        "updated_at": "2026-07-02T11:10:20.692Z",
+        "lines": [
+          {
+            "uuid": "f0c3df8f-7a29-4108-8536-977df1d051d5",
+            "name": "walk",
+            "tags": [],
+            "coordinates": [
+              0.4079320113314448,
+              0.22654867256637168,
+              0.2804532577903683,
+              0.36283185840707977
+            ],
+            "totals": {
+              "in": 0,
+              "out": 0
+            },
+            "live": {
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 0,
+          "out": 0
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      },
+      {
+        "uuid": "6e4857f2-fd50-419a-8709-f535a6d3cf30",
+        "name": "Real Test",
+        "tags": [],
+        "status": "Paused",
+        "last_online": "2026-06-17T06:25:42.428Z",
+        "camera": {
+          "uuid": "79edd0eb-9082-401a-9296-b5d90ccd560f",
+          "name": "Real Test"
+        },
+        "model": {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "name": "PERSON"
+        },
+        "created_at": "2026-06-11T11:10:24.419Z",
+        "updated_at": "2026-06-23T08:38:26.350Z",
+        "lines": [
+          {
+            "uuid": "7f2adeea-6291-44fc-a7ef-b9ef3ad4c4c3",
+            "name": "Passing Through",
+            "tags": [],
+            "coordinates": [
+              0.4900849858356941,
+              0.29380530973451324,
+              0.386685552407932,
+              0.4973451327433629
+            ],
+            "totals": {
+              "in": 0,
+              "out": 0
+            },
+            "live": {
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            },
+            "data": {
+              "buckets": 98,
+              "first_bucket": "2026-07-01T13:00:00.000Z",
+              "last_bucket": "2026-07-02T13:00:00.000Z",
+              "total_in": 0,
+              "total_out": 0,
+              "raw": [
+                {
+                  "time_bucket": "2026-07-01T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                },
+                {
+                  "time_bucket": "2026-07-02T13:00:00.000Z",
+                  "number_of_samples": null,
+                  "count_in": null,
+                  "count_out": null
+                }
+              ]
+            }
+          }
+        ],
+        "areas": [],
+        "totals": {
+          "in": 0,
+          "out": 0
+        },
+        "area_totals": {
+          "min": 0,
+          "avg": 0,
+          "max": 0,
+          "count": 0
+        }
+      }
+    ],
+    "lines": [
+      {
+        "application_uuid": "07b30bce-7db1-4016-b1ed-358bc2c6e2ab",
+        "application_name": "Bus test",
+        "camera_name": "Bus Test",
+        "line_uuid": "8ed910e1-fa9d-44bb-a24e-97fea8b0b6f7",
+        "line_name": "New Line",
+        "total_in": 1021,
+        "total_out": 2666,
+        "live_in": 0,
+        "live_out": 0,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "630aa8c6-3c52-4e36-a180-ab83a31911c8",
+        "application_name": "Real Cam 3",
+        "camera_name": "Real Cam 3",
+        "line_uuid": "768f9695-88ba-4f56-a0fe-5d92211c3950",
+        "line_name": "walk",
+        "total_in": 1457,
+        "total_out": 583,
+        "live_in": 1457,
+        "live_out": 583,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "a9b43643-9c4d-4cd5-9ee6-b752cdbfb4a3",
+        "application_name": "Office",
+        "camera_name": "office",
+        "line_uuid": "4f1dc259-438f-434e-afca-167ec16919fc",
+        "line_name": "New Line",
+        "total_in": 27,
+        "total_out": 23,
+        "live_in": 27,
+        "live_out": 23,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "6d70e3b3-26fd-4178-b042-e2dfdf27943f",
+        "application_name": "Real Cam 4",
+        "camera_name": "Real Cam 4",
+        "line_uuid": "3d0d3585-4076-4e1c-9d20-6dc725a521c8",
+        "line_name": "walk1",
+        "total_in": 0,
+        "total_out": 0,
+        "live_in": 0,
+        "live_out": 0,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "6d70e3b3-26fd-4178-b042-e2dfdf27943f",
+        "application_name": "Real Cam 4",
+        "camera_name": "Real Cam 4",
+        "line_uuid": "8a58a54a-77fd-47ff-99c8-94fd6d5f7a1e",
+        "line_name": "walk2",
+        "total_in": 0,
+        "total_out": 0,
+        "live_in": 0,
+        "live_out": 0,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "1430c515-a258-46d4-9c86-3c120e9b3a4a",
+        "application_name": "Real Cam 2",
+        "camera_name": "Real Cam 2",
+        "line_uuid": "f0c3df8f-7a29-4108-8536-977df1d051d5",
+        "line_name": "walk",
+        "total_in": 0,
+        "total_out": 0,
+        "live_in": 0,
+        "live_out": 0,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      },
+      {
+        "application_uuid": "6e4857f2-fd50-419a-8709-f535a6d3cf30",
+        "application_name": "Real Test",
+        "camera_name": "Real Test",
+        "line_uuid": "7f2adeea-6291-44fc-a7ef-b9ef3ad4c4c3",
+        "line_name": "Passing Through",
+        "total_in": 0,
+        "total_out": 0,
+        "live_in": 0,
+        "live_out": 0,
+        "buckets": 98,
+        "first_bucket": "2026-07-01T13:00:00.000Z",
+        "last_bucket": "2026-07-02T13:00:00.000Z"
+      }
+    ],
+    "areas": [
+      {
+        "application_uuid": "76a57585-15a4-4310-9fe6-7215996e6c19",
+        "application_name": "Bridge",
+        "camera_name": "Bridge",
+        "area_uuid": "2832d170-1a21-4486-ab47-562fd4e2faca",
+        "area_name": "Traffic Jam",
+        "avg_min": 0,
+        "avg_avg": 0.004568739763520139,
+        "avg_max": 0.12244897959183673,
+        "live_count": 0,
+        "buckets": 98
+      },
+      {
+        "application_uuid": "da384203-7cfb-4bd8-8113-fde16903e859",
+        "application_name": "Intersection",
+        "camera_name": "Intersection",
+        "area_uuid": "421c4dc8-4c44-4ec5-b8cb-4e94631bba87",
+        "area_name": "Crossing",
+        "avg_min": 0,
+        "avg_avg": 0,
+        "avg_max": 0,
+        "live_count": 0,
+        "buckets": 98
+      }
+    ],
+    "cameras": [
+      {
+        "uuid": "b7a4c9ec-869c-47ad-b371-84db64eaf6d0",
+        "name": "Intersection"
+      },
+      {
+        "uuid": "c715581a-48c2-463e-9458-31ff4793459c",
+        "name": "Bridge"
+      },
+      {
+        "uuid": "0d0d8648-5595-484e-b859-ef206651957e",
+        "name": "Bus Test"
+      },
+      {
+        "uuid": "79edd0eb-9082-401a-9296-b5d90ccd560f",
+        "name": "Real Test"
+      },
+      {
+        "uuid": "9b8c8a37-a22b-4e9f-9988-da2d54f42f36",
+        "name": "Real Cam 3"
+      },
+      {
+        "uuid": "1375cc2d-14b9-480e-a076-2037b093d101",
+        "name": "Real Cam 2"
+      },
+      {
+        "uuid": "b48c1aad-f610-4257-9d62-0c20d846081c",
+        "name": "Real Cam 4"
+      },
+      {
+        "uuid": "83a114ba-7dcf-4c97-a8c1-d54ab4b36160",
+        "name": "office"
+      }
+    ],
+    "license": {
+      "valid": true
+    },
+    "integrations": {
+      "mqtt": null,
+      "kafka": null
+    }
+  }
+}
+📷 Aplikacje / Kamery
+Brak aplikacji w danych Isarsoft
+
+📊 Wszystkie linie (agregat)
+Brak linii w danych Isarsoft
+
+📷 Lista kamer
+Brak kamer
+
+📌 Obszary (agregat)
+Brak obszarów

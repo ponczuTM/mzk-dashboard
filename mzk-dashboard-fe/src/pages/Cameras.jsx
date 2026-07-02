@@ -53,14 +53,39 @@ const Cameras = () => {
     setLoadingIsarsoft(true);
     setIsarsoftError(null);
     try {
-      const response = await api.getIsarsoftLatest(); // zakładamy, że metoda istnieje w api
+      const response = await api.getIsarsoftLatest();
+      console.log('[loadIsarsoft] Otrzymano odpowiedź:', response);
+
       if (response.ok && response.data) {
-        setIsarsoftData(response.data);
+        console.log('[loadIsarsoft] Dane surowe:', response.data);
+        
+        // Normalizacja: jeśli dane są zagnieżdżone w response.data.data, użyj ich
+        let normalizedData = response.data;
+        if (response.data.data && typeof response.data.data === 'object') {
+          // Sprawdzamy, czy response.data.data zawiera applications, lines, areas, cameras
+          const inner = response.data.data;
+          if (inner.applications || inner.lines || inner.areas || inner.cameras) {
+            normalizedData = inner;
+            console.log('[loadIsarsoft] Użyto zagnieżdżonych danych (response.data.data)');
+          }
+        }
+
+        // Logujemy, co znaleźliśmy
+        console.log('[loadIsarsoft] Znormalizowane dane:', normalizedData);
+        console.log('[loadIsarsoft] applications:', normalizedData.applications?.length);
+        console.log('[loadIsarsoft] lines:', normalizedData.lines?.length);
+        console.log('[loadIsarsoft] areas:', normalizedData.areas?.length);
+        console.log('[loadIsarsoft] cameras:', normalizedData.cameras?.length);
+
+        setIsarsoftData(normalizedData);
       } else {
         setIsarsoftError('Brak danych lub odpowiedź nieprawidłowa');
+        setIsarsoftData(null);
       }
     } catch (err) {
+      console.error('[loadIsarsoft] Błąd:', err);
       setIsarsoftError(err.message || 'Nie udało się pobrać danych Isarsoft');
+      setIsarsoftData(null);
     } finally {
       setLoadingIsarsoft(false);
     }
@@ -87,6 +112,16 @@ const Cameras = () => {
   const filteredVehicles = selectedVehicle
     ? vehicles.filter(v => v.pcName === selectedVehicle)
     : vehicles;
+
+  // ---- Funkcja pomocnicza do formatowania daty ----
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '—';
+    try {
+      return new Date(dateStr).toLocaleString();
+    } catch {
+      return dateStr;
+    }
+  };
 
   // ---- Renderowanie ----
   return (
@@ -148,7 +183,7 @@ const Cameras = () => {
         )}
       </section>
 
-      {/* ===== SEKCJA: Dane Isarsoft (aplikacje, linie, obszary) ===== */}
+      {/* ===== SEKCJA: Dane Isarsoft (na żywo) ===== */}
       <section className="isarsoft-section">
         <h2>📊 Dane Isarsoft (na żywo)</h2>
         {loadingIsarsoft && <div className="loading">Ładowanie danych Isarsoft...</div>}
@@ -156,6 +191,17 @@ const Cameras = () => {
 
         {!loadingIsarsoft && !isarsoftError && isarsoftData && (
           <div className="isarsoft-container">
+            {/* Jeśli dane są puste lub brak oczekiwanych pól, wyświetl surowy JSON */}
+            {(!isarsoftData.applications || isarsoftData.applications.length === 0) &&
+             (!isarsoftData.lines || isarsoftData.lines.length === 0) &&
+             (!isarsoftData.areas || isarsoftData.areas.length === 0) &&
+             (!isarsoftData.cameras || isarsoftData.cameras.length === 0) && (
+              <div className="isarsoft-raw">
+                <h3>⚠️ Otrzymane dane nie zawierają oczekiwanych pól (applications, lines, areas, cameras)</h3>
+                <pre>{JSON.stringify(isarsoftData, null, 2)}</pre>
+              </div>
+            )}
+
             {/* Aplikacje (kamery) */}
             <div className="isarsoft-applications">
               <h3>📷 Aplikacje / Kamery</h3>
@@ -172,8 +218,8 @@ const Cameras = () => {
                       <div className="app-details">
                         <div><strong>Kamera:</strong> {app.camera?.name || '—'}</div>
                         <div><strong>Model:</strong> {app.model?.name || '—'}</div>
-                        <div><strong>Ostatnio online:</strong> {app.last_online ? new Date(app.last_online).toLocaleString() : '—'}</div>
-                        <div><strong>Utworzono:</strong> {app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</div>
+                        <div><strong>Ostatnio online:</strong> {formatDate(app.last_online)}</div>
+                        <div><strong>Utworzono:</strong> {formatDate(app.created_at)}</div>
                         <div><strong>Suma IN:</strong> {app.totals?.in || 0}</div>
                         <div><strong>Suma OUT:</strong> {app.totals?.out || 0}</div>
                       </div>
@@ -193,7 +239,7 @@ const Cameras = () => {
                           </ul>
                         </div>
                       )}
-                      {/* Obszary */}
+                      {/* Obszary wewnątrz aplikacji */}
                       {app.areas && app.areas.length > 0 && (
                         <div className="app-areas">
                           <h4>Obszary:</h4>
@@ -302,6 +348,13 @@ const Cameras = () => {
                 <p>Brak obszarów</p>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Jeśli isarsoftData jest null, ale nie ma błędu, to też pokaż komunikat */}
+        {!loadingIsarsoft && !isarsoftError && !isarsoftData && (
+          <div className="isarsoft-empty">
+            <p>Brak danych Isarsoft – oczekiwanie na pierwszy pakiet.</p>
           </div>
         )}
       </section>

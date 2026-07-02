@@ -75,10 +75,11 @@ async function handleApiIp(req, res) {
 
 async function handleIncomingData(req, res) {
   const payload = await readJsonBody(req);
-  console.log(JSON.stringify(payload, null, 2));
+  console.log('[handleIncomingData] Otrzymano payload z Isarsoft. Rozmiar:', JSON.stringify(payload).length);
 
   // --- Zapisujemy ostatni payload w pamięci (cache) ---
   latestIsarsoftData = payload;
+  console.log('[handleIncomingData] Zapisano w cache. Czy dane mają applications?', !!payload?.applications);
 
   const pcId = payload.pcId;
   const pcName = payload.pcName;
@@ -137,13 +138,21 @@ async function handleIncomingData(req, res) {
 
 // ---------- NOWY ENDPOINT: pobranie ostatnich danych Isarsoft ----------
 async function handleGetIsarsoftLatest(req, res) {
+  console.log('[handleGetIsarsoftLatest] Wywołano endpoint, latestIsarsoftData:', !!latestIsarsoftData);
   if (!latestIsarsoftData) {
+    console.log('[handleGetIsarsoftLatest] Brak danych w cache');
     sendJson(res, 404, {
       ok: false,
       error: 'Brak danych Isarsoft – jeszcze nie odebrano żadnego pakietu.'
     });
     return;
   }
+  // Logujemy kilka pól, aby potwierdzić strukturę
+  console.log('[handleGetIsarsoftLatest] applications:', latestIsarsoftData.applications?.length);
+  console.log('[handleGetIsarsoftLatest] lines:', latestIsarsoftData.lines?.length);
+  console.log('[handleGetIsarsoftLatest] areas:', latestIsarsoftData.areas?.length);
+  console.log('[handleGetIsarsoftLatest] cameras:', latestIsarsoftData.cameras?.length);
+
   sendJson(res, 200, {
     ok: true,
     data: latestIsarsoftData
