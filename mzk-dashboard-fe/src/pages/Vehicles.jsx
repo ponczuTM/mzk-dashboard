@@ -14,6 +14,7 @@ const Vehicles = () => {
   const [history, setHistory] = useState([]);
 
   const loadVehicles = useCallback(async () => {
+    setLoading(true);
     try {
       const data = await api.getVehicles();
       const list = data.vehicles || [];
@@ -21,8 +22,11 @@ const Vehicles = () => {
       if (list.length > 0 && !selectedVehicle) {
         setSelectedVehicle(list[0].pcName);
       }
+      setError(null);
     } catch (err) {
       setError(err.message);
+    } finally {
+      setLoading(false);
     }
   }, [api, selectedVehicle]);
 
