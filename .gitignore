@@ -1,2 +1,3 @@
 # Ignoruj lokalną bazę danych backendu
 mzk-dashboard-be-server/database/
+mzk-dashboard-be-bus/database.json
