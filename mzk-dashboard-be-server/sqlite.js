@@ -14,6 +14,7 @@ const GEOFENCE_RADIUS_METERS = Number(process.env.ROOM_GEOFENCE_RADIUS_METERS ||
 const PUNCTUALITY_TOLERANCE_SECONDS = Number(process.env.ROOM_PUNCTUALITY_TOLERANCE_SECONDS || 60);
 const FRAME_HISTORY_LIMIT_IN_DB = Number(process.env.ROOM_FRAME_HISTORY_LIMIT_IN_DB || 50000);
 const DAY_TYPES = ['weekday', 'weekend', 'holiday'];
+const DIRECTIONS = ['outbound', 'inbound']; // dwa kierunki
 
 // Obiekt przechowujący połączenie – będziemy modyfikować jego właściwość
 const db = { connection: null };
@@ -241,6 +242,7 @@ function initSchema(conn) {
     CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
     CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON schedules(pcName, pcId, day_type, active, updated_at);
     CREATE INDEX IF NOT EXISTS idx_schedules_line ON schedules(line_id, day_type);
+    CREATE INDEX IF NOT EXISTS idx_schedules_name ON schedules(route_name);
     CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
     CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
     CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
@@ -346,6 +348,7 @@ module.exports = {
   pruneHistory,
   getPolishPublicHolidayKeys,
   DAY_TYPES,
+  DIRECTIONS,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
   FRAME_HISTORY_LIMIT_IN_DB,

@@ -107,6 +107,7 @@ async function startServer() {
         listHolidays: 'GET /holidays',
         getTrips: 'GET /trips?page=1&limit=100',
         vehicles: 'GET /vehicles',
+        updateVehicle: 'PUT /vehicles/:pcName',
         currentTrip: 'GET /reports/trip/current',
         stopUsage: 'GET /reports/stop-usage',
         onDemandStops: 'GET /reports/on-demand-stops',

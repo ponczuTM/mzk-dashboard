@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useCallback } from 'react';
+import React, { createContext, useContext } from 'react';
 
 // Stała bazowego URL – można nadpisać przez zmienną środowiskową
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://192.168.77.152:3001';
@@ -29,7 +29,7 @@ async function fetchApi(endpoint, options = {}) {
 
 // Funkcje API
 const api = {
-  // Stops
+  // ---------- PRZYSTANKI ----------
   getStops: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return fetchApi(`/stops${qs ? '?' + qs : ''}`);
@@ -38,7 +38,7 @@ const api = {
   updateStop: (id, data) => fetchApi(`/stops/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteStop: (id) => fetchApi(`/stops/${id}`, { method: 'DELETE' }),
 
-  // Schedules
+  // ---------- ROZKŁADY ----------
   getSchedules: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return fetchApi(`/schedules${qs ? '?' + qs : ''}`);
@@ -47,10 +47,24 @@ const api = {
   updateSchedule: (id, data) => fetchApi(`/schedules/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSchedule: (id) => fetchApi(`/schedules/${id}`, { method: 'DELETE' }),
 
-  // Vehicles
+  // ---------- POJAZDY ----------
   getVehicles: () => fetchApi('/vehicles'),
+  // 🔧 NAPRAWA: dodajemy metodę updateVehicle
+  updateVehicle: (pcName, data) => fetchApi(`/vehicles/${encodeURIComponent(pcName)}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
 
-  // Trips
+  // ---------- KAMERY ----------
+  getCameras: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return fetchApi(`/cameras${qs ? '?' + qs : ''}`);
+  },
+  createCamera: (data) => fetchApi('/cameras', { method: 'POST', body: JSON.stringify(data) }),
+  updateCamera: (id, data) => fetchApi(`/cameras/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteCamera: (id) => fetchApi(`/cameras/${id}`, { method: 'DELETE' }),
+
+  // ---------- TRASY (TRIPS) ----------
   getTrips: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return fetchApi(`/trips${qs ? '?' + qs : ''}`);
@@ -60,7 +74,7 @@ const api = {
     return fetchApi(`/trips${qs ? '?' + qs : ''}`, { method: 'DELETE' });
   },
 
-  // Reports
+  // ---------- RAPORTY ----------
   getCurrentStatus: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return fetchApi(`/reports/trip/current${qs ? '?' + qs : ''}`);
@@ -82,13 +96,14 @@ const api = {
     return fetchApi(`/reports/admin-zone${qs ? '?' + qs : ''}`);
   },
 
-  // Settings
+  // ---------- USTAWIENIA ----------
   getSettings: () => fetchApi('/settings'),
 
-  // ---------- NOWA METODA: dane Isarsoft (cache) ----------
+  // ---------- ISARSOFT (cache) ----------
   getIsarsoftLatest: () => fetchApi('/api/isarsoft/latest'),
 };
 
+// ---------- KONTEKST ----------
 const BackendContext = createContext(null);
 
 export const BackendProvider = ({ children }) => {

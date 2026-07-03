@@ -1,16 +1,16 @@
 'use strict';
 
 const url = require('url');
+const crypto = require('crypto');
 
-// Importujemy moduły
 const sqlite = require('./sqlite');
 const funcs = require('./functions');
 
-// Wyciągamy potrzebne funkcje
 const {
   db,
   dbState,
   DAY_TYPES,
+  DIRECTIONS,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
   SYNC_INTERVAL_MS,
@@ -38,9 +38,6 @@ const {
   normalizeStop,
   stopFromRow,
   findStopById,
-  normalizeSchedulePayload,
-  scheduleFromRows,
-  findScheduleRowsByBaseId,
   findActiveScheduleForVehicle,
   buildTripsWhere,
   summarizeDataQualitySql,
@@ -52,10 +49,273 @@ const {
   logReceivedDataConsole
 } = funcs;
 
-// ---------- CACHE dla ostatnich danych Isarsoft ----------
-let latestIsarsoftData = null;   // przechowuje pełny payload z Isarsoft
+// ---------- NADPISUJEMY FUNKCJE DOTYCZĄCE ROZKŁADÓW ----------
+function generateScheduleId() {
+  return crypto.randomBytes(16).toString('hex');
+}
 
-// --------------------- HANDLERY API ---------------------
+/**
+ * Normalizuje payload rozkładu jazdy z dwoma kierunkami.
+ * Oczekiwane body:
+ * {
+ *   name: string,
+ *   day_types: {
+ *     weekday: {
+ *       outbound: [ { stop_id, time }, ... ],
+ *       inbound: [ { stop_id, time }, ... ]
+ *     },
+ *     weekend: { ... },
+ *     holiday: { ... }
+ *   },
+ *   schedule_id?: string,
+ *   metadata?: object
+ * }
+ */
+function normalizeSchedulePayload(body, existingScheduleId) {
+  const name = requiredString(body.name, 'name');
+  const dayTypes = body.day_types || {};
+  if (typeof dayTypes !== 'object' || Array.isArray(dayTypes)) {
+    throw new Error('day_types musi być obiektem z kluczami weekday, weekend, holiday');
+  }
+
+  const scheduleId = existingScheduleId || body.schedule_id || generateScheduleId();
+
+  const normalizedDayTypes = {};
+  for (const dayType of DAY_TYPES) {
+    const dirs = dayTypes[dayType] || {};
+    const normalizedDirs = {};
+
+    // Obsługa każdego kierunku
+    for (const direction of DIRECTIONS) {
+      let stops = dirs[direction];
+      if (!Array.isArray(stops)) {
+        stops = [];
+      }
+      const validated = stops.map((item, index) => {
+        const stopId = requiredString(item.stop_id, `day_types.${dayType}.${direction}[${index}].stop_id`);
+        const time = requiredString(item.time, `day_types.${dayType}.${direction}[${index}].time`);
+        if (!/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(time)) {
+          throw new Error(`Nieprawidłowy format czasu: ${time}, oczekiwano HH:MM`);
+        }
+        return { stop_id: stopId, time };
+      });
+      normalizedDirs[direction] = validated;
+    }
+
+    // Jeśli nie podano któregoś kierunku, ustawiamy pustą tablicę
+    for (const direction of DIRECTIONS) {
+      if (!normalizedDirs[direction]) normalizedDirs[direction] = [];
+    }
+
+    normalizedDayTypes[dayType] = normalizedDirs;
+  }
+
+  const metadata = body.metadata || {};
+  metadata.created_at = metadata.created_at || new Date().toISOString();
+  metadata.updated_at = new Date().toISOString();
+
+  return {
+    schedule_id: scheduleId,
+    name,
+    day_types: normalizedDayTypes,
+    metadata,
+    line_id: null,
+    route_name: name,
+    pcName: null,
+    pcId: null,
+    active: 1,
+    updated_at: metadata.updated_at
+  };
+}
+
+/**
+ * Tworzy obiekt rozkładu z wierszy bazy danych.
+ * sequence_json przechowuje obiekt: { outbound: [...], inbound: [...] }
+ */
+function scheduleFromRows(rows) {
+  if (!rows || rows.length === 0) return null;
+
+  const first = rows[0];
+  const baseId = jsonParse(first.metadata, {}).schedule_id || String(first.id).split(':')[0];
+  const name = first.route_name || '';
+
+  const dayTypes = {};
+  for (const row of rows) {
+    const dayType = row.day_type;
+    if (!DAY_TYPES.includes(dayType)) continue;
+    let sequence = {};
+    try {
+      const parsed = JSON.parse(row.sequence_json || '{}');
+      // Jeśli to stary format (tablica), konwertujemy na obiekt z outbound
+      if (Array.isArray(parsed)) {
+        sequence = { outbound: parsed, inbound: [] };
+      } else if (typeof parsed === 'object' && parsed !== null) {
+        sequence = {
+          outbound: Array.isArray(parsed.outbound) ? parsed.outbound : [],
+          inbound: Array.isArray(parsed.inbound) ? parsed.inbound : []
+        };
+      } else {
+        sequence = { outbound: [], inbound: [] };
+      }
+    } catch (_) {
+      sequence = { outbound: [], inbound: [] };
+    }
+    dayTypes[dayType] = sequence;
+  }
+
+  // Uzupełnij brakujące typy dni
+  for (const dayType of DAY_TYPES) {
+    if (!dayTypes[dayType]) {
+      dayTypes[dayType] = { outbound: [], inbound: [] };
+    }
+  }
+
+  // POPRAWA: zwracamy pole 'schedule_id' zamiast 'id', aby było zgodne z frontendem
+  return {
+    schedule_id: baseId,  // <-- zmiana
+    name,
+    day_types: dayTypes,
+    metadata: jsonParse(first.metadata, {}),
+    created_at: jsonParse(first.metadata, {}).created_at || first.updated_at,
+    updated_at: first.updated_at
+  };
+}
+
+/**
+ * Znajduje wszystkie wiersze rozkładu dla danego baseId.
+ */
+function findScheduleRowsByBaseId(baseId) {
+  return db.connection.prepare('SELECT * FROM schedules WHERE id LIKE ?').all(`${baseId}:%`);
+}
+
+/**
+ * Zapisuje rozkład (dla każdego dnia i każdego kierunku).
+ * sequence_json to obiekt { outbound: [...], inbound: [...] }.
+ */
+function saveSchedule(schedule) {
+  const conn = db.connection;
+  const insert = conn.prepare(`
+    INSERT INTO schedules(
+      id, line_id, route_name, day_type, sequence_json,
+      metadata, pcName, pcId, active, updated_at
+    ) VALUES(
+      @id, @line_id, @route_name, @day_type, @sequence_json,
+      @metadata, @pcName, @pcId, @active, @updated_at
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      line_id = excluded.line_id,
+      route_name = excluded.route_name,
+      day_type = excluded.day_type,
+      sequence_json = excluded.sequence_json,
+      metadata = excluded.metadata,
+      pcName = excluded.pcName,
+      pcId = excluded.pcId,
+      active = excluded.active,
+      updated_at = excluded.updated_at
+  `);
+
+  const tx = conn.transaction(() => {
+    // Usuwamy stare wiersze dla tego schedule_id
+    conn.prepare('DELETE FROM schedules WHERE id LIKE ?').run(`${schedule.schedule_id}:%`);
+
+    // Zapisujemy dla każdego typu dnia
+    for (const dayType of DAY_TYPES) {
+      const dirs = schedule.day_types[dayType] || { outbound: [], inbound: [] };
+      // Upewniamy się, że oba kierunki istnieją
+      const outbound = Array.isArray(dirs.outbound) ? dirs.outbound : [];
+      const inbound = Array.isArray(dirs.inbound) ? dirs.inbound : [];
+      const sequenceObj = { outbound, inbound };
+
+      insert.run({
+        id: `${schedule.schedule_id}:${dayType}`,
+        line_id: null,
+        route_name: schedule.name,
+        day_type: dayType,
+        sequence_json: JSON.stringify(sequenceObj),
+        metadata: JSON.stringify({
+          ...schedule.metadata,
+          day_type: dayType,
+          schedule_id: schedule.schedule_id
+        }),
+        pcName: null,
+        pcId: null,
+        active: 1,
+        updated_at: schedule.updated_at
+      });
+    }
+  });
+
+  tx();
+}
+
+// ---------- NOWY ENDPOINT: KOPIOWANIE KIERUNKU ----------
+async function handleCopyDirection(req, res, scheduleId) {
+  const body = await readJsonBody(req);
+  const source = requiredString(body.source, 'source');
+  const target = requiredString(body.target, 'target');
+  const reverse = body.reverse === true || body.reverse === 'true';
+
+  if (!DIRECTIONS.includes(source)) {
+    throw new Error(`Nieprawidłowy kierunek źródłowy: ${source}. Dozwolone: ${DIRECTIONS.join(', ')}`);
+  }
+  if (!DIRECTIONS.includes(target)) {
+    throw new Error(`Nieprawidłowy kierunek docelowy: ${target}. Dozwolone: ${DIRECTIONS.join(', ')}`);
+  }
+  if (source === target) {
+    throw new Error('Kierunek źródłowy i docelowy muszą być różne.');
+  }
+
+  // Pobierz istniejący rozkład
+  const existing = scheduleFromRows(findScheduleRowsByBaseId(scheduleId));
+  if (!existing) {
+    throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  }
+
+  // Dla każdego typu dnia skopiuj listę z source do target (opcjonalnie odwracając)
+  const updatedDayTypes = {};
+  for (const dayType of DAY_TYPES) {
+    const dirs = existing.day_types[dayType] || { outbound: [], inbound: [] };
+    const sourceList = dirs[source] || [];
+    let targetList = sourceList.slice(); // kopia
+    if (reverse) {
+      targetList = targetList.slice().reverse();
+    }
+    // Budujemy nowy obiekt dla tego dnia
+    const newDirs = {
+      outbound: dirs.outbound,
+      inbound: dirs.inbound
+    };
+    newDirs[target] = targetList;
+    updatedDayTypes[dayType] = newDirs;
+  }
+
+  // Przygotuj zaktualizowany rozkład
+  const updatedSchedule = {
+    schedule_id: existing.schedule_id,  // POPRAWA: używamy schedule_id
+    name: existing.name,
+    day_types: updatedDayTypes,
+    metadata: {
+      ...existing.metadata,
+      updated_at: new Date().toISOString()
+    },
+    updated_at: new Date().toISOString()
+  };
+
+  // Zapisz
+  saveSchedule(updatedSchedule);
+
+  // Zwróć zaktualizowany rozkład
+  const saved = scheduleFromRows(findScheduleRowsByBaseId(scheduleId));
+  sendJson(res, 200, {
+    ok: true,
+    message: `Skopiowano kierunek ${source} -> ${target}${reverse ? ' (odwrócono)' : ''}`,
+    schedule: saved
+  });
+}
+
+// ---------- POZOSTAŁE HANDLERY (stops, vehicles, holidays, trips, reports) ----------
+// (reszta bez zmian, ale dla kompletności zamieszczam cały plik)
+
 async function handleApiIp(req, res) {
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   const ips = getLocalIPs();
@@ -77,7 +337,6 @@ async function handleIncomingData(req, res) {
   const payload = await readJsonBody(req);
   console.log('[handleIncomingData] Otrzymano payload z Isarsoft. Rozmiar:', JSON.stringify(payload).length);
 
-  // --- Zapisujemy ostatni payload w pamięci (cache) ---
   latestIsarsoftData = payload;
   console.log('[handleIncomingData] Zapisano w cache. Czy dane mają applications?', !!payload?.applications);
 
@@ -136,7 +395,8 @@ async function handleIncomingData(req, res) {
   });
 }
 
-// ---------- NOWY ENDPOINT: pobranie ostatnich danych Isarsoft ----------
+let latestIsarsoftData = null;
+
 async function handleGetIsarsoftLatest(req, res) {
   console.log('[handleGetIsarsoftLatest] Wywołano endpoint, latestIsarsoftData:', !!latestIsarsoftData);
   if (!latestIsarsoftData) {
@@ -147,7 +407,6 @@ async function handleGetIsarsoftLatest(req, res) {
     });
     return;
   }
-  // Logujemy kilka pól, aby potwierdzić strukturę
   console.log('[handleGetIsarsoftLatest] applications:', latestIsarsoftData.applications?.length);
   console.log('[handleGetIsarsoftLatest] lines:', latestIsarsoftData.lines?.length);
   console.log('[handleGetIsarsoftLatest] areas:', latestIsarsoftData.areas?.length);
@@ -159,6 +418,7 @@ async function handleGetIsarsoftLatest(req, res) {
   });
 }
 
+// ---------- HANDLERY PRZYSTANKÓW ----------
 async function handleCreateStop(req, res) {
   const body = await readJsonBody(req);
   const stop = normalizeStop(body);
@@ -262,97 +522,10 @@ async function handleDeleteStop(req, res, stopId) {
   sendJson(res, 200, { ok: true, message: 'Stop deleted', deletedCount: info.changes });
 }
 
-function saveSchedule(schedule) {
-  const conn = db.connection;
-  const insert = conn.prepare(`
-    INSERT INTO schedules(id, line_id, route_name, day_type, sequence_json, metadata, pcName, pcId, active, updated_at)
-    VALUES(@id, @line_id, @route_name, @day_type, @sequence_json, @metadata, @pcName, @pcId, @active, @updated_at)
-    ON CONFLICT(id) DO UPDATE SET
-      line_id = excluded.line_id,
-      route_name = excluded.route_name,
-      day_type = excluded.day_type,
-      sequence_json = excluded.sequence_json,
-      metadata = excluded.metadata,
-      pcName = excluded.pcName,
-      pcId = excluded.pcId,
-      active = excluded.active,
-      updated_at = excluded.updated_at
-  `);
-
-  const tx = conn.transaction(() => {
-    conn.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(schedule.schedule_id, `${schedule.schedule_id}:%`);
-
-    for (const dayType of DAY_TYPES) {
-      const meta = {
-        ...schedule.metadata,
-        day_type: dayType
-      };
-
-      insert.run({
-        id: `${schedule.schedule_id}:${dayType}`,
-        line_id: schedule.line_id,
-        route_name: schedule.route_name,
-        day_type: dayType,
-        sequence_json: jsonStringify(schedule.day_types[dayType].stops_sequence),
-        metadata: jsonStringify(meta),
-        pcName: schedule.pcName,
-        pcId: schedule.pcId,
-        active: schedule.metadata.active ? 1 : 0,
-        updated_at: schedule.metadata.updated_at
-      });
-    }
-
-    const existingVehicle = conn.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(schedule.pcName);
-    const existingMetadata = existingVehicle ? jsonParse(existingVehicle.metadata, {}) : {};
-
-    conn.prepare(`
-      INSERT INTO vehicles(pcName, pcId, last_lat, last_lng, first_seen, last_seen, metadata)
-      VALUES(@pcName, @pcId, @last_lat, @last_lng, @first_seen, @last_seen, @metadata)
-      ON CONFLICT(pcName) DO UPDATE SET
-        pcId = CASE WHEN excluded.pcId <> '' THEN excluded.pcId ELSE vehicles.pcId END,
-        metadata = excluded.metadata
-    `).run({
-      pcName: schedule.pcName,
-      pcId: schedule.pcId || '',
-      last_lat: existingVehicle ? existingVehicle.last_lat : null,
-      last_lng: existingVehicle ? existingVehicle.last_lng : null,
-      first_seen: existingVehicle ? existingVehicle.first_seen : null,
-      last_seen: existingVehicle ? existingVehicle.last_seen : null,
-      metadata: jsonStringify({
-        ...existingMetadata,
-        has_schedule: true,
-        schedule_id: schedule.schedule_id,
-        line_id: schedule.line_id,
-        line_number: schedule.metadata.line_number,
-        brigade: schedule.metadata.brigade,
-        updated_at: schedule.metadata.updated_at
-      })
-    });
-  });
-
-  tx();
-}
-
+// ---------- HANDLERY ROZKŁADÓW ----------
 async function handleCreateSchedule(req, res) {
   const body = await readJsonBody(req);
   const normalized = normalizeSchedulePayload(body);
-
-  if (body.replace_existing !== false) {
-    const existingRows = db.connection.prepare(`
-      SELECT id
-      FROM schedules
-      WHERE line_id = @lineId
-        AND pcName = @pcName
-    `).all({ lineId: normalized.line_id, pcName: normalized.pcName });
-
-    for (const row of existingRows) {
-      const baseId = String(row.id).split(':')[0];
-      if (baseId !== normalized.schedule_id) {
-        db.connection.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(baseId, `${baseId}:%`);
-      }
-    }
-  }
-
   saveSchedule(normalized);
 
   sendJson(res, 201, {
@@ -366,31 +539,24 @@ async function handleGetSchedules(req, res, query) {
   const clauses = [];
   const params = {};
 
-  const pcName = optionalString(query.pcName || query.pc_name, '');
-  const lineId = optionalString(query.line_id || query.lineId || query.line, '');
+  const id = optionalString(query.id, '');
+  const name = optionalString(query.name || query.q, '');
   const dayType = optionalString(query.day_type || query.dayType, '');
-  const active = optionalString(query.active, '');
 
-  if (pcName) {
-    clauses.push('pcName = @pcName');
-    params.pcName = pcName;
+  if (id) {
+    clauses.push('id LIKE @idPattern');
+    params.idPattern = `${id}:%`;
   }
-
-  if (lineId) {
-    clauses.push('line_id = @lineId');
-    params.lineId = lineId;
+  if (name) {
+    clauses.push('route_name LIKE @name');
+    params.name = `%${name}%`;
   }
-
   if (dayType) {
     clauses.push('day_type = @dayType');
     params.dayType = dayType;
   }
 
-  if (active === 'true' || active === '1') {
-    clauses.push('active = 1');
-  } else if (active === 'false' || active === '0') {
-    clauses.push('active = 0');
-  }
+  clauses.push('active = 1');
 
   const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const rows = db.connection.prepare(`
@@ -409,7 +575,8 @@ async function handleGetSchedules(req, res, query) {
 
   const schedules = [];
   for (const groupRows of grouped.values()) {
-    schedules.push(scheduleFromRows(groupRows));
+    const sched = scheduleFromRows(groupRows);
+    if (sched) schedules.push(sched);
   }
 
   sendJson(res, 200, {
@@ -431,14 +598,12 @@ async function handleUpdateSchedule(req, res, scheduleId) {
   if (!existing) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
 
   const body = await readJsonBody(req);
-  const updatedSchedule = normalizeSchedulePayload({
-    ...body,
-    schedule_id: scheduleId,
-    id: scheduleId,
-    created_at: existing.created_at || body.created_at
-  }, scheduleId);
+  const updated = normalizeSchedulePayload(body, scheduleId);
+  updated.metadata.created_at = existing.metadata.created_at || updated.metadata.created_at;
+  updated.metadata.updated_at = new Date().toISOString();
+  updated.updated_at = updated.metadata.updated_at;
 
-  saveSchedule(updatedSchedule);
+  saveSchedule(updated);
 
   sendJson(res, 200, {
     ok: true,
@@ -448,12 +613,99 @@ async function handleUpdateSchedule(req, res, scheduleId) {
 }
 
 async function handleDeleteSchedule(req, res, scheduleId) {
-  const info = db.connection.prepare('DELETE FROM schedules WHERE id = ? OR id LIKE ?').run(scheduleId, `${scheduleId}:%`);
+  const info = db.connection.prepare('DELETE FROM schedules WHERE id LIKE ?').run(`${scheduleId}:%`);
   if (info.changes === 0) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
 
   sendJson(res, 200, { ok: true, message: 'Schedule deleted', deletedCount: info.changes });
 }
 
+// ---------- HANDLERY POJAZDÓW ----------
+async function handleUpdateVehicle(req, res, pcName) {
+  const body = await readJsonBody(req);
+  const scheduleId = optionalString(body.schedule_id, '');
+
+  const vehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
+  if (!vehicle) {
+    throw new Error(`Nie znaleziono pojazdu o pcName: ${pcName}`);
+  }
+
+  if (scheduleId) {
+    const scheduleRows = findScheduleRowsByBaseId(scheduleId);
+    if (scheduleRows.length === 0) {
+      throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+    }
+  }
+
+  const existingMetadata = jsonParse(vehicle.metadata, {});
+  existingMetadata.schedule_id = scheduleId || null;
+  existingMetadata.updated_at = new Date().toISOString();
+
+  db.connection.prepare(`
+    UPDATE vehicles
+    SET metadata = @metadata
+    WHERE pcName = @pcName
+  `).run({
+    pcName,
+    metadata: jsonStringify(existingMetadata)
+  });
+
+  const updatedVehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
+  sendJson(res, 200, {
+    ok: true,
+    message: 'Vehicle schedule updated',
+    vehicle: {
+      pcName: updatedVehicle.pcName,
+      pcId: updatedVehicle.pcId || '',
+      schedule_id: existingMetadata.schedule_id || null,
+      metadata: existingMetadata
+    }
+  });
+}
+
+async function handleVehicles(req, res) {
+  const rows = db.connection.prepare(`
+    SELECT
+      v.*,
+      cs.line_id AS status_line_id,
+      cs.status AS status,
+      cs.punctuality_status AS punctuality_status,
+      cs.updated_at AS status_updated_at
+    FROM vehicles v
+    LEFT JOIN current_status cs ON cs.pcName = v.pcName
+    ORDER BY v.pcName COLLATE NOCASE
+  `).all();
+
+  const vehicles = [];
+
+  for (const row of rows) {
+    const metadata = jsonParse(row.metadata, {});
+
+    vehicles.push({
+      pcName: row.pcName,
+      pcId: row.pcId || '',
+      first_seen_at: row.first_seen,
+      last_seen_at: row.last_seen,
+      last_latitude: row.last_lat,
+      last_longitude: row.last_lng,
+      has_schedule: Boolean(metadata.has_schedule),
+      schedule_id: metadata.schedule_id || null,
+      line_id: metadata.line_id || row.status_line_id || null,
+      line_number: metadata.line_number || null,
+      brigade: metadata.brigade || '',
+      status: row.status || null,
+      punctuality_status: row.punctuality_status || null,
+      status_updated_at: row.status_updated_at || null
+    });
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    count: vehicles.length,
+    vehicles
+  });
+}
+
+// ---------- POZOSTAŁE HANDLERY (holidays, trips, reports) ----------
 async function handleCreateHoliday(req, res) {
   const body = await readJsonBody(req);
   const date = requiredString(body.date, 'date');
@@ -941,49 +1193,6 @@ async function handleAdminZoneReport(req, res, query) {
   sendJson(res, 200, reportResponse(query, reportRows));
 }
 
-async function handleVehicles(req, res) {
-  const rows = db.connection.prepare(`
-    SELECT
-      v.*,
-      cs.line_id AS status_line_id,
-      cs.status AS status,
-      cs.punctuality_status AS punctuality_status,
-      cs.updated_at AS status_updated_at
-    FROM vehicles v
-    LEFT JOIN current_status cs ON cs.pcName = v.pcName
-    ORDER BY v.pcName COLLATE NOCASE
-  `).all();
-
-  const vehicles = [];
-
-  for (const row of rows) {
-    const metadata = jsonParse(row.metadata, {});
-
-    vehicles.push({
-      pcName: row.pcName,
-      pcId: row.pcId || '',
-      first_seen_at: row.first_seen,
-      last_seen_at: row.last_seen,
-      last_latitude: row.last_lat,
-      last_longitude: row.last_lng,
-      has_schedule: Boolean(metadata.has_schedule),
-      schedule_id: metadata.schedule_id || null,
-      line_id: metadata.line_id || row.status_line_id || null,
-      line_number: metadata.line_number || null,
-      brigade: metadata.brigade || '',
-      status: row.status || null,
-      punctuality_status: row.punctuality_status || null,
-      status_updated_at: row.status_updated_at || null
-    });
-  }
-
-  sendJson(res, 200, {
-    ok: true,
-    count: vehicles.length,
-    vehicles
-  });
-}
-
 async function handleSettings(req, res) {
   const rows = db.connection.prepare('SELECT key, value FROM settings ORDER BY key').all();
   const settings = {};
@@ -1017,12 +1226,14 @@ async function handleRoot(req, res) {
       getSchedule: 'GET /schedules/:id',
       updateSchedule: 'PUT /schedules/:id',
       deleteSchedule: 'DELETE /schedules/:id',
+      copyDirection: 'POST /schedules/:id/copy-direction',
       createHoliday: 'POST /holidays',
       listHolidays: 'GET /holidays',
       deleteHoliday: 'DELETE /holidays/:date',
       getTrips: 'GET /trips?page=1&limit=100&pcName=...&line_id=...&stop_id=...&start=...&end=...',
       deleteTrips: 'DELETE /trips?all=true lub ?before=YYYY-MM-DD',
       vehicles: 'GET /vehicles',
+      updateVehicle: 'PUT /vehicles/:pcName',
       settings: 'GET /settings',
       currentTrip: 'GET /reports/trip/current',
       stopUsage: 'GET /reports/stop-usage',
@@ -1060,10 +1271,22 @@ async function routeRequest(req, res) {
     if (req.method === 'GET' && pathname === '/') return await handleRoot(req, res);
     if (req.method === 'GET' && pathname === '/api/ip') return await handleApiIp(req, res);
     if (req.method === 'POST' && pathname === '/api/data') return await handleIncomingData(req, res);
+    if (req.method === 'GET' && pathname === '/api/isarsoft/latest') return await handleGetIsarsoftLatest(req, res);
 
-    // NOWY ENDPOINT
-    if (req.method === 'GET' && pathname === '/api/isarsoft/latest') {
-      return await handleGetIsarsoftLatest(req, res);
+    // NOWY ENDPOINT: kopiowanie kierunku
+    if (pathname.startsWith('/schedules/') && pathname.endsWith('/copy-direction')) {
+      const scheduleId = decodeURIComponent(pathname.substring('/schedules/'.length, pathname.length - '/copy-direction'.length));
+      if (!scheduleId) throw new Error('Brak ID rozkładu');
+      if (req.method === 'POST') return await handleCopyDirection(req, res, scheduleId);
+      throw new Error('Metoda nieobsługiwana dla /schedules/:id/copy-direction');
+    }
+
+    // Obsługa /vehicles/:pcName (PUT)
+    if (pathname.startsWith('/vehicles/') && pathname !== '/vehicles') {
+      const pcName = decodeURIComponent(pathname.substring('/vehicles/'.length));
+      if (!pcName) throw new Error('Brak nazwy pojazdu');
+      if (req.method === 'PUT') return await handleUpdateVehicle(req, res, pcName);
+      throw new Error('Metoda nieobsługiwana dla /vehicles/:pcName');
     }
 
     if (pathname.startsWith('/stops/') && pathname !== '/stops') {
