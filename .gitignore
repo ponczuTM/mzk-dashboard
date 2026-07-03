@@ -1,5 +1,2 @@
-database.json
-./database.json
-/database.json
-/mzk-dashboard-be/database.json
-./mzk-dashboard-be/database.json
+# Ignoruj lokalną bazę danych backendu
+mzk-dashboard-be-server/database/
