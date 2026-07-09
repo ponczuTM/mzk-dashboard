@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { useBackend } from '../context/BackendContext';
 import {
@@ -398,74 +399,7 @@ const Schedule = () => {
     });
   };
 
-  // --- NOWA FUNKCJA: Kopiowanie kierunku dla bieżącego dnia ---
-  const copyDirectionForCurrentDay = (sourceDir, targetDir, reverse = false) => {
-    if (sourceDir === targetDir) {
-      window.alert('Kierunek źródłowy i docelowy muszą być różne.');
-      return;
-    }
-
-    setScheduleForm((prev) => {
-      const dayData = prev.day_types[selectedDayType];
-      if (!dayData) return prev;
-
-      const sourceList = dayData[sourceDir] || [];
-      let targetList = sourceList.map((item) => ({
-        ...item,
-        planned_time: normalizeTime(item.planned_time),
-      }));
-
-      if (reverse) {
-        targetList = targetList.slice().reverse();
-      }
-
-      // Tworzymy nowy obiekt dla dnia
-      const newDayData = {
-        ...dayData,
-        [targetDir]: targetList,
-      };
-
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDayData,
-        },
-      };
-    });
-  };
-
-  // --- ODWRÓC KOLEJNOŚĆ dla bieżącego kierunku ---
-  const reverseCurrentDirection = () => {
-    setScheduleForm((prev) => {
-      const dayData = prev.day_types[selectedDayType];
-      if (!dayData) return prev;
-
-      const currentList = dayData[selectedDirection] || [];
-      const reversed = currentList
-        .slice()
-        .reverse()
-        .map((item) => ({
-          ...item,
-          planned_time: normalizeTime(item.planned_time),
-        }));
-
-      const newDayData = {
-        ...dayData,
-        [selectedDirection]: reversed,
-      };
-
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDayData,
-        },
-      };
-    });
-  };
-
-  // --- STARA FUNKCJA (pozostawiona dla kompatybilności) ---
+  // Kopiowanie kierunku (lokalne)
   const handleCopyDirection = () => {
     const source = window.prompt(
       `Podaj kierunek źródłowy (outbound lub inbound) do skopiowania:`,
@@ -774,61 +708,12 @@ const Schedule = () => {
                   ))}
                 </div>
 
-                {/* NOWE PRZYCISKI KOPIOWANIA DLA BIEŻĄCEGO DNIA */}
-                <div className={styles.copyRow}>
-                  <div className={styles.copyButtonGroup}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('outbound', 'inbound', false)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Tam → Z powrotem
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('outbound', 'inbound', true)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Tam → Z powrotem (odwróć)
-                    </button>
-                  </div>
-                  <div className={styles.copyButtonGroup}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('inbound', 'outbound', false)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Z powrotem → Tam
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('inbound', 'outbound', true)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Z powrotem → Tam (odwróć)
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    className={styles.secondaryButton}
-                    onClick={reverseCurrentDirection}
-                  >
-                    <ArrowUpDown className={styles.buttonIcon} />
-                    Odwróć kolejność (bieżący kierunek)
-                  </button>
-                </div>
-
-                {/* Stary przycisk kopiowania (z promptami) – można zostawić jako opcję uniwersalną */}
                 <div className={styles.copyRow}>
                   <button type="button" className={styles.secondaryButton} onClick={handleCopyDirection}>
                     <Copy className={styles.buttonIcon} />
-                    Kopiuj z innego kierunku (wszystkie dni)
+                    Kopiuj z innego kierunku
                   </button>
-                  <span className={styles.copyHint}>Skopiuj sekwencję z wybranego kierunku (z opcją odwrócenia) dla WSZYSTKICH dni</span>
+                  <span className={styles.copyHint}>Skopiuj sekwencję z wybranego kierunku (z opcją odwrócenia)</span>
                 </div>
 
                 {/* Sekwencja */}

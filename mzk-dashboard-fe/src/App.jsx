@@ -6,13 +6,14 @@ import Cameras from './pages/Cameras';
 import Schedule from './pages/Schedule';
 import Vehicles from './pages/Vehicles';
 import Statistics from './pages/Statistics';
+import Portfolio from './pages/Portfolio';
 import { BackendProvider } from './context/BackendContext';
 
 function App() {
   return (
     <BackendProvider>
       <div className="app">
-        <Navbar />
+        {/* <Navbar /> */}
         <div className="container">
           <Routes>
             <Route path="/" element={<Dashboard />} />
@@ -20,6 +21,7 @@ function App() {
             <Route path="/schedule" element={<Schedule />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/statistics" element={<Statistics />} />
+            <Route path="/portfolio" element={<Portfolio />} />
           </Routes>
         </div>
       </div>
