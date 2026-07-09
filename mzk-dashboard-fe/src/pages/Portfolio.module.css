@@ -3,13 +3,15 @@
    ========================================== */
    :root {
     --bg-deep: #050505;
-    --bg-card: #0d0d0d;
+    --bg-card: rgba(13, 13, 13, 0.15);
     --accent-cyan: #00f3ff;
     --accent-purple: #9d4edd;
     --text-pure: #ffffff;
-    --text-dim: #888888;
-    --glass-border: rgba(255, 255, 255, 0.04);
+    --text-dim: #aaaaaa;
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-blur: blur(3px);
     --font-mono: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+    --text-shadow: 0 2px 20px rgba(0, 0, 0, 0.8);
   }
   
   .appContainer {
@@ -66,7 +68,7 @@
     position: fixed;
     top: 24px;
     right: 24px;
-    background: rgba(13, 13, 13, 0.8);
+    background: rgba(13, 13, 13, 0.6);
     border: 1px solid var(--glass-border);
     padding: 8px 16px;
     border-radius: 4px;
@@ -74,7 +76,7 @@
     align-items: center;
     gap: 10px;
     z-index: 999;
-    backdrop-filter: blur(12px);
+    backdrop-filter: var(--glass-blur);
   }
   
   .tickerPulse {
@@ -110,8 +112,8 @@
   }
   
   .glassContainer {
-    background: rgba(13, 13, 13, 0.55);
-    backdrop-filter: blur(20px);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: 12px;
     padding: 48px;
@@ -129,25 +131,28 @@
   }
   
   .giantTitle {
-    font-size: clamp(3rem, 7vw, 7.5rem);
+    font-size: clamp(3.5rem, 8vw, 8rem);
     font-weight: 900;
     letter-spacing: -2px;
     line-height: 0.95;
     margin: 0 0 24px 0;
+    text-shadow: var(--text-shadow);
   }
   
   .gradientText {
     background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
+    text-shadow: none;
   }
   
   .roleSubtext {
     font-family: var(--font-mono);
-    font-size: clamp(0.9rem, 2vw, 1.2rem);
+    font-size: clamp(1rem, 2.2vw, 1.4rem);
     letter-spacing: 4px;
     color: var(--text-pure);
     margin-bottom: 16px;
+    text-shadow: var(--text-shadow);
   }
   
   .glowingBar {
@@ -158,11 +163,12 @@
   }
   
   .abstractDescription {
-    font-size: 1.2rem;
+    font-size: 1.4rem;
     color: var(--text-dim);
     max-width: 600px;
-    line-height: 1.6;
+    line-height: 1.8;
     margin-bottom: 40px;
+    text-shadow: var(--text-shadow);
   }
   
   .premiumCTA {
@@ -171,7 +177,7 @@
     color: var(--text-pure);
     padding: 16px 32px;
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 14px;
     letter-spacing: 2px;
     border-radius: 4px;
     display: inline-flex;
@@ -179,6 +185,7 @@
     gap: 12px;
     transition: all 0.4s ease;
     box-shadow: 0 0 15px rgba(0, 243, 255, 0.1);
+    backdrop-filter: var(--glass-blur);
   }
   
   .premiumCTA:hover {
@@ -188,24 +195,26 @@
   }
   
   .ctaIcon {
-    font-size: 16px;
+    font-size: 18px;
   }
   
   /* Universal Generic Section Elements */
   .sectionTag {
     font-family: var(--font-mono);
     color: var(--accent-cyan);
-    font-size: 12px;
+    font-size: 14px;
     letter-spacing: 3px;
     display: block;
     margin-bottom: 12px;
+    text-shadow: 0 0 20px rgba(0, 243, 255, 0.3);
   }
   
   .sectionHeader {
-    font-size: clamp(2rem, 4vw, 3.5rem);
+    font-size: clamp(2.5rem, 5vw, 4rem);
     font-weight: 800;
     letter-spacing: -1px;
     margin: 0 0 40px 0;
+    text-shadow: var(--text-shadow);
   }
   
   /* About Layout Configurations */
@@ -217,15 +226,16 @@
   }
   
   .terminalParagraph p {
-    font-size: 1.15rem;
-    line-height: 1.7;
+    font-size: 1.3rem;
+    line-height: 1.8;
     color: var(--text-pure);
     margin-bottom: 24px;
+    text-shadow: var(--text-shadow);
   }
   
   .terminalParagraph .secondaryBioText {
     color: var(--text-dim);
-    font-size: 1.05rem;
+    font-size: 1.15rem;
   }
   
   /* Interactive Hardware Object Displayer Engine */
@@ -237,11 +247,12 @@
   .revealCoreFrame {
     width: 100%;
     aspect-ratio: 1;
-    background: rgba(255,255,255,0.01);
-    border: 1px dashed rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px;
     position: relative;
     overflow: hidden;
+    backdrop-filter: var(--glass-blur);
   }
   
   .revealHoverObject {
@@ -256,14 +267,15 @@
   }
   
   .revealHardwareIcon {
-    font-size: 64px;
+    font-size: 72px;
     color: var(--accent-cyan);
     transition: transform 0.6s ease;
+    text-shadow: 0 0 30px rgba(0, 243, 255, 0.3);
   }
   
   .revealObjectOverlay {
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 12px;
     letter-spacing: 1px;
     color: var(--text-dim);
     margin-top: 16px;
@@ -272,7 +284,8 @@
   .hiddenHardwarePayload {
     position: absolute;
     top: 0; left: 0; width: 100%; height: 100%;
-    background: var(--bg-card);
+    background: rgba(13, 13, 13, 0.85);
+    backdrop-filter: var(--glass-blur);
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -284,8 +297,10 @@
   
   .hiddenHardwarePayload h4 {
     font-family: var(--font-mono);
+    font-size: 1.2rem;
     color: var(--accent-cyan);
     margin-bottom: 16px;
+    text-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
   }
   
   .hiddenHardwarePayload ul {
@@ -295,7 +310,7 @@
   
   .hiddenHardwarePayload li {
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 15px;
     color: var(--text-dim);
     margin-bottom: 10px;
   }
@@ -316,7 +331,9 @@
   }
   
   .hologramArtifactCard {
-    background: rgba(255,255,255,0.01);
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: 6px;
     padding: 32px;
@@ -326,28 +343,30 @@
   }
   
   .hologramArtifactCard:hover {
-    background: rgba(255,255,255,0.03);
+    background: rgba(255, 255, 255, 0.06);
     border-color: var(--accent-cyan);
     transform: translateY(-4px);
-    box-shadow: 0 10px 30px rgba(0, 243, 255, 0.05);
+    box-shadow: 0 10px 30px rgba(0, 243, 255, 0.1);
   }
   
   .hologramIconWrapper {
-    font-size: 28px;
+    font-size: 32px;
     color: var(--accent-cyan);
     margin-bottom: 20px;
+    text-shadow: 0 0 25px rgba(0, 243, 255, 0.2);
   }
   
   .artifactName {
-    font-size: 1.3rem;
+    font-size: 1.5rem;
     font-weight: 700;
     margin: 0 0 12px 0;
+    text-shadow: var(--text-shadow);
   }
   
   .artifactDesc {
-    font-size: 0.95rem;
+    font-size: 1.05rem;
     color: var(--text-dim);
-    line-height: 1.5;
+    line-height: 1.6;
     margin: 0;
   }
   
@@ -400,7 +419,9 @@
   }
   
   .checkpointBlock {
-    background: rgba(255,255,255,0.01);
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: 6px;
     padding: 28px;
@@ -416,19 +437,21 @@
   }
   
   .checkpointCompany {
-    font-size: 1.4rem;
+    font-size: 1.6rem;
     font-weight: 700;
     margin: 0;
+    text-shadow: var(--text-shadow);
   }
   
   .checkpointTimestamp {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 14px;
     color: var(--accent-cyan);
+    text-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
   }
   
   .checkpointRole {
-    font-size: 1rem;
+    font-size: 1.15rem;
     color: var(--text-dim);
     margin: 0 0 16px 0;
   }
@@ -439,9 +462,9 @@
   }
   
   .checkpointDetailsList li {
-    font-size: 0.95rem;
+    font-size: 1.05rem;
     color: var(--text-dim);
-    line-height: 1.6;
+    line-height: 1.7;
     margin-bottom: 8px;
   }
   
@@ -462,12 +485,14 @@
     display: flex;
     justify-content: space-between;
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 15px;
     letter-spacing: 1px;
+    text-shadow: var(--text-shadow);
   }
   
   .reactorMetricPct {
     color: var(--accent-cyan);
+    text-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
   }
   
   .reactorEnergyMeterTrack {
@@ -491,30 +516,33 @@
   }
   
   .premiumTiltCard {
-    background: var(--bg-card);
+    background: rgba(13, 13, 13, 0.12);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
     border-radius: 8px;
     overflow: hidden;
-    transition: border-color 0.4s ease, box-shadow 0.4s ease;
+    transition: border-color 0.4s ease, box-shadow 0.4s ease, background 0.4s ease;
   }
   
   .premiumTiltCard:hover {
+    background: rgba(13, 13, 13, 0.2);
     border-color: var(--accent-purple);
-    box-shadow: 0 15px 40px rgba(157, 78, 221, 0.15);
+    box-shadow: 0 15px 40px rgba(157, 78, 221, 0.2);
   }
   
   .cardImageTrack {
     width: 100%;
     aspect-ratio: 16/10;
     position: relative;
-    background: #151515;
+    background: rgba(21, 21, 21, 0.3);
     overflow: hidden;
   }
   
   .fallbackVisualMatrix {
     position: absolute;
     width: 100%; height: 100%;
-    background: linear-gradient(45deg, #111, #1a1a1a);
+    background: linear-gradient(45deg, rgba(17, 17, 17, 0.3), rgba(26, 26, 26, 0.3));
     opacity: 1;
   }
   
@@ -532,19 +560,20 @@
   }
   
   .cardDetailsTray {
-    padding: 24px;
+    padding: 28px;
   }
   
   .projectCardTitle {
-    font-size: 1.25rem;
+    font-size: 1.5rem;
     font-weight: 700;
     margin: 0 0 8px 0;
     letter-spacing: -0.5px;
+    text-shadow: var(--text-shadow);
   }
   
   .projectCardType {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     color: var(--text-dim);
     margin: 0;
     text-transform: uppercase;
@@ -564,11 +593,12 @@
   }
   
   .hugeContactHeader {
-    font-size: clamp(2rem, 5vw, 4.5rem);
+    font-size: clamp(2.5rem, 6vw, 5rem);
     font-weight: 900;
     letter-spacing: -2px;
     line-height: 1.1;
     margin: 0 0 48px 0;
+    text-shadow: var(--text-shadow);
   }
   
   .contactChannelsGrid {
@@ -579,12 +609,14 @@
   }
   
   .channelLinkAnchor {
-    background: rgba(255,255,255,0.01);
+    background: rgba(255,255,255,0.03);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
-    padding: 20px;
+    padding: 24px;
     border-radius: 6px;
     font-family: var(--font-mono);
-    font-size: 14px;
+    font-size: 16px;
     color: var(--text-pure);
     text-decoration: none;
     display: flex;
@@ -592,12 +624,13 @@
     justify-content: center;
     gap: 12px;
     transition: all 0.3s ease;
+    text-shadow: var(--text-shadow);
   }
   
   .channelLinkAnchor:hover {
-    background: rgba(255,255,255,0.03);
+    background: rgba(255,255,255,0.06);
     border-color: var(--accent-cyan);
-    box-shadow: 0 5px 20px rgba(0, 243, 255, 0.1);
+    box-shadow: 0 5px 20px rgba(0, 243, 255, 0.15);
   }
   
   .terminalSignatureCluster {
@@ -606,14 +639,15 @@
   }
   
   .sigTitle {
-    font-size: 1.5rem;
+    font-size: 1.8rem;
     font-weight: 700;
     margin: 0 0 4px 0;
+    text-shadow: var(--text-shadow);
   }
   
   .sigSub {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 14px;
     color: var(--text-dim);
     margin: 0;
   }
@@ -643,13 +677,13 @@
     flex-wrap: wrap;
     gap: 16px;
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 12px;
     letter-spacing: 1px;
     color: var(--text-dim);
   }
   
   .footerTechStackTelemetry {
-    color: rgba(255,255,255,0.2);
+    color: rgba(255,255,255,0.3);
   }
   
   /* ==========================================
