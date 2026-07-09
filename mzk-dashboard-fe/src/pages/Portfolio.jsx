@@ -20,7 +20,7 @@ gsap.registerPlugin(ScrollTrigger);
 
 function ParticleMorphSystem({ activeSection }) {
   const pointsRef = useRef();
-  const count = 3000;
+  const count = 2000;
 
   // Generate distinct target point arrays for structural morphs
   const positions = useMemo(() => {
@@ -269,9 +269,9 @@ export default function Portfolio() {
           <p className={styles.tickerText}>{hackedText}</p>
         </div>
 
-        {/* ==========================================
+        {/* ==
             1. HOME SECTOR
-           ========================================== */}
+           == */}
         <section data-section="home" className={styles.sectionWindow}>
           <div className={styles.centerHero}>
             <div className={styles.heroLayout}>
@@ -309,9 +309,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             2. ABOUT PORTAL SECTOR
-           ========================================== */}
+           == */}
         <section id="about" data-section="about" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <div className={styles.gridSplit}>
@@ -349,9 +349,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             3. TECH STACK MATRIX SECTOR
-           ========================================== */}
+           == */}
         <section data-section="tech" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// CAPABILITY ARCHITECTURE</span>
@@ -379,9 +379,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             4. TIME-LINE HYPER-TUNNEL SECTOR
-           ========================================== */}
+           == */}
         <section data-section="experience" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// CHRONOLOGICAL RUNTIME OPERATION</span>
@@ -432,9 +432,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             5. SKILLS ENERGY REACTING REACTOR
-           ========================================== */}
+           == */}
         <section data-section="experience" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// TELEMETRY REALTIME SYSTEM METRICS</span>
@@ -469,9 +469,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             6. PRODUCT / PROJECT SHOWCASE (TILT CARDS)
-           ========================================== */}
+           == */}
         <section data-section="tech" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// PRODUCTION RELEASES</span>
@@ -503,9 +503,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             7. CONTACT MATRIX TERMINAL (CINEMATIC END)
-           ========================================== */}
+           == */}
         <section data-section="contact" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <div className={styles.contactQuantumLayout}>
@@ -537,9 +537,9 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==========================================
+        {/* ==
             8. MINIMALISTIC FOOTER RUNTIME LAYER
-           ========================================== */}
+           == */}
         <footer className={styles.minimalistFooter}>
           <div className={styles.footerGlowDivider} />
           <div className={styles.footerContentBlock}>

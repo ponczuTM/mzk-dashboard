@@ -34,7 +34,7 @@
     border-radius: 28px;
     isolation: isolate;
     box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
-    cursor: pointer;
+    cursor: none;
     background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
@@ -252,7 +252,7 @@
     box-shadow: 0 0 15px rgba(0, 243, 255, 0.1);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
-    cursor: pointer;
+    cursor: none;
   }
   
   .premiumCTA:hover {
@@ -422,7 +422,7 @@
     border-radius: 28px;
     isolation: isolate;
     box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
-    cursor: pointer;
+    cursor: none;
     background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
@@ -546,7 +546,7 @@
     border-radius: 28px;
     isolation: isolate;
     box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
-    cursor: pointer;
+    cursor: none;
     background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
@@ -690,7 +690,7 @@
     border-radius: 28px;
     isolation: isolate;
     box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
-    cursor: pointer;
+    cursor: none;
     background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
@@ -827,7 +827,7 @@
     border-radius: 28px;
     isolation: isolate;
     box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
-    cursor: pointer;
+    cursor: none;
     background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
