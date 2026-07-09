@@ -1,6 +1,6 @@
-/* ==========================================
+/* ==
    RESET & SYSTEM VARIABLE ARCHITECTURE
-   ========================================== */
+== */
    :root {
     --bg-deep: #050505;
     --bg-card: rgba(13, 13, 13, 0.15);
@@ -24,7 +24,55 @@
     cursor: none; /* Disables generic cursor to inject premium custom element tracking */
   }
   
-  /* Cinematic FX System Layers */
+  /* ==
+     LIQUID GLASS CARD SYSTEM - BASE
+  == */
+  
+  /* Base Liquid Glass Card */
+  .liquid-glass-card {
+    position: relative;
+    border-radius: 28px;
+    isolation: isolate;
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    background: var(--bg-card);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--glass-border);
+    overflow: hidden;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  
+  /* Glass tint and inner shadow */
+  .liquid-glass-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
+  }
+  
+  /* Distortion filter layer */
+  .liquid-glass-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: 28px;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    filter: url(#glass-distortion);
+    -webkit-filter: url(#glass-distortion);
+    isolation: isolate;
+    pointer-events: none;
+  }
+  
+  /* ==
+     CINEMATIC FX SYSTEM LAYERS
+  == */
   .grainOverlay {
     position: fixed;
     top: 0; left: 0; width: 100vw; height: 100vh;
@@ -68,15 +116,17 @@
     position: fixed;
     top: 24px;
     right: 24px;
-    background: rgba(13, 13, 13, 0.6);
+    background: var(--bg-card);
     border: 1px solid var(--glass-border);
     padding: 8px 16px;
-    border-radius: 4px;
+    border-radius: 28px;
     display: flex;
     align-items: center;
     gap: 10px;
     z-index: 999;
     backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
   }
   
   .tickerPulse {
@@ -96,9 +146,9 @@
     margin: 0;
   }
   
-  /* ==========================================
+  /* ==
      LAYOUT WINDOW SECTOR FRAMEWORKS
-     ========================================== */
+  == */
   .sectionWindow {
     min-height: 100vh;
     width: 100vw;
@@ -115,12 +165,27 @@
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
-    border-radius: 12px;
+    border-radius: 28px;
     padding: 48px;
     width: 100%;
     max-width: 1200px;
-    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3), 0 20px 50px rgba(0,0,0,0.5);
     box-sizing: border-box;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background: var(--bg-card);
+  }
+  
+  .glassContainer::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
   }
   
   /* Home Structural Framework */
@@ -179,19 +244,22 @@
     font-family: var(--font-mono);
     font-size: 14px;
     letter-spacing: 2px;
-    border-radius: 4px;
+    border-radius: 28px;
     display: inline-flex;
     align-items: center;
     gap: 12px;
     transition: all 0.4s ease;
     box-shadow: 0 0 15px rgba(0, 243, 255, 0.1);
     backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    cursor: pointer;
   }
   
   .premiumCTA:hover {
     background: var(--accent-cyan);
     color: var(--bg-deep);
     box-shadow: 0 0 25px rgba(0, 243, 255, 0.4);
+    transform: translateY(-2px);
   }
   
   .ctaIcon {
@@ -217,7 +285,9 @@
     text-shadow: var(--text-shadow);
   }
   
-  /* About Layout Configurations */
+  /* ==
+     ABOUT LAYOUT CONFIGURATIONS
+  == */
   .gridSplit {
     display: grid;
     grid-template-columns: 1.2fr 0.8fr;
@@ -247,12 +317,26 @@
   .revealCoreFrame {
     width: 100%;
     aspect-ratio: 1;
-    background: rgba(255,255,255,0.02);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--glass-border);
+    border-radius: 28px;
     position: relative;
     overflow: hidden;
     backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    isolation: isolate;
+  }
+  
+  .revealCoreFrame::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
   }
   
   .revealHoverObject {
@@ -286,6 +370,7 @@
     top: 0; left: 0; width: 100%; height: 100%;
     background: rgba(13, 13, 13, 0.85);
     backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -323,7 +408,9 @@
     transform: rotate(90deg) scale(0.8);
   }
   
-  /* Technology Matrix Grid Artifacts */
+  /* ==
+     TECHNOLOGY MATRIX GRID ARTIFACTS
+  == */
   .matrixArtifactGrid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -331,22 +418,50 @@
   }
   
   .hologramArtifactCard {
-    background: rgba(255, 255, 255, 0.03);
+    position: relative;
+    border-radius: 28px;
+    isolation: isolate;
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
-    border-radius: 6px;
-    padding: 32px;
-    position: relative;
     overflow: hidden;
-    transition: all 0.3s ease;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    padding: 32px;
+  }
+  
+  .hologramArtifactCard::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
+  }
+  
+  .hologramArtifactCard::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: 28px;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    filter: url(#glass-distortion);
+    -webkit-filter: url(#glass-distortion);
+    isolation: isolate;
+    pointer-events: none;
   }
   
   .hologramArtifactCard:hover {
     background: rgba(255, 255, 255, 0.06);
     border-color: var(--accent-cyan);
-    transform: translateY(-4px);
-    box-shadow: 0 10px 30px rgba(0, 243, 255, 0.1);
+    transform: translateY(-6px);
+    box-shadow: 0 15px 40px rgba(0, 243, 255, 0.15), 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
   }
   
   .hologramIconWrapper {
@@ -354,6 +469,8 @@
     color: var(--accent-cyan);
     margin-bottom: 20px;
     text-shadow: 0 0 25px rgba(0, 243, 255, 0.2);
+    position: relative;
+    z-index: 2;
   }
   
   .artifactName {
@@ -361,6 +478,8 @@
     font-weight: 700;
     margin: 0 0 12px 0;
     text-shadow: var(--text-shadow);
+    position: relative;
+    z-index: 2;
   }
   
   .artifactDesc {
@@ -368,6 +487,8 @@
     color: var(--text-dim);
     line-height: 1.6;
     margin: 0;
+    position: relative;
+    z-index: 2;
   }
   
   .artifactLaserScanner {
@@ -383,7 +504,9 @@
     opacity: 1;
   }
   
-  /* Chrono Tunnel Line Mechanics */
+  /* ==
+     CHRONO TUNNEL LINE MECHANICS
+  == */
   .hyperTunnelTimeline {
     position: relative;
     padding-left: 32px;
@@ -419,12 +542,49 @@
   }
   
   .checkpointBlock {
-    background: rgba(255, 255, 255, 0.03);
+    position: relative;
+    border-radius: 28px;
+    isolation: isolate;
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
-    border-radius: 6px;
+    overflow: hidden;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
     padding: 28px;
+  }
+  
+  .checkpointBlock::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
+  }
+  
+  .checkpointBlock::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: 28px;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    filter: url(#glass-distortion);
+    -webkit-filter: url(#glass-distortion);
+    isolation: isolate;
+    pointer-events: none;
+  }
+  
+  .checkpointBlock:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--accent-cyan);
+    transform: translateX(8px);
   }
   
   .checkpointHeaderRow {
@@ -434,6 +594,8 @@
     flex-wrap: wrap;
     gap: 12px;
     margin-bottom: 8px;
+    position: relative;
+    z-index: 2;
   }
   
   .checkpointCompany {
@@ -454,11 +616,15 @@
     font-size: 1.15rem;
     color: var(--text-dim);
     margin: 0 0 16px 0;
+    position: relative;
+    z-index: 2;
   }
   
   .checkpointDetailsList {
     padding-left: 18px;
     margin: 0;
+    position: relative;
+    z-index: 2;
   }
   
   .checkpointDetailsList li {
@@ -468,7 +634,9 @@
     margin-bottom: 8px;
   }
   
-  /* Reactor Telemetry Telemetry Gauges */
+  /* ==
+     REACTOR TELEMETRY GAUGES
+  == */
   .reactorGridSystem {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -508,7 +676,9 @@
     box-shadow: 0 0 10px var(--accent-cyan);
   }
   
-  /* Premium Dynamic Interactive Showcase Grid */
+  /* ==
+     PREMIUM DYNAMIC INTERACTIVE SHOWCASE GRID
+  == */
   .showcaseGrid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
@@ -516,19 +686,49 @@
   }
   
   .premiumTiltCard {
-    background: rgba(13, 13, 13, 0.12);
+    position: relative;
+    border-radius: 28px;
+    isolation: isolate;
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
-    border-radius: 8px;
     overflow: hidden;
-    transition: border-color 0.4s ease, box-shadow 0.4s ease, background 0.4s ease;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  
+  .premiumTiltCard::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
+  }
+  
+  .premiumTiltCard::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: 28px;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    filter: url(#glass-distortion);
+    -webkit-filter: url(#glass-distortion);
+    isolation: isolate;
+    pointer-events: none;
   }
   
   .premiumTiltCard:hover {
     background: rgba(13, 13, 13, 0.2);
     border-color: var(--accent-purple);
-    box-shadow: 0 15px 40px rgba(157, 78, 221, 0.2);
+    transform: translateY(-6px);
+    box-shadow: 0 20px 50px rgba(157, 78, 221, 0.2), 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
   }
   
   .cardImageTrack {
@@ -537,6 +737,16 @@
     position: relative;
     background: rgba(21, 21, 21, 0.3);
     overflow: hidden;
+    border-radius: 28px 28px 0 0;
+  }
+  
+  .cardImageTrack::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: linear-gradient(0deg, rgba(13, 13, 13, 0.4) 0%, transparent 60%);
+    pointer-events: none;
   }
   
   .fallbackVisualMatrix {
@@ -561,6 +771,8 @@
   
   .cardDetailsTray {
     padding: 28px;
+    position: relative;
+    z-index: 2;
   }
   
   .projectCardTitle {
@@ -580,7 +792,9 @@
     letter-spacing: 1px;
   }
   
-  /* Contact Layout Frames */
+  /* ==
+     CONTACT LAYOUT FRAMES
+  == */
   .contactQuantumLayout {
     width: 100%;
     text-align: center;
@@ -609,12 +823,18 @@
   }
   
   .channelLinkAnchor {
-    background: rgba(255,255,255,0.03);
+    position: relative;
+    border-radius: 28px;
+    isolation: isolate;
+    box-shadow: 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+    cursor: pointer;
+    background: var(--bg-card);
     backdrop-filter: var(--glass-blur);
     -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--glass-border);
+    overflow: hidden;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
     padding: 24px;
-    border-radius: 6px;
     font-family: var(--font-mono);
     font-size: 16px;
     color: var(--text-pure);
@@ -623,14 +843,44 @@
     align-items: center;
     justify-content: center;
     gap: 12px;
-    transition: all 0.3s ease;
     text-shadow: var(--text-shadow);
   }
   
+  .channelLinkAnchor::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: 28px;
+    box-shadow: inset 0 0 14px -4px rgba(255, 255, 255, 0.7);
+    background-color: rgba(255, 255, 255, 0);
+    pointer-events: none;
+  }
+  
+  .channelLinkAnchor::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: 28px;
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    filter: url(#glass-distortion);
+    -webkit-filter: url(#glass-distortion);
+    isolation: isolate;
+    pointer-events: none;
+  }
+  
   .channelLinkAnchor:hover {
-    background: rgba(255,255,255,0.06);
+    background: rgba(255, 255, 255, 0.06);
     border-color: var(--accent-cyan);
-    box-shadow: 0 5px 20px rgba(0, 243, 255, 0.15);
+    transform: translateY(-4px);
+    box-shadow: 0 10px 30px rgba(0, 243, 255, 0.15), 0px 0px 21px -8px rgba(255, 255, 255, 0.3);
+  }
+  
+  .channelLinkAnchor span {
+    position: relative;
+    z-index: 2;
   }
   
   .terminalSignatureCluster {
@@ -652,7 +902,9 @@
     margin: 0;
   }
   
-  /* Minimalist Runtime Footer Matrix */
+  /* ==
+     MINIMALIST RUNTIME FOOTER MATRIX
+  == */
   .minimalistFooter {
     position: relative;
     z-index: 2;
@@ -686,9 +938,9 @@
     color: rgba(255,255,255,0.3);
   }
   
-  /* ==========================================
+  /* ==
      DYNAMIC COMPILING ANIMATION MATRICES
-     ========================================== */
+  == */
   @keyframes pulse {
     0%, 100% { opacity: 0.4; transform: scale(1); }
     50% { opacity: 1; transform: scale(1.2); box-shadow: 0 0 16px var(--accent-cyan); }
@@ -700,16 +952,111 @@
     100% { transform: translateY(-10px); }
   }
   
-  /* Responsive Adaptive Interface Rules */
+  /* ==
+     RESPONSIVE ADAPTIVE INTERFACE RULES
+  == */
   @media (max-width: 968px) {
     .gridSplit {
       grid-template-columns: 1fr;
       gap: 40px;
     }
+    
     .reactorGridSystem {
       grid-template-columns: 1fr;
     }
+    
     .contactChannelsGrid {
       grid-template-columns: 1fr;
+    }
+    
+    .glassContainer {
+      padding: 32px;
+      border-radius: 20px;
+    }
+    
+    .glassContainer::before {
+      border-radius: 20px;
+    }
+  }
+  
+  @media (max-width: 768px) {
+    .glassContainer {
+      border-radius: 16px;
+      padding: 24px;
+    }
+    
+    .hologramArtifactCard,
+    .premiumTiltCard,
+    .checkpointBlock,
+    .channelLinkAnchor,
+    .revealCoreFrame,
+    .liquid-glass-card {
+      border-radius: 16px;
+    }
+    
+    .hologramArtifactCard::before,
+    .hologramArtifactCard::after,
+    .premiumTiltCard::before,
+    .premiumTiltCard::after,
+    .checkpointBlock::before,
+    .checkpointBlock::after,
+    .channelLinkAnchor::before,
+    .channelLinkAnchor::after,
+    .revealCoreFrame::before,
+    .glassContainer::before,
+    .liquid-glass-card::before,
+    .liquid-glass-card::after {
+      border-radius: 16px;
+    }
+    
+    .cardImageTrack {
+      border-radius: 16px 16px 0 0;
+    }
+    
+    .matrixArtifactGrid {
+      grid-template-columns: 1fr;
+    }
+    
+    .showcaseGrid {
+      grid-template-columns: 1fr;
+    }
+    
+    .hackerTicker {
+      top: 12px;
+      right: 12px;
+      padding: 6px 12px;
+      border-radius: 20px;
+    }
+    
+    .tickerText {
+      font-size: 9px;
+    }
+  }
+  
+  @media (max-width: 480px) {
+    .glassContainer {
+      padding: 16px;
+    }
+    
+    .hologramArtifactCard {
+      padding: 20px;
+    }
+    
+    .checkpointBlock {
+      padding: 20px;
+    }
+    
+    .cardDetailsTray {
+      padding: 20px;
+    }
+    
+    .channelLinkAnchor {
+      padding: 18px;
+      font-size: 14px;
+    }
+    
+    .footerContentBlock {
+      flex-direction: column;
+      text-align: center;
     }
   }

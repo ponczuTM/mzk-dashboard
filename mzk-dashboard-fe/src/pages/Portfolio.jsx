@@ -14,9 +14,9 @@ import styles from './Portfolio.module.css';
 
 gsap.registerPlugin(ScrollTrigger);
 
-// ==========================================
+//==
 // 3D SCENE & QUANTUM PARTICLE COMPONENTS
-// ==========================================
+//==
 
 function ParticleMorphSystem({ activeSection }) {
   const pointsRef = useRef();
@@ -186,9 +186,9 @@ function Interactive3DScene({ activeSection }) {
   );
 }
 
-// ==========================================
+//==
 // MAIN COMPONENT & ENGINE ARCHITECTURE
-// ==========================================
+//==
 
 export default function Portfolio() {
   const [activeSection, setActiveSection] = useState('home');
