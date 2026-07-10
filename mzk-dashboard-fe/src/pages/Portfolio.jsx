@@ -399,6 +399,7 @@ export default function Portfolio() {
             1. HOME SECTOR
            == */}
         <section data-section="home" data-section-id="home" className={styles.sectionWindow}>
+        <div className={styles.glassContainer}>
           <div className={styles.centerHero}>
             <div className={styles.heroLayout}>
               <motion.div
@@ -443,6 +444,7 @@ export default function Portfolio() {
                 </div>
               </motion.div>
             </div>
+          </div>
           </div>
         </section>
 
