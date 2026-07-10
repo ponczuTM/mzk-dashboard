@@ -8,7 +8,9 @@ import { ReactLenis } from 'lenis/react';
 import * as THREE from 'three';
 import { 
   FiCpu, FiLayers, FiCode, FiTerminal, FiGitBranch, 
-  FiDatabase, FiMonitor, FiArrowRight, FiMail, FiPhone, FiGithub, FiGlobe 
+  FiDatabase, FiMonitor, FiArrowRight, FiMail, FiPhone, FiGithub, FiGlobe,
+  FiUser, FiBriefcase, FiBook, FiTool, FiStar, FiAward, FiServer, FiLayout,
+  FiGrid, FiClock, FiMapPin, FiLink, FiExternalLink, FiCheck, FiPlus
 } from 'react-icons/fi';
 import styles from './Portfolio.module.css';
 
@@ -295,15 +297,25 @@ export default function Portfolio() {
                 <h2 className={styles.roleSubtext}>FULLSTACK DEVELOPER & ENGINEER</h2>
                 <div className={styles.glowingBar} />
                 <p className={styles.abstractDescription}>
-                  Architecting hyper-optimized web interfaces, complex IoT node ecosystems, and zero-latency immersive web pipelines.
+                  I design and build interactive, modern web applications with React, and Node.js. Passionate about creating engaging user experiences with clean design and solid code.
                 </p>
                 
-                <button 
-                  className={styles.premiumCTA}
-                  onClick={() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' })}
-                >
-                  INITIALIZE JOURNEY <FiArrowRight className={styles.ctaIcon} />
-                </button>
+                <div className={styles.homeQuickInfo}>
+                  <span><FiMapPin /> Poland / Remote</span>
+                  <span><FiClock /> Available for new opportunities</span>
+                </div>
+
+                <div className={styles.homeCTArow}>
+                  <button 
+                    className={styles.premiumCTA}
+                    onClick={() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' })}
+                  >
+                    INITIALIZE JOURNEY <FiArrowRight className={styles.ctaIcon} />
+                  </button>
+                  <a href="https://github.com/ponczuTM" target="_blank" rel="noreferrer" className={styles.githubHomeLink}>
+                    <FiGithub /> GitHub
+                  </a>
+                </div>
               </motion.div>
             </div>
           </div>
@@ -314,35 +326,49 @@ export default function Portfolio() {
            == */}
         <section id="about" data-section="about" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
-            <div className={styles.gridSplit}>
-              <div>
-                <span className={styles.sectionTag}>// SYSTEM CORE MANIFESTO</span>
-                <h3 className={styles.sectionHeader}>BIO ARCHITECTURE</h3>
-                
-                <div className={styles.terminalParagraph}>
-                  <p>
-                    Master Engineer specialized in orchestrating advanced system frameworks. Seamless engineering execution between reactive clients and highly scalable data distribution channels.
-                  </p>
-                  <p className={styles.secondaryBioText}>
-                    Proven capability designing production-ready systems, microservices architectures, hardware layer protocols, and immersive graphical pipelines.
-                  </p>
+            <span className={styles.sectionTag}>// SYSTEM CORE MANIFESTO</span>
+            <h3 className={styles.sectionHeader}>BIO ARCHITECTURE</h3>
+            
+            <div className={styles.aboutFullGrid}>
+              <div className={styles.aboutMainBio}>
+                <p className={styles.aboutIntro}>
+                  Frontend Developer and master engineer with several years of experience in designing and implementing web applications using React.js, Angular and modern JavaScript.
+                </p>
+                <p>
+                  Skilled in building interactive user interfaces, integrating backend services and managing commercial projects. Strong analytical mindset with additional expertise in data processing (Python) and proven teamwork and presentation skills. Advanced English (B2) and a strong commitment to delivering high-quality results.
+                </p>
+                <div className={styles.aboutCorePillars}>
+                  <div className={styles.pillarItem}>
+                    <FiStar className={styles.pillarIcon} />
+                    <div>
+                      <strong>Product-minded UX</strong>
+                      <span>Clean flows, crisp motion, and zero-friction UI decisions.</span>
+                    </div>
+                  </div>
+                  <div className={styles.pillarItem}>
+                    <FiTool className={styles.pillarIcon} />
+                    <div>
+                      <strong>Engineering rigor</strong>
+                      <span>Maintainable architecture, solid code, predictable delivery.</span>
+                    </div>
+                  </div>
+                  <div className={styles.pillarItem}>
+                    <FiServer className={styles.pillarIcon} />
+                    <div>
+                      <strong>Real-world reliability</strong>
+                      <span>Kiosk mode, fleet updates, telemetry, and hard constraints.</span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className={styles.interactiveObjectDisplay}>
-                <div className={styles.revealCoreFrame}>
-                  <div className={styles.revealHoverObject}>
-                    <FiCpu className={styles.revealHardwareIcon} />
-                    <span className={styles.revealObjectOverlay}>HOVER TO OPEN CORE ARCHITECTURE</span>
-                    <div className={styles.hiddenHardwarePayload}>
-                      <h4>SYSTEM COMPILING</h4>
-                      <ul>
-                        <li>+ Node.js Architecture Threads</li>
-                        <li>+ React Kernel Memory Optimizations</li>
-                        <li>+ Low-Level Hardware System Routing</li>
-                      </ul>
-                    </div>
-                  </div>
+              <div className={styles.aboutSnapshot}>
+                <h4>Quick Snapshot</h4>
+                <div className={styles.snapshotGrid}>
+                  <div><strong>Focus</strong><span>React, Node.js, UX engineering</span></div>
+                  <div><strong>Strength</strong><span>Interactive apps & device integrations</span></div>
+                  <div><strong>Style</strong><span>Modern UI, motion, performance</span></div>
+                  <div><strong>Location</strong><span>Poland / Remote</span></div>
                 </div>
               </div>
             </div>
@@ -357,30 +383,55 @@ export default function Portfolio() {
             <span className={styles.sectionTag}>// CAPABILITY ARCHITECTURE</span>
             <h3 className={styles.sectionHeader}>TECHNOLOGY INFRASTRUCTURE</h3>
             
-            <div className={styles.matrixArtifactGrid}>
-              {[
-                { name: 'React', icon: <FiLayers />, desc: 'Virtual DOM engineering, customized Hooks optimization frameworks, advanced state mechanics.' },
-                { name: 'Node.js', icon: <FiCode />, desc: 'Ultra-performant event-driven microservice orchestration and high-concurrency clusters.' },
-                { name: 'JavaScript', icon: <FiTerminal />, desc: 'Advanced asynchronous engine execution, compilation pipelines, memory architecture optimization.' },
-                { name: 'Git Workspace', icon: <FiGitBranch />, desc: 'Continuous integration mechanics, advanced tree-merging systems, production release pipelines.' },
-                { name: 'MongoDB / Databases', icon: <FiDatabase />, desc: 'NoSQL spatial index scaling, performance shard strategies, and persistent storage arrays.' },
-                { name: 'Hardware / IoT Node Nodes', icon: <FiMonitor />, desc: 'Low-latency system integration, electronic label gateways, sensor monitoring.' }
-              ].map((tech, idx) => (
-                <div key={idx} className={styles.hologramArtifactCard}>
-                  <div className={styles.hologramIconWrapper}>
-                    {tech.icon}
-                  </div>
-                  <h4 className={styles.artifactName}>{tech.name}</h4>
-                  <p className={styles.artifactDesc}>{tech.desc}</p>
-                  <div className={styles.artifactLaserScanner} />
+            <div className={styles.techCategories}>
+              <div className={styles.techCategory}>
+                <h4><FiLayout /> Frontend Development</h4>
+                <div className={styles.techChipGroup}>
+                  <span className={styles.techChip}>React.js</span>
+                  <span className={styles.techChip}>Angular</span>
+                  <span className={styles.techChip}>TypeScript</span>
+                  <span className={styles.techChip}>HTML/CSS</span>
                 </div>
-              ))}
+              </div>
+              <div className={styles.techCategory}>
+                <h4><FiServer /> Backend Development</h4>
+                <div className={styles.techChipGroup}>
+                  <span className={styles.techChip}>Node.js</span>
+                  <span className={styles.techChip}>Nest.js</span>
+                  <span className={styles.techChip}>Firebase</span>
+                  <span className={styles.techChip}>MongoDB</span>
+                </div>
+              </div>
+              <div className={styles.techCategory}>
+                <h4><FiLayout /> UI & UX</h4>
+                <div className={styles.techChipGroup}>
+                  <span className={styles.techChip}>Web App Design</span>
+                  <span className={styles.techChip}>Responsive Layouts</span>
+                  <span className={styles.techChip}>Interactive Interfaces</span>
+                </div>
+              </div>
+              <div className={styles.techCategory}>
+                <h4><FiTool /> Additional</h4>
+                <div className={styles.techChipGroup}>
+                  <span className={styles.techChip}>Python</span>
+                  <span className={styles.techChip}>Unity (C#)</span>
+                </div>
+              </div>
+              <div className={styles.techCategory}>
+                <h4><FiGitBranch /> Tools</h4>
+                <div className={styles.techChipGroup}>
+                  <span className={styles.techChip}>Git</span>
+                  <span className={styles.techChip}>Firebase</span>
+                  <span className={styles.techChip}>MongoDB</span>
+                  <span className={styles.techChip}>REST APIs</span>
+                </div>
+              </div>
             </div>
           </div>
         </section>
 
         {/* ==
-            4. TIME-LINE HYPER-TUNNEL SECTOR
+            4. TIME-LINE HYPER-TUNNEL SECTOR (EXPERIENCE)
            == */}
         <section data-section="experience" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
@@ -393,25 +444,43 @@ export default function Portfolio() {
                   company: 'EXON Computer Systems',
                   role: 'IT Department Coordinator / FullStack Developer',
                   date: 'Oct 2024 – Present',
-                  bullets: ['Engineering performant React UI interfaces', 'Building Node.js microservice architectures', 'Deploying complex system sensor/printer low-level arrays']
+                  bullets: [
+                    'Developing and maintaining web applications with React.js and Node.js',
+                    'Building integrations with external devices (sensors, printers) using Node.js and Python',
+                    'Designing interactive Unity (C#) applications and multimedia systems',
+                    'Coordinating and delivering commercial projects, including interactive screen management systems and multimedia table platform'
+                  ]
                 },
                 {
                   company: 'TopSupple',
                   role: 'Freelance System Architect',
                   date: 'Dec 2024 – Feb 2025',
-                  bullets: ['Engineered comprehensive e-commerce engine infrastructure', 'Designed secure custom payment systems', 'Architected transactional data persistence matrices']
+                  bullets: [
+                    'Developed e-commerce website top-supple.co.uk – shopping cart, online payments, full store functionality',
+                    'Engineered comprehensive e-commerce engine infrastructure',
+                    'Designed secure custom payment systems',
+                    'Architected transactional data persistence matrices'
+                  ]
                 },
                 {
                   company: 'MGA Sp. z o.o.',
-                  role: 'Frontend System Engineer',
+                  role: 'Frontend System Engineer (Angular)',
                   date: 'Jan 2024 – Apr 2024',
-                  bullets: ['Engineered core components using Angular enterprise architecture', 'Executed comprehensive structural code analytics', 'Implemented automated testing matrix protocols']
+                  bullets: [
+                    'Designed and implemented new web application features in Angular',
+                    'Participated in code reviews and testing',
+                    'Supported recruitment processes'
+                  ]
                 },
                 {
                   company: 'ECWM Toruń',
                   role: 'FullStack Core Developer',
                   date: 'Oct 2020 – Dec 2023',
-                  bullets: ['Architected complex reactive dashboards using React & Nest.js', 'Engineered performant metrics statistical aggregation engines', 'Managed internal mission-critical enterprise apps']
+                  bullets: [
+                    'Developed web applications with React.js and Nest.js',
+                    'Supported data analysis and visualization',
+                    'Built dashboards and statistics tools for internal projects'
+                  ]
                 }
               ].map((exp, idx) => (
                 <div key={idx} className={styles.timelineCheckpointNode}>
@@ -423,7 +492,7 @@ export default function Portfolio() {
                     </div>
                     <h5 className={styles.checkpointRole}>{exp.role}</h5>
                     <ul className={styles.checkpointDetailsList}>
-                      {exp.bullets.map((b, bIdx) => <li key={bIdx}>{b}</li>)}
+                      {exp.bullets.map((b, bIdx) => <li key={bIdx}><FiCheck /> {b}</li>)}
                     </ul>
                   </div>
                 </div>
@@ -433,7 +502,34 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            5. SKILLS ENERGY REACTING REACTOR
+            5. EDUCATION SECTOR
+           == */}
+        <section data-section="experience" className={styles.sectionWindow}>
+          <div className={styles.glassContainer}>
+            <span className={styles.sectionTag}>// ACADEMIC RUNTIME</span>
+            <h3 className={styles.sectionHeader}>EDUCATION REGISTER</h3>
+
+            <div className={styles.educationGrid}>
+              <div className={styles.educationCard}>
+                <div className={styles.eduIconWrapper}><FiAward /></div>
+                <h4>Master of Computer Science</h4>
+                <p className={styles.eduInstitution}>Nicolaus Copernicus University</p>
+                <span className={styles.eduDate}>2023 – 2024</span>
+                <p className={styles.eduDesc}>Advanced computer science engineering with focus on system architecture and software development.</p>
+              </div>
+              <div className={styles.educationCard}>
+                <div className={styles.eduIconWrapper}><FiBook /></div>
+                <h4>Bachelor of Computer Science Engineering</h4>
+                <p className={styles.eduInstitution}>Nicolaus Copernicus University</p>
+                <span className={styles.eduDate}>2019 – 2023</span>
+                <p className={styles.eduDesc}>Foundation in computer science engineering, software development principles and system design.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ==
+            6. SKILLS ENERGY REACTING REACTOR
            == */}
         <section data-section="experience" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
@@ -442,12 +538,16 @@ export default function Portfolio() {
 
             <div className={styles.reactorGridSystem}>
               {[
-                { name: 'JavaScript Engine Execution', pct: '95%' },
-                { name: 'React Ecosystem Architecture', pct: '90%' },
-                { name: 'Angular Framework Systems', pct: '85%' },
-                { name: 'Node.js Backend Microservices', pct: '80%' },
-                { name: 'System Integrations & Low-Level API', pct: '90%' },
-                { name: 'Core Architecture UI Execution', pct: '100%' }
+                { name: 'JavaScript', pct: '95%' },
+                { name: 'React.js', pct: '90%' },
+                { name: 'Angular', pct: '85%' },
+                { name: 'HTML / CSS', pct: '85%' },
+                { name: 'Node.js', pct: '80%' },
+                { name: 'Frontend Development', pct: '100%' },
+                { name: 'Web App Design', pct: '90%' },
+                { name: 'UI Implementation', pct: '80%' },
+                { name: 'Team Collaboration', pct: '100%' },
+                { name: 'API/Integrations', pct: '90%' }
               ].map((skill, idx) => (
                 <div key={idx} className={styles.reactorTelemetryMetric}>
                   <div className={styles.reactorMetricLabelRow}>
@@ -470,7 +570,7 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            6. PRODUCT / PROJECT SHOWCASE (TILT CARDS)
+            7. PRODUCT / PROJECT SHOWCASE (TILT CARDS)
            == */}
         <section data-section="tech" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
@@ -479,23 +579,40 @@ export default function Portfolio() {
 
             <div className={styles.showcaseGrid}>
               {[
-                { title: 'PRACOVO PLATFORM', type: 'AI Recruitment Architecture Engine', img: '../assets/images/project1.jpg' },
-                { title: 'MZK TRANSIT MATRIX', type: 'Real-Time Spatial Data Processing Terminal', img: '../assets/images/project2.jpg' },
-                { title: 'ESL NEXUS GATEWAY', type: 'Low-Level Electronic Shelf Hardware Node', img: '../assets/images/project3.jpg' }
+                { 
+                  title: 'McDonald\'s Multimedia Table', 
+                  type: 'Interactive Gaming Table with Unity & Hardware Integration',
+                  desc: 'Multimedia gaming table for McDonald\'s restaurants. Interactive experience based on game engine/Unity, hardware integration, refined UI, animations, and flawless operation in kiosk mode. Project coordinator & frontend/Unity contributor. Responsible for planning, delivery, and production readiness.'
+                },
+                { 
+                  title: 'TopSupple Online Store', 
+                  type: 'E-commerce Platform',
+                  desc: 'Complete e-commerce platform with CMS, basket, checkout, payments, and an admin panel for day-to-day operations. React.js, CMS, Payments, Admin panel.'
+                },
+                { 
+                  title: 'Fitrening Sports Stats', 
+                  type: 'Sports Statistics Platform',
+                  desc: 'Statistics platform for sport users with three privilege levels, authentication, password change flow, and an admin panel. RBAC, Auth, Analytics, Admin.'
+                },
+                { 
+                  title: 'Eternal Wellness Booking App', 
+                  type: 'Calendar & Booking Application',
+                  desc: 'Performance-driven booking and scheduling platform built with React.js and Node.js. Streamlined client journey: service selection, availability discovery, booking confirmation, and operational admin tooling.'
+                }
               ].map((proj, idx) => (
                 <div key={idx} className={styles.premiumTiltCard}>
                   <div className={styles.cardImageTrack}>
-                    <div className={styles.fallbackVisualMatrix} />
-                    <img 
-                      src={proj.img} 
-                      alt={proj.title} 
-                      className={styles.projectImagePayload} 
-                      onError={(e) => { e.currentTarget.style.display = 'none'; }} 
-                    />
+                    <div className={styles.fallbackVisualMatrix}>
+                      <span className={styles.projectEmoji}>✦</span>
+                    </div>
                   </div>
                   <div className={styles.cardDetailsTray}>
                     <h4 className={styles.projectCardTitle}>{proj.title}</h4>
                     <p className={styles.projectCardType}>{proj.type}</p>
+                    <p className={styles.projectCardDesc}>{proj.desc}</p>
+                    <div className={styles.projectCardLink}>
+                      <FiLink /> <span>View Project →</span>
+                    </div>
                   </div>
                 </div>
               ))}
@@ -504,7 +621,7 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            7. CONTACT MATRIX TERMINAL (CINEMATIC END)
+            8. CONTACT MATRIX TERMINAL (CINEMATIC END)
            == */}
         <section data-section="contact" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
@@ -513,6 +630,10 @@ export default function Portfolio() {
                 <span className={styles.sectionTag}>// SECURE TRANSCEIVER NODE</span>
                 <h3 className={styles.hugeContactHeader}>LET'S CONSTRUCT QUANTUM ARCHITECTURE</h3>
                 
+                <p className={styles.contactIntro}>
+                  I'm always open to new opportunities, collaborations, and exciting projects. Feel free to reach out!
+                </p>
+
                 <div className={styles.contactChannelsGrid}>
                   <a href="mailto:mroczkowskioliwer10@gmail.com" className={styles.channelLinkAnchor}>
                     <FiMail /> mroczkowskioliwer10@gmail.com
@@ -528,9 +649,19 @@ export default function Portfolio() {
                   </span>
                 </div>
 
+                <div className={styles.contactBusinessNote}>
+                  <h4>Business-first approach</h4>
+                  <p>Clear scope, crisp UX, predictable delivery. If you want a product that looks premium and behaves reliably, you're in the right place.</p>
+                </div>
+
                 <div className={styles.terminalSignatureCluster}>
                   <p className={styles.sigTitle}>Oliwer Mroczkowski</p>
                   <p className={styles.sigSub}>Master Engineer & FullStack Architect</p>
+                  <div className={styles.sigContactRow}>
+                    <span>mroczkowskioliwer10@gmail.com</span>
+                    <span>•</span>
+                    <span>mroczkowski.netlify.app</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -538,13 +669,14 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            8. MINIMALISTIC FOOTER RUNTIME LAYER
+            9. MINIMALISTIC FOOTER RUNTIME LAYER
            == */}
         <footer className={styles.minimalistFooter}>
           <div className={styles.footerGlowDivider} />
           <div className={styles.footerContentBlock}>
-            <p>© 2026 OLIWER MROCZKOWSKI. ALL RIGHTS RUNTIME SECURED.</p>
+            <p>© 2026 Made with ♥ by Oliwer Mroczkowski.</p>
             <p className={styles.footerTechStackTelemetry}>REACT × THREE.JS × GSAP × SYSTEM KERNEL</p>
+            <p className={styles.footerSmallNote}>React • Node • UX • Unity</p>
           </div>
         </footer>
 
