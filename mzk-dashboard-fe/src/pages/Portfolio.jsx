@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Center, Text3D, Float, PerspectiveCamera } from '@react-three/drei';
+import { Center, Text3D, Float, PerspectiveCamera, PointMaterial } from '@react-three/drei';
 import { motion, useMotionValue, useSpring } from 'framer-motion';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
@@ -17,12 +17,10 @@ gsap.registerPlugin(ScrollTrigger);
 //==
 // 3D SCENE & QUANTUM PARTICLE COMPONENTS
 //==
-
 function ParticleMorphSystem({ activeSection }) {
   const pointsRef = useRef();
   const count = 2000;
 
-  // Generate distinct target point arrays for structural morphs
   const positions = useMemo(() => {
     const targets = {
       home: new Float32Array(count * 3),
@@ -34,8 +32,7 @@ function ParticleMorphSystem({ activeSection }) {
 
     for (let i = 0; i < count; i++) {
       const i3 = i * 3;
-      
-      // Home: Spherical cloud
+
       const u = Math.random();
       const v = Math.random();
       const theta = u * 2.0 * Math.PI;
@@ -45,47 +42,45 @@ function ParticleMorphSystem({ activeSection }) {
       targets.home[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
       targets.home[i3 + 2] = r * Math.cos(phi);
 
-      // About: Flat Interactive Cyber Grid Matrix
       targets.about[i3] = ((i % 50) - 25) * 0.5;
       targets.about[i3 + 1] = (Math.floor(i / 50) - 30) * 0.4;
       targets.about[i3 + 2] = Math.sin(i * 0.1) * 2;
 
-      // Tech: Floating Infinity Ring
       const t = (i / count) * Math.PI * 2;
       targets.tech[i3] = Math.sin(t) * 6;
       targets.tech[i3 + 1] = Math.sin(t * 2) * 2.5;
       targets.tech[i3 + 2] = Math.cos(t) * 4;
 
-      // Experience: Deep Hyper-tunnel configuration
       targets.experience[i3] = Math.cos(i) * (2 + Math.random() * 0.5);
       targets.experience[i3 + 1] = Math.sin(i) * (2 + Math.random() * 0.5);
       targets.experience[i3 + 2] = ((i % 100) - 50) * 0.6;
 
-      // Contact: Highly volatile gravitational vortex
       const angle = (i / count) * 120;
       const radius = (i / count) * 8 + Math.random() * 0.4;
       targets.contact[i3] = Math.cos(angle) * radius;
       targets.contact[i3 + 1] = (i / count - 0.5) * 10;
       targets.contact[i3 + 2] = Math.sin(angle) * radius;
     }
+
     return targets;
   }, []);
 
-  const currentArray = useMemo(() => new Float32Array(count * 3), []);
-  
-  useEffect(() => {
-    currentArray.set(positions.home);
-  }, [positions, currentArray]);
+  const currentArray = useMemo(() => {
+    const arr = new Float32Array(count * 3);
+    arr.set(positions.home);
+    return arr;
+  }, [positions]);
 
   useFrame((state, delta) => {
     if (!pointsRef.current) return;
+
     const target = positions[activeSection] || positions.home;
     const att = pointsRef.current.geometry.attributes.position.array;
 
-    // Fluid interpolation interpolation over time
     for (let i = 0; i < count * 3; i++) {
-      att[i] += (target[i] - att[i]) * 4 * delta; 
+      att[i] += (target[i] - att[i]) * 4 * delta;
     }
+
     pointsRef.current.geometry.attributes.position.needsUpdate = true;
     pointsRef.current.rotation.y += delta * 0.05;
   });
@@ -100,15 +95,20 @@ function ParticleMorphSystem({ activeSection }) {
           itemSize={3}
         />
       </bufferGeometry>
-      <pointsMaterial
-        color="#00f3ff"
-        size={0.06}
-        sizeAttenuation={true}
-        depthWrite={false}
-        transparent
-        opacity={0.85}
-        blending={THREE.AdditiveBlending}
-      />
+
+      <PointMaterial
+  color="#0066ff"
+  size={0.08}
+  sizeAttenuation
+  transparent
+  opacity={0.85}
+  depthWrite={false}
+  depthTest={false}
+  blending={THREE.CustomBlending}
+  blendEquation={THREE.AddEquation}
+  blendSrc={THREE.SrcAlphaFactor}
+  blendDst={THREE.OneMinusSrcAlphaFactor}
+/>
     </points>
   );
 }
