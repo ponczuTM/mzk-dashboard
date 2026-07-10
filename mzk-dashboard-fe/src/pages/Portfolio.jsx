@@ -1,24 +1,24 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Center, Text3D, Float, PerspectiveCamera, PointMaterial } from '@react-three/drei';
 import { motion, useMotionValue, useSpring } from 'framer-motion';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { ReactLenis } from 'lenis/react';
 import * as THREE from 'three';
-import { 
-  FiCpu, FiLayers, FiCode, FiTerminal, FiGitBranch, 
+import {
+  FiCpu, FiLayers, FiCode, FiTerminal, FiGitBranch,
   FiDatabase, FiMonitor, FiArrowRight, FiMail, FiPhone, FiGithub, FiGlobe,
   FiUser, FiBriefcase, FiBook, FiTool, FiStar, FiAward, FiServer, FiLayout,
   FiGrid, FiClock, FiMapPin, FiLink, FiExternalLink, FiCheck, FiPlus
 } from 'react-icons/fi';
 import styles from './Portfolio.module.css';
+import { PointMaterial } from '@react-three/drei';
 
 gsap.registerPlugin(ScrollTrigger);
 
-//==
+// ==
 // 3D SCENE & QUANTUM PARTICLE COMPONENTS
-//==
+// ==
 function ParticleMorphSystem({ activeSection }) {
   const pointsRef = useRef();
   const count = 2000;
@@ -99,27 +99,28 @@ function ParticleMorphSystem({ activeSection }) {
       </bufferGeometry>
 
       <PointMaterial
-  color="#0066ff"
-  size={0.08}
-  sizeAttenuation
-  transparent
-  opacity={0.85}
-  depthWrite={false}
-  depthTest={false}
-  blending={THREE.CustomBlending}
-  blendEquation={THREE.AddEquation}
-  blendSrc={THREE.SrcAlphaFactor}
-  blendDst={THREE.OneMinusSrcAlphaFactor}
-/>
+        color="#0066ff"
+        size={0.08}
+        sizeAttenuation
+        transparent
+        opacity={0.85}
+        depthWrite={false}
+        depthTest={false}
+        blending={THREE.CustomBlending}
+        blendEquation={THREE.AddEquation}
+        blendSrc={THREE.SrcAlphaFactor}
+        blendDst={THREE.OneMinusSrcAlphaFactor}
+      />
     </points>
   );
 }
 
 function StarfieldBackground() {
   const ref = useRef();
+
   const sphere = useMemo(() => {
     const arr = new Float32Array(1500 * 3);
-    for(let i=0; i<1500; i++) {
+    for (let i = 0; i < 1500; i++) {
       const i3 = i * 3;
       const u = Math.random();
       const v = Math.random();
@@ -145,13 +146,21 @@ function StarfieldBackground() {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" count={1500} array={sphere} itemSize={3} />
       </bufferGeometry>
-      <pointsMaterial color="#9d4edd" size={0.04} sizeAttenuation={true} depthWrite={false} transparent opacity={0.4} />
+      <pointsMaterial
+        color="#9d4edd"
+        size={0.04}
+        sizeAttenuation={true}
+        depthWrite={false}
+        transparent
+        opacity={0.4}
+      />
     </points>
   );
 }
 
 function FloatingTechArtifacts() {
   const meshRef = useRef();
+
   useFrame((state) => {
     if (meshRef.current) {
       meshRef.current.rotation.x = Math.sin(state.clock.getElapsedTime() * 0.4) * 0.2;
@@ -188,14 +197,21 @@ function Interactive3DScene({ activeSection }) {
   );
 }
 
-//==
-// MAIN COMPONENT & ENGINE ARCHITECTURE
-//==
+// ==
+// MAIN COMPONENT
+// ==
+
+const PAGE_COPIES = [0, 1, 2];
 
 export default function Portfolio() {
   const [activeSection, setActiveSection] = useState('home');
   const [hackedText, setHackedText] = useState('RECRUITER DETECTED...');
   const containerRef = useRef(null);
+  const middlePageRef = useRef(null);
+  const lenisRef = useRef(null);
+  const isTeleportingRef = useRef(false);
+  const pageHeightRef = useRef(0);
+  const initializedRef = useRef(false);
 
   // Advanced Mouse Tracking Mechanics
   const mouseX = useMotionValue(-100);
@@ -209,26 +225,10 @@ export default function Portfolio() {
       mouseX.set(e.clientX - 10);
       mouseY.set(e.clientY - 10);
     };
+
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [mouseX, mouseY]);
-
-  // Structural Intersection Observers
-  useEffect(() => {
-    const sections = document.querySelectorAll('[data-section]');
-    const observerOptions = { root: null, rootMargin: '-40% 0px -40% 0px', threshold: 0 };
-    
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          setActiveSection(entry.target.getAttribute('data-section'));
-        }
-      });
-    }, observerOptions);
-
-    sections.forEach((s) => observer.observe(s));
-    return () => sections.forEach((s) => observer.unobserve(s));
-  }, []);
 
   // System Text Simulation Ticker Loops
   useEffect(() => {
@@ -240,44 +240,168 @@ export default function Portfolio() {
       'KEEP GOING...',
       'LOOKING FOR A MASTER FULLSTACK ENGINEER?'
     ];
+
     let idx = 0;
     const interval = setInterval(() => {
       setHackedText(lines[idx]);
       idx = (idx + 1) % lines.length;
     }, 4500);
+
     return () => clearInterval(interval);
   }, []);
 
-  return (
-    <ReactLenis root options={{ lerp: 0.08, duration: 1.2, syncTouch: true }}>
-      <div ref={containerRef} className={styles.appContainer}>
-        
-        {/* Cinematic VFX Layers */}
-        <div className={styles.grainOverlay} />
-        <div className={styles.vignetteOverlay} />
-        
-        {/* Interactive Custom Mouse Artifact */}
-        <motion.div 
-          className={styles.customCursor} 
-          style={{ x: cursorX, y: cursorY }}
-        />
+  const getScroller = useCallback(() => {
+    const lenis = lenisRef.current?.lenis;
+    if (lenis?.rootElement) return lenis.rootElement;
+    return window;
+  }, []);
 
-        {/* Dynamic 3D Scene Layer */}
-        <Interactive3DScene activeSection={activeSection} />
+  const getScrollY = useCallback(() => {
+    const lenis = lenisRef.current?.lenis;
+    if (lenis && typeof lenis.scroll === 'number') return lenis.scroll;
+    return window.scrollY || window.pageYOffset || 0;
+  }, []);
 
-        {/* Live Interface Ticker HUD */}
-        <div className={styles.hackerTicker}>
-          <span className={styles.tickerPulse}></span>
-          <p className={styles.tickerText}>{hackedText}</p>
-        </div>
+  const setScrollY = useCallback((value, immediate = true) => {
+    const lenis = lenisRef.current?.lenis;
 
+    if (lenis) {
+      lenis.scrollTo(value, { immediate, force: true, lock: true });
+    } else {
+      window.scrollTo({ top: value, behavior: 'auto' });
+    }
+  }, []);
+
+  const updatePageMetrics = useCallback(() => {
+    if (!middlePageRef.current) return;
+    pageHeightRef.current = middlePageRef.current.offsetHeight;
+  }, []);
+
+  // Initialize in the middle copy
+  useEffect(() => {
+    const init = () => {
+      updatePageMetrics();
+
+      if (!initializedRef.current && pageHeightRef.current > 0) {
+        setScrollY(pageHeightRef.current, true);
+        initializedRef.current = true;
+      }
+    };
+
+    const raf = requestAnimationFrame(init);
+    window.addEventListener('resize', updatePageMetrics);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', updatePageMetrics);
+    };
+  }, [setScrollY, updatePageMetrics]);
+
+  // Infinite page loop logic
+  useEffect(() => {
+    const handleLoopScroll = () => {
+      if (isTeleportingRef.current) return;
+
+      const pageHeight = pageHeightRef.current;
+      if (!pageHeight) return;
+
+      const y = getScrollY();
+      const threshold = pageHeight * 0.2;
+
+      if (y < threshold) {
+        isTeleportingRef.current = true;
+        setScrollY(y + pageHeight, true);
+        requestAnimationFrame(() => {
+          isTeleportingRef.current = false;
+        });
+      } else if (y > pageHeight * 2 - threshold) {
+        isTeleportingRef.current = true;
+        setScrollY(y - pageHeight, true);
+        requestAnimationFrame(() => {
+          isTeleportingRef.current = false;
+        });
+      }
+    };
+
+    const lenis = lenisRef.current?.lenis;
+    let cleanupLenis = null;
+
+    if (lenis?.on) {
+      const cb = () => handleLoopScroll();
+      lenis.on('scroll', cb);
+      cleanupLenis = () => lenis.off('scroll', cb);
+    } else {
+      window.addEventListener('scroll', handleLoopScroll, { passive: true });
+    }
+
+    return () => {
+      if (cleanupLenis) cleanupLenis();
+      else window.removeEventListener('scroll', handleLoopScroll);
+    };
+  }, [getScrollY, setScrollY]);
+
+  // Observe only the middle copy, so particle states stay stable
+  useEffect(() => {
+    if (!middlePageRef.current) return;
+
+    const sections = middlePageRef.current.querySelectorAll('[data-section]');
+    const observerOptions = {
+      root: null,
+      rootMargin: '-40% 0px -40% 0px',
+      threshold: 0
+    };
+
+    const observer = new IntersectionObserver((entries) => {
+      if (isTeleportingRef.current) return;
+
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const sectionName = entry.target.getAttribute('data-section');
+          if (sectionName) setActiveSection(sectionName);
+        }
+      });
+    }, observerOptions);
+
+    sections.forEach((s) => observer.observe(s));
+
+    return () => {
+      sections.forEach((s) => observer.unobserve(s));
+      observer.disconnect();
+    };
+  }, []);
+
+  const scrollToSection = useCallback((sectionId) => {
+    const target = middlePageRef.current?.querySelector(`[data-section-id="${sectionId}"]`);
+    if (!target) return;
+
+    const rect = target.getBoundingClientRect();
+    const absoluteTop = getScrollY() + rect.top;
+
+    const lenis = lenisRef.current?.lenis;
+    if (lenis) {
+      lenis.scrollTo(absoluteTop, { duration: 1.2 });
+    } else {
+      window.scrollTo({ top: absoluteTop, behavior: 'smooth' });
+    }
+  }, [getScrollY]);
+
+  const renderPageContent = (copyIndex) => {
+    const pageProps = copyIndex === 1 ? { ref: middlePageRef } : {};
+
+    return (
+      <div
+        {...pageProps}
+        className={styles.pageClone}
+        data-page-copy={copyIndex}
+        aria-hidden={copyIndex !== 1}
+      >
         {/* ==
             1. HOME SECTOR
            == */}
-        <section data-section="home" className={styles.sectionWindow}>
+        <section data-section="home" data-section-id="home" className={styles.sectionWindow}>
           <div className={styles.centerHero}>
             <div className={styles.heroLayout}>
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, y: 100 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1], delay: 0.2 }}
@@ -288,7 +412,7 @@ export default function Portfolio() {
                 </h1>
               </motion.div>
 
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ duration: 1.6, delay: 0.6 }}
@@ -299,19 +423,20 @@ export default function Portfolio() {
                 <p className={styles.abstractDescription}>
                   I design and build interactive, modern web applications with React, and Node.js. Passionate about creating engaging user experiences with clean design and solid code.
                 </p>
-                
+
                 <div className={styles.homeQuickInfo}>
                   <span><FiMapPin /> Poland / Remote</span>
                   <span><FiClock /> Available for new opportunities</span>
                 </div>
 
                 <div className={styles.homeCTArow}>
-                  <button 
+                  <button
                     className={styles.premiumCTA}
-                    onClick={() => document.getElementById('about')?.scrollIntoView({ behavior: 'smooth' })}
+                    onClick={() => scrollToSection('about')}
                   >
                     INITIALIZE JOURNEY <FiArrowRight className={styles.ctaIcon} />
                   </button>
+
                   <a href="https://github.com/ponczuTM" target="_blank" rel="noreferrer" className={styles.githubHomeLink}>
                     <FiGithub /> GitHub
                   </a>
@@ -324,11 +449,11 @@ export default function Portfolio() {
         {/* ==
             2. ABOUT PORTAL SECTOR
            == */}
-        <section id="about" data-section="about" className={styles.sectionWindow}>
+        <section id={copyIndex === 1 ? 'about' : undefined} data-section="about" data-section-id="about" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// SYSTEM CORE MANIFESTO</span>
             <h3 className={styles.sectionHeader}>BIO ARCHITECTURE</h3>
-            
+
             <div className={styles.aboutFullGrid}>
               <div className={styles.aboutMainBio}>
                 <p className={styles.aboutIntro}>
@@ -378,11 +503,11 @@ export default function Portfolio() {
         {/* ==
             3. TECH STACK MATRIX SECTOR
            == */}
-        <section data-section="tech" className={styles.sectionWindow}>
+        <section data-section="tech" data-section-id="tech" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// CAPABILITY ARCHITECTURE</span>
             <h3 className={styles.sectionHeader}>TECHNOLOGY INFRASTRUCTURE</h3>
-            
+
             <div className={styles.techCategories}>
               <div className={styles.techCategory}>
                 <h4><FiLayout /> Frontend Development</h4>
@@ -431,9 +556,9 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            4. TIME-LINE HYPER-TUNNEL SECTOR (EXPERIENCE)
+            4. EXPERIENCE
            == */}
-        <section data-section="experience" className={styles.sectionWindow}>
+        <section data-section="experience" data-section-id="experience" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// CHRONOLOGICAL RUNTIME OPERATION</span>
             <h3 className={styles.sectionHeader}>EXPERIENCE REGISTER</h3>
@@ -502,9 +627,9 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            5. EDUCATION SECTOR
+            5. EDUCATION
            == */}
-        <section data-section="experience" className={styles.sectionWindow}>
+        <section data-section="experience" data-section-id="education" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// ACADEMIC RUNTIME</span>
             <h3 className={styles.sectionHeader}>EDUCATION REGISTER</h3>
@@ -529,9 +654,9 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            6. SKILLS ENERGY REACTING REACTOR
+            6. SKILLS
            == */}
-        <section data-section="experience" className={styles.sectionWindow}>
+        <section data-section="experience" data-section-id="skills" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// TELEMETRY REALTIME SYSTEM METRICS</span>
             <h3 className={styles.sectionHeader}>ENGINE POWER OUTPUT</h3>
@@ -555,7 +680,7 @@ export default function Portfolio() {
                     <span className={styles.reactorMetricPct}>{skill.pct}</span>
                   </div>
                   <div className={styles.reactorEnergyMeterTrack}>
-                    <motion.div 
+                    <motion.div
                       className={styles.reactorEnergyMeterFill}
                       initial={{ width: 0 }}
                       whileInView={{ width: skill.pct }}
@@ -570,32 +695,32 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            7. PRODUCT / PROJECT SHOWCASE (TILT CARDS)
+            7. PROJECTS
            == */}
-        <section data-section="tech" className={styles.sectionWindow}>
+        <section data-section="tech" data-section-id="projects" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// PRODUCTION RELEASES</span>
             <h3 className={styles.sectionHeader}>SYSTEM WORKCASE DEPLOYMENTS</h3>
 
             <div className={styles.showcaseGrid}>
               {[
-                { 
-                  title: 'McDonald\'s Multimedia Table', 
+                {
+                  title: 'McDonald\'s Multimedia Table',
                   type: 'Interactive Gaming Table with Unity & Hardware Integration',
                   desc: 'Multimedia gaming table for McDonald\'s restaurants. Interactive experience based on game engine/Unity, hardware integration, refined UI, animations, and flawless operation in kiosk mode. Project coordinator & frontend/Unity contributor. Responsible for planning, delivery, and production readiness.'
                 },
-                { 
-                  title: 'TopSupple Online Store', 
+                {
+                  title: 'TopSupple Online Store',
                   type: 'E-commerce Platform',
                   desc: 'Complete e-commerce platform with CMS, basket, checkout, payments, and an admin panel for day-to-day operations. React.js, CMS, Payments, Admin panel.'
                 },
-                { 
-                  title: 'Fitrening Sports Stats', 
+                {
+                  title: 'Fitrening Sports Stats',
                   type: 'Sports Statistics Platform',
                   desc: 'Statistics platform for sport users with three privilege levels, authentication, password change flow, and an admin panel. RBAC, Auth, Analytics, Admin.'
                 },
-                { 
-                  title: 'Eternal Wellness Booking App', 
+                {
+                  title: 'Eternal Wellness Booking App',
                   type: 'Calendar & Booking Application',
                   desc: 'Performance-driven booking and scheduling platform built with React.js and Node.js. Streamlined client journey: service selection, availability discovery, booking confirmation, and operational admin tooling.'
                 }
@@ -621,15 +746,15 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            8. CONTACT MATRIX TERMINAL (CINEMATIC END)
+            8. CONTACT
            == */}
-        <section data-section="contact" className={styles.sectionWindow}>
+        <section data-section="contact" data-section-id="contact" className={styles.sectionWindow}>
           <div className={styles.glassContainer}>
             <div className={styles.contactQuantumLayout}>
               <div className={styles.contactCenterFrame}>
                 <span className={styles.sectionTag}>// SECURE TRANSCEIVER NODE</span>
                 <h3 className={styles.hugeContactHeader}>LET'S CONSTRUCT QUANTUM ARCHITECTURE</h3>
-                
+
                 <p className={styles.contactIntro}>
                   I'm always open to new opportunities, collaborations, and exciting projects. Feel free to reach out!
                 </p>
@@ -644,9 +769,9 @@ export default function Portfolio() {
                   <a href="https://github.com/ponczuTM" target="_blank" rel="noreferrer" className={styles.channelLinkAnchor}>
                     <FiGithub /> github.com/ponczuTM
                   </a>
-                  <span className={styles.channelLinkAnchor}>
+                  <a href="https://mroczkowski.netlify.app" target="_blank" rel="noreferrer" className={styles.channelLinkAnchor}>
                     <FiGlobe /> mroczkowski.netlify.app
-                  </span>
+                  </a>
                 </div>
 
                 <div className={styles.contactBusinessNote}>
@@ -669,9 +794,9 @@ export default function Portfolio() {
         </section>
 
         {/* ==
-            9. MINIMALISTIC FOOTER RUNTIME LAYER
+            9. FOOTER
            == */}
-        <footer className={styles.minimalistFooter}>
+        <footer className={styles.minimalistFooter} data-section-id="footer">
           <div className={styles.footerGlowDivider} />
           <div className={styles.footerContentBlock}>
             <p>© 2026 Made with ♥ by Oliwer Mroczkowski.</p>
@@ -679,7 +804,43 @@ export default function Portfolio() {
             <p className={styles.footerSmallNote}>React • Node • UX • Unity</p>
           </div>
         </footer>
+      </div>
+    );
+  };
 
+  return (
+    <ReactLenis
+      ref={lenisRef}
+      root
+      options={{
+        lerp: 0.08,
+        duration: 1.2,
+        syncTouch: true,
+      }}
+    >
+      <div ref={containerRef} className={styles.appContainer}>
+        <div className={styles.grainOverlay} />
+        <div className={styles.vignetteOverlay} />
+
+        <motion.div
+          className={styles.customCursor}
+          style={{ x: cursorX, y: cursorY }}
+        />
+
+        <Interactive3DScene activeSection={activeSection} />
+
+        <div className={styles.hackerTicker}>
+          <span className={styles.tickerPulse}></span>
+          <p className={styles.tickerText}>{hackedText}</p>
+        </div>
+
+        <div className={styles.infinitePagesWrapper}>
+          {PAGE_COPIES.map((copyIndex) => (
+            <React.Fragment key={copyIndex}>
+              {renderPageContent(copyIndex)}
+            </React.Fragment>
+          ))}
+        </div>
       </div>
     </ReactLenis>
   );
