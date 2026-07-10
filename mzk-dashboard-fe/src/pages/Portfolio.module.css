@@ -1,12 +1,8 @@
-/* Portfolio.module.css */
-
-/* ============================
-   GLOBAL & RESET OVERRIDE
-   ============================ */
    * {
     margin: 0;
     padding: 0;
     box-sizing: border-box;
+    cursor: none;
   }
   
   html {
@@ -19,6 +15,11 @@
     color: #e8edf5;
     line-height: 1.6;
     overflow-x: hidden;
+  }
+  
+  /* GLOBAL TEXT SHADOW - dla wszystkich tekstów */
+  body, p, h1, h2, h3, h4, h5, h6, span, div, a, li, button, input, textarea, label {
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6), 0 4px 16px rgba(0, 0, 0, 0.3);
   }
   
   /* ============================
@@ -74,17 +75,159 @@
   /* ============================
      CUSTOM CURSOR
      ============================ */
+
   .customCursor {
     position: fixed;
-    width: 16px;
-    height: 16px;
+    top: 0;
+    left: 0;
+    width: 30px;
+    height: 30px;
     border-radius: 50%;
-    background: rgba(59, 130, 246, 0.2);
-    border: 2px solid rgba(59, 130, 246, 0.4);
     pointer-events: none;
     z-index: 9999;
     transform: translate(-50%, -50%);
-    transition: width 0.2s, height 0.2s;
+    transition:
+      width 0.2s ease,
+      height 0.2s ease,
+      transform 0.08s ease;
+    
+    animation: cursorColorCycle 4s linear infinite;
+  }
+
+  .customCursor::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    animation:
+      cursorCorePulse 1.4s ease-in-out infinite,
+      cursorCoreColorCycle 4s linear infinite;
+  }
+
+  .customCursor::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1px solid;
+    transform: translate(-50%, -50%);
+    animation:
+      cursorRingPulse 1.4s ease-in-out infinite,
+      cursorRingColorCycle 4s linear infinite;
+  }
+
+  .customCursor.active {
+    width: 42px;
+    height: 42px;
+  }
+
+  @keyframes cursorColorCycle {
+    0%,
+    100% {
+      background: rgba(34, 197, 94, 0.18);   /* green */
+      border: 2px solid rgba(34, 197, 94, 0.45);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.06),
+        0 0 18px rgba(34, 197, 94, 0.22);
+    }
+    25% {
+      background: rgba(234, 179, 8, 0.18);   /* yellow */
+      border: 2px solid rgba(234, 179, 8, 0.45);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.06),
+        0 0 18px rgba(234, 179, 8, 0.22);
+    }
+    50% {
+      background: rgba(249, 115, 22, 0.18);  /* orange */
+      border: 2px solid rgba(249, 115, 22, 0.45);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.06),
+        0 0 18px rgba(249, 115, 22, 0.22);
+    }
+    75% {
+      background: rgba(239, 68, 68, 0.18);   /* red */
+      border: 2px solid rgba(239, 68, 68, 0.45);
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.06),
+        0 0 18px rgba(239, 68, 68, 0.22);
+    }
+  }
+
+  @keyframes cursorCoreColorCycle {
+    0%,
+    100% {
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow:
+        0 0 8px rgba(34, 197, 94, 0.9),
+        0 0 16px rgba(34, 197, 94, 0.45);
+    }
+    25% {
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow:
+        0 0 8px rgba(234, 179, 8, 0.9),
+        0 0 16px rgba(234, 179, 8, 0.45);
+    }
+    50% {
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow:
+        0 0 8px rgba(249, 115, 22, 0.9),
+        0 0 16px rgba(249, 115, 22, 0.45);
+    }
+    75% {
+      background: rgba(255, 255, 255, 0.98);
+      box-shadow:
+        0 0 8px rgba(239, 68, 68, 0.9),
+        0 0 16px rgba(239, 68, 68, 0.45);
+    }
+  }
+
+  @keyframes cursorRingColorCycle {
+    0%,
+    100% {
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+    25% {
+      border-color: rgba(234, 179, 8, 0.35);
+    }
+    50% {
+      border-color: rgba(249, 115, 22, 0.35);
+    }
+    75% {
+      border-color: rgba(239, 68, 68, 0.35);
+    }
+  }
+
+  @keyframes cursorCorePulse {
+    0%, 100% {
+      transform: translate(-50%, -50%) scale(1);
+      opacity: 1;
+    }
+    50% {
+      transform: translate(-50%, -50%) scale(1.35);
+      opacity: 0.75;
+    }
+  }
+
+  @keyframes cursorRingPulse {
+    0% {
+      transform: translate(-50%, -50%) scale(0.9);
+      opacity: 0.55;
+    }
+    70% {
+      transform: translate(-50%, -50%) scale(1.8);
+      opacity: 0;
+    }
+    100% {
+      transform: translate(-50%, -50%) scale(1.8);
+      opacity: 0;
+    }
   }
   
   /* ============================
@@ -129,6 +272,7 @@
     color: #94a3b8;
     text-transform: uppercase;
     opacity: 0.9;
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
   }
   
   /* ============================
@@ -158,9 +302,9 @@
     max-width: 1200px;
     width: 100%;
     margin: 0 auto;
-    background: rgba(15, 23, 42, 0.6);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    background: rgba(15, 23, 42, 0.366);
+    backdrop-filter: blur(1px);
+    -webkit-backdrop-filter: blur(1px);
     border-radius: 32px;
     padding: 56px 64px;
     border: 1px solid rgba(255, 255, 255, 0.06);
@@ -183,6 +327,7 @@
     border-radius: 20px;
     margin-bottom: 16px;
     border: 1px solid rgba(59, 130, 246, 0.1);
+    text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7), 0 0 20px rgba(59, 130, 246, 0.15);
   }
   
   .sectionHeader {
@@ -191,6 +336,7 @@
     color: #f1f5f9;
     margin-bottom: 32px;
     letter-spacing: -0.5px;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7), 0 4px 24px rgba(0, 0, 0, 0.4);
   }
   
   /* ============================
@@ -220,6 +366,7 @@
     letter-spacing: -2px;
     color: #f1f5f9;
     line-height: 1.1;
+    text-shadow: 0 4px 20px rgba(0, 0, 0, 0.8), 0 8px 40px rgba(0, 0, 0, 0.5);
   }
   
   .gradientText {
@@ -227,6 +374,7 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+    text-shadow: 0 2px 20px rgba(96, 165, 250, 0.3), 0 4px 30px rgba(167, 139, 250, 0.2);
   }
   
   .subContainer {
@@ -239,6 +387,7 @@
     color: #94a3b8;
     letter-spacing: 2px;
     text-transform: uppercase;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .glowingBar {
@@ -255,6 +404,7 @@
     font-size: 1.05rem;
     color: #cbd5e1;
     line-height: 1.7;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
   }
   
   /* Home Quick Info */
@@ -271,6 +421,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .homeCTArow {
@@ -292,6 +443,7 @@
     border-radius: 60px;
     border: 1px solid rgba(255, 255, 255, 0.06);
     transition: all 0.3s ease;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .githubHomeLink:hover {
@@ -311,9 +463,10 @@
     border-radius: 60px;
     font-size: 0.9rem;
     font-weight: 500;
-    cursor: pointer;
+    cursor: none;
     transition: all 0.3s ease;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    text-shadow: 0 1px 4px rgba(255, 255, 255, 0.3);
   }
   
   .premiumCTA:hover {
@@ -345,12 +498,14 @@
     color: #cbd5e1;
     line-height: 1.8;
     margin-bottom: 16px;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
   }
   
   .aboutIntro {
     font-size: 1.1rem !important;
     font-weight: 500;
     color: #f1f5f9 !important;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8) !important;
   }
   
   .aboutCorePillars {
@@ -371,17 +526,20 @@
     color: #60a5fa;
     margin-top: 2px;
     flex-shrink: 0;
+    text-shadow: 0 0 20px rgba(96, 165, 250, 0.3);
   }
   
   .pillarItem strong {
     display: block;
     font-size: 0.95rem;
     color: #f1f5f9;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .pillarItem span {
     font-size: 0.85rem;
     color: #94a3b8;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .aboutSnapshot {
@@ -397,6 +555,7 @@
     color: #f1f5f9;
     margin-bottom: 16px;
     letter-spacing: 0.5px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .snapshotGrid {
@@ -416,11 +575,13 @@
     color: #64748b;
     letter-spacing: 0.5px;
     font-weight: 600;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
   }
   
   .snapshotGrid span {
     font-size: 0.9rem;
     color: #cbd5e1;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   /* ============================
@@ -440,6 +601,7 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 10px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .techChipGroup {
@@ -456,6 +618,7 @@
     border-radius: 20px;
     border: 1px solid rgba(255, 255, 255, 0.04);
     transition: all 0.3s ease;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
   }
   
   .techChip:hover {
@@ -512,12 +675,14 @@
     font-size: 1.05rem;
     font-weight: 600;
     color: #f1f5f9;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
   }
   
   .checkpointTimestamp {
     font-size: 0.8rem;
     font-weight: 400;
     color: #94a3b8;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .checkpointRole {
@@ -525,6 +690,7 @@
     font-weight: 500;
     color: #60a5fa;
     margin-bottom: 6px;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7), 0 0 20px rgba(96, 165, 250, 0.15);
   }
   
   .checkpointDetailsList {
@@ -540,6 +706,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .checkpointDetailsList li svg {
@@ -577,18 +744,21 @@
     font-size: 1.6rem;
     color: #60a5fa;
     margin-bottom: 8px;
+    text-shadow: 0 0 20px rgba(96, 165, 250, 0.3);
   }
   
   .educationCard h4 {
     font-size: 1rem;
     font-weight: 600;
     color: #f1f5f9;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
   }
   
   .eduInstitution {
     font-size: 0.9rem;
     color: #94a3b8;
     margin: 2px 0 4px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .eduDate {
@@ -599,6 +769,7 @@
     padding: 2px 12px;
     border-radius: 12px;
     margin-bottom: 8px;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
   }
   
   .eduDesc {
@@ -606,6 +777,7 @@
     color: #94a3b8;
     line-height: 1.6;
     margin-top: 4px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   /* ============================
@@ -628,11 +800,13 @@
     justify-content: space-between;
     font-size: 0.85rem;
     color: #cbd5e1;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .reactorMetricPct {
     font-weight: 500;
     color: #60a5fa;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7), 0 0 20px rgba(96, 165, 250, 0.15);
   }
   
   .reactorEnergyMeterTrack {
@@ -711,12 +885,14 @@
     font-size: 1rem;
     font-weight: 600;
     color: #f1f5f9;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
   }
   
   .projectCardType {
     font-size: 0.8rem;
     color: #60a5fa;
     margin-top: 2px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 20px rgba(96, 165, 250, 0.15);
   }
   
   .projectCardDesc {
@@ -724,6 +900,7 @@
     color: #94a3b8;
     margin-top: 8px;
     line-height: 1.6;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .projectCardLink {
@@ -734,7 +911,8 @@
     color: #64748b;
     margin-top: 12px;
     transition: color 0.3s ease;
-    cursor: pointer;
+    cursor: none;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .projectCardLink:hover {
@@ -762,12 +940,14 @@
     color: #f1f5f9;
     margin: 12px 0 16px;
     line-height: 1.2;
+    text-shadow: 0 2px 16px rgba(0, 0, 0, 0.8), 0 4px 32px rgba(0, 0, 0, 0.4);
   }
   
   .contactIntro {
     color: #94a3b8;
     font-size: 1rem;
     margin-bottom: 28px;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
   }
   
   .contactChannelsGrid {
@@ -792,6 +972,7 @@
     transition: all 0.3s ease;
     width: 100%;
     justify-content: center;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .channelLinkAnchor:hover {
@@ -814,11 +995,13 @@
     font-size: 0.9rem;
     color: #f1f5f9;
     margin-bottom: 4px;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
   }
   
   .contactBusinessNote p {
     font-size: 0.85rem;
     color: #94a3b8;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .terminalSignatureCluster {
@@ -829,11 +1012,13 @@
     font-size: 1.1rem;
     font-weight: 600;
     color: #f1f5f9;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
   }
   
   .sigSub {
     font-size: 0.85rem;
     color: #94a3b8;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   .sigContactRow {
@@ -844,6 +1029,7 @@
     color: #64748b;
     margin-top: 4px;
     flex-wrap: wrap;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.7);
   }
   
   /* ============================
@@ -869,6 +1055,7 @@
     font-size: 0.75rem;
     color: #475569;
     letter-spacing: 0.5px;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
   }
   
   .footerTechStackTelemetry {
@@ -876,12 +1063,14 @@
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 0.65rem;
     color: #334155;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
   }
   
   .footerSmallNote {
     margin-top: 2px;
     font-size: 0.6rem !important;
     color: #2a3a5a !important;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9) !important;
   }
   
   /* ============================
@@ -947,18 +1136,22 @@
   
     .sectionHeader {
       font-size: 1.6rem;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
     }
   
     .giantTitle {
       font-size: 2.4rem;
+      text-shadow: 0 4px 20px rgba(0, 0, 0, 0.8);
     }
   
     .roleSubtext {
       font-size: 0.85rem;
+      text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
     }
   
     .abstractDescription {
       font-size: 0.95rem;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.7);
     }
   
     .techCategories {
@@ -978,6 +1171,7 @@
   
     .tickerText {
       font-size: 0.6rem;
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.8);
     }
   
     .customCursor {

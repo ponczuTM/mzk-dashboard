@@ -379,7 +379,7 @@ export default function Portfolio() {
 
     const lenis = lenisRef.current?.lenis;
     if (lenis) {
-      lenis.scrollTo(absoluteTop, { duration: 1.2 });
+      lenis.scrollTo(absoluteTop, { duration: 3 });
     } else {
       window.scrollTo({ top: absoluteTop, behavior: 'smooth' });
     }
