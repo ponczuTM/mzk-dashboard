@@ -11,8 +11,16 @@ import {
   FiUser, FiBriefcase, FiBook, FiTool, FiStar, FiAward, FiServer, FiLayout,
   FiGrid, FiClock, FiMapPin, FiLink, FiExternalLink, FiCheck, FiPlus
 } from 'react-icons/fi';
-import styles from './Portfolio.module.css';
 import { PointMaterial } from '@react-three/drei';
+import styles from './Portfolio.module.css';
+
+import mcdonalds from '../assets/images/mcdonalds.png';
+import gorpol from '../assets/images/gorpol.png';
+import fitrening from '../assets/images/fitrening.png';
+import mechanic from '../assets/images/mechanic.png';
+import topsupple from '../assets/images/topsupple.png';
+import pracovo from '../assets/images/pracovo.png';
+import eternalwellness from '../assets/images/eternalwellness.png';
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -40,6 +48,7 @@ function ParticleMorphSystem({ activeSection }) {
       const theta = u * 2.0 * Math.PI;
       const phi = Math.acos(2.0 * v - 1.0);
       const r = Math.cbrt(Math.random()) * 8;
+
       targets.home[i3] = r * Math.sin(phi) * Math.cos(theta);
       targets.home[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
       targets.home[i3 + 2] = r * Math.cos(phi);
@@ -120,6 +129,7 @@ function StarfieldBackground() {
 
   const sphere = useMemo(() => {
     const arr = new Float32Array(1500 * 3);
+
     for (let i = 0; i < 1500; i++) {
       const i3 = i * 3;
       const u = Math.random();
@@ -127,10 +137,12 @@ function StarfieldBackground() {
       const theta = u * 2.0 * Math.PI;
       const phi = Math.acos(2.0 * v - 1.0);
       const r = 20 + Math.random() * 30;
+
       arr[i3] = r * Math.sin(phi) * Math.cos(theta);
       arr[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
       arr[i3 + 2] = r * Math.cos(phi);
     }
+
     return arr;
   }, []);
 
@@ -144,12 +156,18 @@ function StarfieldBackground() {
   return (
     <points ref={ref}>
       <bufferGeometry>
-        <bufferAttribute attach="attributes-position" count={1500} array={sphere} itemSize={3} />
+        <bufferAttribute
+          attach="attributes-position"
+          count={1500}
+          array={sphere}
+          itemSize={3}
+        />
       </bufferGeometry>
+
       <pointsMaterial
         color="#9d4edd"
         size={0.04}
-        sizeAttenuation={true}
+        sizeAttenuation
         depthWrite={false}
         transparent
         opacity={0.4}
@@ -174,6 +192,7 @@ function FloatingTechArtifacts() {
         <octahedronGeometry args={[0.7, 0]} />
         <meshBasicMaterial color="#00f3ff" wireframe transparent opacity={0.15} />
       </mesh>
+
       <mesh position={[-5, -2, -4]}>
         <dodecahedronGeometry args={[0.8, 0]} />
         <meshBasicMaterial color="#9d4edd" wireframe transparent opacity={0.15} />
@@ -189,6 +208,7 @@ function Interactive3DScene({ activeSection }) {
         <ambientLight intensity={0.2} />
         <pointLight position={[10, 10, 10]} intensity={1.5} color="#00f3ff" />
         <pointLight position={[-10, -10, -10]} intensity={1.0} color="#9d4edd" />
+
         <ParticleMorphSystem activeSection={activeSection} />
         <StarfieldBackground />
         <FloatingTechArtifacts />
@@ -200,12 +220,12 @@ function Interactive3DScene({ activeSection }) {
 // ==
 // MAIN COMPONENT
 // ==
-
 const PAGE_COPIES = [0, 1, 2];
 
 export default function Portfolio() {
   const [activeSection, setActiveSection] = useState('home');
   const [hackedText, setHackedText] = useState('RECRUITER DETECTED...');
+
   const containerRef = useRef(null);
   const middlePageRef = useRef(null);
   const lenisRef = useRef(null);
@@ -213,7 +233,6 @@ export default function Portfolio() {
   const pageHeightRef = useRef(0);
   const initializedRef = useRef(false);
 
-  // Advanced Mouse Tracking Mechanics
   const mouseX = useMotionValue(-100);
   const mouseY = useMotionValue(-100);
   const springConfig = { damping: 30, stiffness: 400, mass: 0.4 };
@@ -227,10 +246,12 @@ export default function Portfolio() {
     };
 
     window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+    };
   }, [mouseX, mouseY]);
 
-  // System Text Simulation Ticker Loops
   useEffect(() => {
     const lines = [
       'INITIALIZING SCANNER...',
@@ -242,6 +263,7 @@ export default function Portfolio() {
     ];
 
     let idx = 0;
+
     const interval = setInterval(() => {
       setHackedText(lines[idx]);
       idx = (idx + 1) % lines.length;
@@ -252,13 +274,19 @@ export default function Portfolio() {
 
   const getScroller = useCallback(() => {
     const lenis = lenisRef.current?.lenis;
+
     if (lenis?.rootElement) return lenis.rootElement;
+
     return window;
   }, []);
 
   const getScrollY = useCallback(() => {
     const lenis = lenisRef.current?.lenis;
-    if (lenis && typeof lenis.scroll === 'number') return lenis.scroll;
+
+    if (lenis && typeof lenis.scroll === 'number') {
+      return lenis.scroll;
+    }
+
     return window.scrollY || window.pageYOffset || 0;
   }, []);
 
@@ -266,18 +294,25 @@ export default function Portfolio() {
     const lenis = lenisRef.current?.lenis;
 
     if (lenis) {
-      lenis.scrollTo(value, { immediate, force: true, lock: true });
+      lenis.scrollTo(value, {
+        immediate,
+        force: true,
+        lock: true
+      });
     } else {
-      window.scrollTo({ top: value, behavior: 'auto' });
+      window.scrollTo({
+        top: value,
+        behavior: 'auto'
+      });
     }
   }, []);
 
   const updatePageMetrics = useCallback(() => {
     if (!middlePageRef.current) return;
+
     pageHeightRef.current = middlePageRef.current.offsetHeight;
   }, []);
 
-  // Initialize in the middle copy
   useEffect(() => {
     const init = () => {
       updatePageMetrics();
@@ -289,6 +324,7 @@ export default function Portfolio() {
     };
 
     const raf = requestAnimationFrame(init);
+
     window.addEventListener('resize', updatePageMetrics);
 
     return () => {
@@ -297,7 +333,6 @@ export default function Portfolio() {
     };
   }, [setScrollY, updatePageMetrics]);
 
-  // Infinite page loop logic
   useEffect(() => {
     const handleLoopScroll = () => {
       if (isTeleportingRef.current) return;
@@ -311,12 +346,14 @@ export default function Portfolio() {
       if (y < threshold) {
         isTeleportingRef.current = true;
         setScrollY(y + pageHeight, true);
+
         requestAnimationFrame(() => {
           isTeleportingRef.current = false;
         });
       } else if (y > pageHeight * 2 - threshold) {
         isTeleportingRef.current = true;
         setScrollY(y - pageHeight, true);
+
         requestAnimationFrame(() => {
           isTeleportingRef.current = false;
         });
@@ -335,16 +372,19 @@ export default function Portfolio() {
     }
 
     return () => {
-      if (cleanupLenis) cleanupLenis();
-      else window.removeEventListener('scroll', handleLoopScroll);
+      if (cleanupLenis) {
+        cleanupLenis();
+      } else {
+        window.removeEventListener('scroll', handleLoopScroll);
+      }
     };
   }, [getScrollY, setScrollY]);
 
-  // Observe only the middle copy, so particle states stay stable
   useEffect(() => {
     if (!middlePageRef.current) return;
 
     const sections = middlePageRef.current.querySelectorAll('[data-section]');
+
     const observerOptions = {
       root: null,
       rootMargin: '-40% 0px -40% 0px',
@@ -357,36 +397,91 @@ export default function Portfolio() {
       entries.forEach((entry) => {
         if (entry.isIntersecting) {
           const sectionName = entry.target.getAttribute('data-section');
-          if (sectionName) setActiveSection(sectionName);
+
+          if (sectionName) {
+            setActiveSection(sectionName);
+          }
         }
       });
     }, observerOptions);
 
-    sections.forEach((s) => observer.observe(s));
+    sections.forEach((section) => observer.observe(section));
 
     return () => {
-      sections.forEach((s) => observer.unobserve(s));
+      sections.forEach((section) => observer.unobserve(section));
       observer.disconnect();
     };
   }, []);
 
   const scrollToSection = useCallback((sectionId) => {
-    const target = middlePageRef.current?.querySelector(`[data-section-id="${sectionId}"]`);
+    const target = middlePageRef.current?.querySelector(
+      `[data-section-id="${sectionId}"]`
+    );
+
     if (!target) return;
 
     const rect = target.getBoundingClientRect();
     const absoluteTop = getScrollY() + rect.top;
 
     const lenis = lenisRef.current?.lenis;
+
     if (lenis) {
       lenis.scrollTo(absoluteTop, { duration: 3 });
     } else {
-      window.scrollTo({ top: absoluteTop, behavior: 'smooth' });
+      window.scrollTo({
+        top: absoluteTop,
+        behavior: 'smooth'
+      });
     }
   }, [getScrollY]);
 
   const renderPageContent = (copyIndex) => {
     const pageProps = copyIndex === 1 ? { ref: middlePageRef } : {};
+
+    const projects = [
+      {
+        title: 'McDonald\'s Multimedia Table',
+        type: 'Interactive Gaming Table with Unity & Hardware Integration',
+        image: mcdonalds,
+        desc: 'Multimedia gaming table for McDonald\'s restaurants. Interactive experience based on game engine/Unity, hardware integration, refined UI, animations, and flawless operation in kiosk mode. Project coordinator & frontend/Unity contributor. Responsible for planning, delivery, and production readiness.'
+      },
+      {
+        title: 'TopSupple Online Store',
+        type: 'E-commerce Platform',
+        image: topsupple,
+        desc: 'Complete e-commerce platform with CMS, basket, checkout, payments, and an admin panel for day-to-day operations. React.js, CMS, Payments, Admin panel.'
+      },
+      {
+        title: 'Fitrening Sports Stats',
+        type: 'Sports Statistics Platform',
+        image: fitrening,
+        desc: 'Statistics platform for sport users with three privilege levels, authentication, password change flow, and an admin panel. RBAC, Auth, Analytics, Admin.'
+      },
+      {
+        title: 'Eternal Wellness Booking App',
+        type: 'Calendar & Booking Application',
+        image: eternalwellness,
+        desc: 'Performance-driven booking and scheduling platform built with React.js and Node.js. Streamlined client journey: service selection, availability discovery, booking confirmation, and operational admin tooling.'
+      },
+      {
+        title: 'Pracovo.pl',
+        type: 'AI-Powered Remote Recruitment Platform',
+        image: pracovo,
+        desc: 'Innovative job board for remote specialists integrated with an automated AI recruitment pipeline. Features a custom job listing creator and multi-tiered hiring automation: traditional application flow, automated AI Screening of resumes to select top candidates, and an AI Agent mode conducting structured online interviews with automated voice/text analysis.'
+      },
+      {
+        title: 'GÓRPOL Website',
+        type: 'Heavy Machinery Rental Landing Page',
+        image: gorpol,
+        desc: 'A business card and service presentation website for a heavy construction equipment rental company. Designed for high performance and conversions, showcasing a comprehensive fleet of telehandlers and backhoe loaders with professional UDT certifications, dedicated operators, and a streamlined contact flow for B2B and individual clients.'
+      },
+      {
+        title: 'Mechanik Lubicz',
+        type: 'Local Business Showcase & Lead Generation Page',
+        image: mechanic,
+        desc: 'An optimized, highly responsive local business landing page designed for a professional car diagnostics and repair workshop. Built with an intuitive, mobile-first interface featuring quick-action call buttons, structured service offerings (ranging from computer diagnostics to suspension and gearbox repairs), and clear location metadata to boost local SEO.'
+      }
+    ];
 
     return (
       <div
@@ -395,63 +490,81 @@ export default function Portfolio() {
         data-page-copy={copyIndex}
         aria-hidden={copyIndex !== 1}
       >
-        {/* ==
-            1. HOME SECTOR
-           == */}
-        <section data-section="home" data-section-id="home" className={styles.sectionWindow}>
-        <div className={styles.glassContainer}>
-          <div className={styles.centerHero}>
-            <div className={styles.heroLayout}>
-              <motion.div
-                initial={{ opacity: 0, y: 100 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1], delay: 0.2 }}
-                className={styles.glitchContainer}
-              >
-                <h1 className={styles.giantTitle}>
-                  OLIWER <span className={styles.gradientText}>MROCZKOWSKI</span>
-                </h1>
-              </motion.div>
+        <section
+          data-section="home"
+          data-section-id="home"
+          className={styles.sectionWindow}
+        >
+          <div className={styles.glassContainer}>
+            <div className={styles.centerHero}>
+              <div className={styles.heroLayout}>
+                <motion.div
+                  initial={{ opacity: 0, y: 100 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{
+                    duration: 1.2,
+                    ease: [0.16, 1, 0.3, 1],
+                    delay: 0.2
+                  }}
+                  className={styles.glitchContainer}
+                >
+                  <h1 className={styles.giantTitle}>
+                    OLIWER <span className={styles.gradientText}>MROCZKOWSKI</span>
+                  </h1>
+                </motion.div>
 
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ duration: 1.6, delay: 0.6 }}
-                className={styles.subContainer}
-              >
-                <h2 className={styles.roleSubtext}>FULLSTACK DEVELOPER & ENGINEER</h2>
-                <div className={styles.glowingBar} />
-                <p className={styles.abstractDescription}>
-                  I design and build interactive, modern web applications with React, and Node.js. Passionate about creating engaging user experiences with clean design and solid code.
-                </p>
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 1.6, delay: 0.6 }}
+                  className={styles.subContainer}
+                >
+                  <h2 className={styles.roleSubtext}>
+                    FULLSTACK DEVELOPER & ENGINEER
+                  </h2>
 
-                <div className={styles.homeQuickInfo}>
-                  <span><FiMapPin /> Poland / Remote</span>
-                  <span><FiClock /> Available for new opportunities</span>
-                </div>
+                  <div className={styles.glowingBar} />
 
-                <div className={styles.homeCTArow}>
-                  <button
-                    className={styles.premiumCTA}
-                    onClick={() => scrollToSection('about')}
-                  >
-                    INITIALIZE JOURNEY <FiArrowRight className={styles.ctaIcon} />
-                  </button>
+                  <p className={styles.abstractDescription}>
+                    I design and build interactive, modern web applications with React,
+                    and Node.js. Passionate about creating engaging user experiences
+                    with clean design and solid code.
+                  </p>
 
-                  <a href="https://github.com/ponczuTM" target="_blank" rel="noreferrer" className={styles.githubHomeLink}>
-                    <FiGithub /> GitHub
-                  </a>
-                </div>
-              </motion.div>
+                  <div className={styles.homeQuickInfo}>
+                    <span><FiMapPin /> Poland / Remote</span>
+                    <span><FiClock /> Available for new opportunities</span>
+                  </div>
+
+                  <div className={styles.homeCTArow}>
+                    <button
+                      className={styles.premiumCTA}
+                      onClick={() => scrollToSection('about')}
+                    >
+                      INITIALIZE JOURNEY <FiArrowRight className={styles.ctaIcon} />
+                    </button>
+
+                    <a
+                      href="https://github.com/ponczuTM"
+                      target="_blank"
+                      rel="noreferrer"
+                      className={styles.githubHomeLink}
+                    >
+                      <FiGithub /> GitHub
+                    </a>
+                  </div>
+                </motion.div>
+              </div>
             </div>
-          </div>
           </div>
         </section>
 
-        {/* ==
-            2. ABOUT PORTAL SECTOR
-           == */}
-        <section id={copyIndex === 1 ? 'about' : undefined} data-section="about" data-section-id="about" className={styles.sectionWindow}>
+        <section
+          id={copyIndex === 1 ? 'about' : undefined}
+          data-section="about"
+          data-section-id="about"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// SYSTEM CORE MANIFESTO</span>
             <h3 className={styles.sectionHeader}>BIO ARCHITECTURE</h3>
@@ -459,11 +572,19 @@ export default function Portfolio() {
             <div className={styles.aboutFullGrid}>
               <div className={styles.aboutMainBio}>
                 <p className={styles.aboutIntro}>
-                  Frontend Developer and master engineer with several years of experience in designing and implementing web applications using React.js, Angular and modern JavaScript.
+                  Frontend Developer and master engineer with several years of
+                  experience in designing and implementing web applications using
+                  React.js, Angular and modern JavaScript.
                 </p>
+
                 <p>
-                  Skilled in building interactive user interfaces, integrating backend services and managing commercial projects. Strong analytical mindset with additional expertise in data processing (Python) and proven teamwork and presentation skills. Advanced English (B2) and a strong commitment to delivering high-quality results.
+                  Skilled in building interactive user interfaces, integrating backend
+                  services and managing commercial projects. Strong analytical mindset
+                  with additional expertise in data processing (Python) and proven
+                  teamwork and presentation skills. Advanced English (B2) and a strong
+                  commitment to delivering high-quality results.
                 </p>
+
                 <div className={styles.aboutCorePillars}>
                   <div className={styles.pillarItem}>
                     <FiStar className={styles.pillarIcon} />
@@ -472,6 +593,7 @@ export default function Portfolio() {
                       <span>Clean flows, crisp motion, and zero-friction UI decisions.</span>
                     </div>
                   </div>
+
                   <div className={styles.pillarItem}>
                     <FiTool className={styles.pillarIcon} />
                     <div>
@@ -479,6 +601,7 @@ export default function Portfolio() {
                       <span>Maintainable architecture, solid code, predictable delivery.</span>
                     </div>
                   </div>
+
                   <div className={styles.pillarItem}>
                     <FiServer className={styles.pillarIcon} />
                     <div>
@@ -491,6 +614,7 @@ export default function Portfolio() {
 
               <div className={styles.aboutSnapshot}>
                 <h4>Quick Snapshot</h4>
+
                 <div className={styles.snapshotGrid}>
                   <div><strong>Focus</strong><span>React, Node.js, UX engineering</span></div>
                   <div><strong>Strength</strong><span>Interactive apps & device integrations</span></div>
@@ -502,10 +626,11 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            3. TECH STACK MATRIX SECTOR
-           == */}
-        <section data-section="tech" data-section-id="tech" className={styles.sectionWindow}>
+        <section
+          data-section="tech"
+          data-section-id="tech"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// CAPABILITY ARCHITECTURE</span>
             <h3 className={styles.sectionHeader}>TECHNOLOGY INFRASTRUCTURE</h3>
@@ -520,6 +645,7 @@ export default function Portfolio() {
                   <span className={styles.techChip}>HTML/CSS</span>
                 </div>
               </div>
+
               <div className={styles.techCategory}>
                 <h4><FiServer /> Backend Development</h4>
                 <div className={styles.techChipGroup}>
@@ -529,6 +655,7 @@ export default function Portfolio() {
                   <span className={styles.techChip}>MongoDB</span>
                 </div>
               </div>
+
               <div className={styles.techCategory}>
                 <h4><FiLayout /> UI & UX</h4>
                 <div className={styles.techChipGroup}>
@@ -537,6 +664,7 @@ export default function Portfolio() {
                   <span className={styles.techChip}>Interactive Interfaces</span>
                 </div>
               </div>
+
               <div className={styles.techCategory}>
                 <h4><FiTool /> Additional</h4>
                 <div className={styles.techChipGroup}>
@@ -544,6 +672,7 @@ export default function Portfolio() {
                   <span className={styles.techChip}>Unity (C#)</span>
                 </div>
               </div>
+
               <div className={styles.techCategory}>
                 <h4><FiGitBranch /> Tools</h4>
                 <div className={styles.techChipGroup}>
@@ -557,12 +686,16 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            4. EXPERIENCE
-           == */}
-        <section data-section="experience" data-section-id="experience" className={styles.sectionWindow}>
+        <section
+          data-section="experience"
+          data-section-id="experience"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
-            <span className={styles.sectionTag}>// CHRONOLOGICAL RUNTIME OPERATION</span>
+            <span className={styles.sectionTag}>
+              // CHRONOLOGICAL RUNTIME OPERATION
+            </span>
+
             <h3 className={styles.sectionHeader}>EXPERIENCE REGISTER</h3>
 
             <div className={styles.hyperTunnelTimeline}>
@@ -612,14 +745,21 @@ export default function Portfolio() {
               ].map((exp, idx) => (
                 <div key={idx} className={styles.timelineCheckpointNode}>
                   <div className={styles.checkpointGlowNode} />
+
                   <div className={styles.checkpointBlock}>
                     <div className={styles.checkpointHeaderRow}>
                       <h4 className={styles.checkpointCompany}>{exp.company}</h4>
                       <span className={styles.checkpointTimestamp}>{exp.date}</span>
                     </div>
+
                     <h5 className={styles.checkpointRole}>{exp.role}</h5>
+
                     <ul className={styles.checkpointDetailsList}>
-                      {exp.bullets.map((b, bIdx) => <li key={bIdx}><FiCheck /> {b}</li>)}
+                      {exp.bullets.map((bullet, bulletIndex) => (
+                        <li key={bulletIndex}>
+                          <FiCheck /> {bullet}
+                        </li>
+                      ))}
                     </ul>
                   </div>
                 </div>
@@ -628,10 +768,11 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            5. EDUCATION
-           == */}
-        <section data-section="experience" data-section-id="education" className={styles.sectionWindow}>
+        <section
+          data-section="experience"
+          data-section-id="education"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// ACADEMIC RUNTIME</span>
             <h3 className={styles.sectionHeader}>EDUCATION REGISTER</h3>
@@ -642,25 +783,36 @@ export default function Portfolio() {
                 <h4>Master of Computer Science</h4>
                 <p className={styles.eduInstitution}>Nicolaus Copernicus University</p>
                 <span className={styles.eduDate}>2023 – 2024</span>
-                <p className={styles.eduDesc}>Advanced computer science engineering with focus on system architecture and software development.</p>
+                <p className={styles.eduDesc}>
+                  Advanced computer science engineering with focus on system
+                  architecture and software development.
+                </p>
               </div>
+
               <div className={styles.educationCard}>
                 <div className={styles.eduIconWrapper}><FiBook /></div>
                 <h4>Bachelor of Computer Science Engineering</h4>
                 <p className={styles.eduInstitution}>Nicolaus Copernicus University</p>
                 <span className={styles.eduDate}>2019 – 2023</span>
-                <p className={styles.eduDesc}>Foundation in computer science engineering, software development principles and system design.</p>
+                <p className={styles.eduDesc}>
+                  Foundation in computer science engineering, software development
+                  principles and system design.
+                </p>
               </div>
             </div>
           </div>
         </section>
 
-        {/* ==
-            6. SKILLS
-           == */}
-        <section data-section="experience" data-section-id="skills" className={styles.sectionWindow}>
+        <section
+          data-section="experience"
+          data-section-id="skills"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
-            <span className={styles.sectionTag}>// TELEMETRY REALTIME SYSTEM METRICS</span>
+            <span className={styles.sectionTag}>
+              // TELEMETRY REALTIME SYSTEM METRICS
+            </span>
+
             <h3 className={styles.sectionHeader}>ENGINE POWER OUTPUT</h3>
 
             <div className={styles.reactorGridSystem}>
@@ -681,6 +833,7 @@ export default function Portfolio() {
                     <span>{skill.name}</span>
                     <span className={styles.reactorMetricPct}>{skill.pct}</span>
                   </div>
+
                   <div className={styles.reactorEnergyMeterTrack}>
                     <motion.div
                       className={styles.reactorEnergyMeterFill}
@@ -696,47 +849,32 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            7. PROJECTS
-           == */}
-        <section data-section="tech" data-section-id="projects" className={styles.sectionWindow}>
+        <section
+          data-section="tech"
+          data-section-id="projects"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
             <span className={styles.sectionTag}>// PRODUCTION RELEASES</span>
             <h3 className={styles.sectionHeader}>SYSTEM WORKCASE DEPLOYMENTS</h3>
 
             <div className={styles.showcaseGrid}>
-              {[
-                {
-                  title: 'McDonald\'s Multimedia Table',
-                  type: 'Interactive Gaming Table with Unity & Hardware Integration',
-                  desc: 'Multimedia gaming table for McDonald\'s restaurants. Interactive experience based on game engine/Unity, hardware integration, refined UI, animations, and flawless operation in kiosk mode. Project coordinator & frontend/Unity contributor. Responsible for planning, delivery, and production readiness.'
-                },
-                {
-                  title: 'TopSupple Online Store',
-                  type: 'E-commerce Platform',
-                  desc: 'Complete e-commerce platform with CMS, basket, checkout, payments, and an admin panel for day-to-day operations. React.js, CMS, Payments, Admin panel.'
-                },
-                {
-                  title: 'Fitrening Sports Stats',
-                  type: 'Sports Statistics Platform',
-                  desc: 'Statistics platform for sport users with three privilege levels, authentication, password change flow, and an admin panel. RBAC, Auth, Analytics, Admin.'
-                },
-                {
-                  title: 'Eternal Wellness Booking App',
-                  type: 'Calendar & Booking Application',
-                  desc: 'Performance-driven booking and scheduling platform built with React.js and Node.js. Streamlined client journey: service selection, availability discovery, booking confirmation, and operational admin tooling.'
-                }
-              ].map((proj, idx) => (
+              {projects.map((proj, idx) => (
                 <div key={idx} className={styles.premiumTiltCard}>
                   <div className={styles.cardImageTrack}>
-                    <div className={styles.fallbackVisualMatrix}>
-                      <span className={styles.projectEmoji}>✦</span>
-                    </div>
+                    <img
+                      src={proj.image}
+                      alt={`${proj.title} project thumbnail`}
+                      className={styles.projectImagePayload}
+                      loading="lazy"
+                    />
                   </div>
+
                   <div className={styles.cardDetailsTray}>
                     <h4 className={styles.projectCardTitle}>{proj.title}</h4>
                     <p className={styles.projectCardType}>{proj.type}</p>
                     <p className={styles.projectCardDesc}>{proj.desc}</p>
+
                     <div className={styles.projectCardLink}>
                       <FiLink /> <span>View Project →</span>
                     </div>
@@ -747,43 +885,72 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            8. CONTACT
-           == */}
-        <section data-section="contact" data-section-id="contact" className={styles.sectionWindow}>
+        <section
+          data-section="contact"
+          data-section-id="contact"
+          className={styles.sectionWindow}
+        >
           <div className={styles.glassContainer}>
             <div className={styles.contactQuantumLayout}>
               <div className={styles.contactCenterFrame}>
                 <span className={styles.sectionTag}>// SECURE TRANSCEIVER NODE</span>
-                <h3 className={styles.hugeContactHeader}>LET'S CONSTRUCT QUANTUM ARCHITECTURE</h3>
+
+                <h3 className={styles.hugeContactHeader}>
+                  LET&apos;S CONSTRUCT QUANTUM ARCHITECTURE
+                </h3>
 
                 <p className={styles.contactIntro}>
-                  I'm always open to new opportunities, collaborations, and exciting projects. Feel free to reach out!
+                  I&apos;m always open to new opportunities, collaborations, and
+                  exciting projects. Feel free to reach out!
                 </p>
 
                 <div className={styles.contactChannelsGrid}>
-                  <a href="mailto:mroczkowskioliwer10@gmail.com" className={styles.channelLinkAnchor}>
+                  <a
+                    href="mailto:mroczkowskioliwer10@gmail.com"
+                    className={styles.channelLinkAnchor}
+                  >
                     <FiMail /> mroczkowskioliwer10@gmail.com
                   </a>
-                  <a href="tel:+48511535814" className={styles.channelLinkAnchor}>
+
+                  <a
+                    href="tel:+48511535814"
+                    className={styles.channelLinkAnchor}
+                  >
                     <FiPhone /> +48 511 535 814
                   </a>
-                  <a href="https://github.com/ponczuTM" target="_blank" rel="noreferrer" className={styles.channelLinkAnchor}>
+
+                  <a
+                    href="https://github.com/ponczuTM"
+                    target="_blank"
+                    rel="noreferrer"
+                    className={styles.channelLinkAnchor}
+                  >
                     <FiGithub /> github.com/ponczuTM
                   </a>
-                  <a href="https://mroczkowski.netlify.app" target="_blank" rel="noreferrer" className={styles.channelLinkAnchor}>
+
+                  <a
+                    href="https://mroczkowski.netlify.app"
+                    target="_blank"
+                    rel="noreferrer"
+                    className={styles.channelLinkAnchor}
+                  >
                     <FiGlobe /> mroczkowski.netlify.app
                   </a>
                 </div>
 
                 <div className={styles.contactBusinessNote}>
                   <h4>Business-first approach</h4>
-                  <p>Clear scope, crisp UX, predictable delivery. If you want a product that looks premium and behaves reliably, you're in the right place.</p>
+                  <p>
+                    Clear scope, crisp UX, predictable delivery. If you want a
+                    product that looks premium and behaves reliably, you&apos;re in
+                    the right place.
+                  </p>
                 </div>
 
                 <div className={styles.terminalSignatureCluster}>
                   <p className={styles.sigTitle}>Oliwer Mroczkowski</p>
                   <p className={styles.sigSub}>Master Engineer & FullStack Architect</p>
+
                   <div className={styles.sigContactRow}>
                     <span>mroczkowskioliwer10@gmail.com</span>
                     <span>•</span>
@@ -795,14 +962,14 @@ export default function Portfolio() {
           </div>
         </section>
 
-        {/* ==
-            9. FOOTER
-           == */}
         <footer className={styles.minimalistFooter} data-section-id="footer">
           <div className={styles.footerGlowDivider} />
+
           <div className={styles.footerContentBlock}>
             <p>© 2026 Made with ♥ by Oliwer Mroczkowski.</p>
-            <p className={styles.footerTechStackTelemetry}>REACT × THREE.JS × GSAP × SYSTEM KERNEL</p>
+            <p className={styles.footerTechStackTelemetry}>
+              REACT × THREE.JS × GSAP × SYSTEM KERNEL
+            </p>
             <p className={styles.footerSmallNote}>React • Node • UX • Unity</p>
           </div>
         </footer>
@@ -817,7 +984,7 @@ export default function Portfolio() {
       options={{
         lerp: 0.08,
         duration: 1.2,
-        syncTouch: true,
+        syncTouch: true
       }}
     >
       <div ref={containerRef} className={styles.appContainer}>
@@ -832,7 +999,7 @@ export default function Portfolio() {
         <Interactive3DScene activeSection={activeSection} />
 
         <div className={styles.hackerTicker}>
-          <span className={styles.tickerPulse}></span>
+          <span className={styles.tickerPulse} />
           <p className={styles.tickerText}>{hackedText}</p>
         </div>
 

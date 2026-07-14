@@ -877,14 +877,17 @@ Retrieved 2026-07-10, License - CC BY-SA 4.0
     border-color: rgba(59, 130, 246, 0.1);
   }
   
-  .cardImageTrack {
-    aspect-ratio: 16/9;
-    background: #1e293b;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
-  }
+.cardImageTrack {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
   
   .fallbackVisualMatrix {
     width: 100%;
@@ -900,11 +903,19 @@ Retrieved 2026-07-10, License - CC BY-SA 4.0
     opacity: 0.3;
   }
   
-  .projectImagePayload {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
+.projectImagePayload {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  background: #0f172a;
+  transition: transform 0.45s ease;
+}
+
+.premiumTiltCard:hover .projectImagePayload {
+  transform: scale(1.025);
+}
   
   .cardDetailsTray {
     padding: 16px 20px 20px;
