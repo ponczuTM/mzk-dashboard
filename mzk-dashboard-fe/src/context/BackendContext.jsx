@@ -146,6 +146,29 @@ function createApi(baseUrl) {
         day_type: dayType,
       }),
 
+    // --- Zgodność wsteczna: "schedules" == warianty tras (routes) ---
+    // Stary interfejs oczekiwał { schedules: [{ schedule_id, name, active, ... }] }.
+    // W nowym modelu odpowiednikiem rozkładu jest wariant trasy (route),
+    // dlatego mapujemy routes -> schedules, zachowując też oryginalne pola.
+    getSchedules: async (query) => {
+      const routeQuery = {};
+      if (query && typeof query === 'object') {
+        if (query.line_id) routeQuery.line_id = query.line_id;
+        if (query.direction) routeQuery.direction = query.direction;
+        if (query.is_extended !== undefined)
+          routeQuery.is_extended = query.is_extended;
+      }
+      const data = await get('/routes', routeQuery);
+      const routes = data.routes || [];
+      const schedules = routes.map((r) => ({
+        ...r,
+        schedule_id: r.id,
+        name: r.name,
+        active: true,
+      }));
+      return { ok: true, count: schedules.length, schedules, routes };
+    },
+
     // --- Typy dni ---
     getServiceDays: () => get('/service-days'),
 
