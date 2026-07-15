@@ -93,6 +93,7 @@ function createApi(baseUrl) {
     // --- Info / IP ---
     getRoot: () => get('/'),
     getApiIp: () => get('/api/ip'),
+    getIsarsoftLatest: () => get('/api/isarsoft/latest'),
 
     // --- Przystanki (stops) ---
     getStops: (query) => get('/stops', query),
@@ -193,6 +194,12 @@ function createApi(baseUrl) {
     getReportLinePerformance: (query) =>
       get('/reports/line-performance', query),
     getReportAdminZone: (query) => get('/reports/admin-zone', query),
+
+    // Aliasy zgodności wstecznej (krótsze nazwy używane przez starsze komponenty)
+    getStopUsage: (query) => get('/reports/stop-usage', query),
+    getOnDemandStops: (query) => get('/reports/on-demand-stops', query),
+    getLinePerformance: (query) => get('/reports/line-performance', query),
+    getAdminZone: (query) => get('/reports/admin-zone', query),
 
     // --- Ustawienia ---
     getSettings: () => get('/settings'),

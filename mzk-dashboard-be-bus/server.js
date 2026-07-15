@@ -8,10 +8,10 @@ const { SerialPort } = require('serialport');
 const { GPS } = require('gps');
 
 const PC_ID = process.env.PC_ID || 1;
-const PC_NAME = process.env.PC_NAME || 'pc_number_113';
+const PC_NAME = process.env.PC_NAME || 'linia_nr_1';
 
 const ROOM_SERVER_URL =
-  process.env.ROOM_SERVER_URL || 'http://192.168.77.152:3001/api/data';
+  process.env.ROOM_SERVER_URL || 'http://192.168.68.155:3001/api/data';
 
 const REFRESH_INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS || 30 * 1000);
 const SEND_INTERVAL_MS = Number(process.env.SEND_INTERVAL_MS || 5 * 1000);
