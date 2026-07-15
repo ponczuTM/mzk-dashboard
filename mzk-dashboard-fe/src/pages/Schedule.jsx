@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useBackend } from '../context/BackendContext';
 import {
   CalendarClock,
@@ -10,45 +10,38 @@ import {
   LoaderCircle,
   AlertCircle,
   ChevronDown,
-  BusFront,
-  Route,
-  CircleCheck,
-  CircleX,
+  Route as RouteIcon,
   Clock3,
   MapPinned,
-  Layers3,
   ListOrdered,
-  ArrowRightLeft,
   ArrowUpDown,
   Copy,
   MapPin,
   Truck,
+  Sparkles,
+  Bus,
+  TramFront,
 } from 'lucide-react';
-import styles from './Schedule.module.css';
 
-// Stałe dla rozkładów
-const DAY_TYPE_LABELS = {
-  weekday: 'Dzień powszedni',
-  weekend: 'Weekend',
-  holiday: 'Święto',
-};
+const DAY_TYPES = [
+  { key: 'WEEKDAY', label: 'Dzień powszedni' },
+  { key: 'WEEKEND', label: 'Weekend' },
+  { key: 'HOLIDAY', label: 'Święto' },
+];
 
 const DIRECTION_LABELS = {
-  outbound: 'Tam',
-  inbound: 'Z powrotem',
+  FROM_START: 'Tam (od pętli)',
+  TO_START: 'Powrót (do pętli)',
 };
 
-// Pusty formularz rozkładu
-const createEmptyScheduleForm = () => ({
-  name: '',
-  day_types: {
-    weekday: { outbound: [], inbound: [] },
-    weekend: { outbound: [], inbound: [] },
-    holiday: { outbound: [], inbound: [] },
-  },
-});
+const LINE_TYPE_LABELS = {
+  bus: 'Autobus',
+  tram: 'Tramwaj',
+  trolley: 'Trolejbus',
+  train: 'Kolej',
+  metro: 'Metro',
+};
 
-// Pusty formularz przystanku
 const createEmptyStopForm = () => ({
   id: '',
   name: '',
@@ -56,30 +49,23 @@ const createEmptyStopForm = () => ({
   longitude: '',
 });
 
-/**
- * Funkcja normalizująca czas do formatu HH:MM.
- *
- * Naprawiona wersja: zamiast polegać na sztywnym `substring(0, 5)` + regex
- * (co psuło się np. dla zdegenerowanych wartości typu "11:11:01:00" i
- * zwracało wtedy domyślne "00:00" albo przepuszczało śmieci dalej),
- * dzielimy string po dwukropku i zawsze bierzemy tylko pierwsze dwa
- * segmenty (godziny i minuty), niezależnie od tego, ile dodatkowych
- * fragmentów (sekundy, milisekundy, powielone dane) znajduje się dalej.
- */
-const normalizeTime = (time) => {
+const createEmptyLineForm = () => ({
+  number: '',
+  type: 'bus',
+});
+
+const createEmptyRouteForm = () => ({
+  name: '',
+  direction: 'FROM_START',
+  is_extended: false,
+});
+
+const normalizeTimeHHMM = (time) => {
   if (time === null || time === undefined || time === '') return '00:00';
-
-  const raw = String(time).trim();
-  const parts = raw.split(':');
-
+  const parts = String(time).trim().split(':');
   if (parts.length < 2) return '00:00';
-
-  const hoursRaw = parts[0];
-  const minutesRaw = parts[1];
-
-  const hours = parseInt(hoursRaw, 10);
-  const minutes = parseInt(minutesRaw, 10);
-
+  const hours = parseInt(parts[0], 10);
+  const minutes = parseInt(parts[1], 10);
   if (
     Number.isNaN(hours) ||
     Number.isNaN(minutes) ||
@@ -90,17 +76,31 @@ const normalizeTime = (time) => {
   ) {
     return '00:00';
   }
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
 
-  const hh = String(hours).padStart(2, '0');
-  const mm = String(minutes).padStart(2, '0');
-  return `${hh}:${mm}`;
+const minutesFromTime = (time) => {
+  const [h, m] = normalizeTimeHHMM(time).split(':').map((n) => parseInt(n, 10));
+  return h * 60 + m;
+};
+
+const timeFromMinutes = (totalMinutes) => {
+  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
+  const h = Math.floor(wrapped / 60);
+  const m = Math.floor(wrapped % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+};
+
+const LineTypeIcon = ({ type, className }) => {
+  if (type === 'tram') return <TramFront className={className} />;
+  return <Bus className={className} />;
 };
 
 const Schedule = () => {
   const { api } = useBackend();
 
-  // Zakładki
-  const [activeTab, setActiveTab] = useState('stops'); // 'stops', 'schedules', 'vehicles'
+  const [activeTab, setActiveTab] = useState('routes');
+  const [error, setError] = useState(null);
 
   // ---------- PRZYSTANKI ----------
   const [stops, setStops] = useState([]);
@@ -108,34 +108,41 @@ const Schedule = () => {
   const [stopForm, setStopForm] = useState(createEmptyStopForm());
   const [editingStop, setEditingStop] = useState(null);
 
-  // ---------- ROZKŁADY ----------
-  const [schedules, setSchedules] = useState([]);
-  const [schedulesLoading, setSchedulesLoading] = useState(false);
-  const [scheduleForm, setScheduleForm] = useState(createEmptyScheduleForm());
-  const [editingSchedule, setEditingSchedule] = useState(null);
-  const [selectedDayType, setSelectedDayType] = useState('weekday');
-  const [selectedDirection, setSelectedDirection] = useState('outbound');
-  const [savingSchedule, setSavingSchedule] = useState(false);
+  // ---------- LINIE ----------
+  const [lines, setLines] = useState([]);
+  const [linesLoading, setLinesLoading] = useState(false);
+  const [lineForm, setLineForm] = useState(createEmptyLineForm());
+  const [showLineForm, setShowLineForm] = useState(false);
+
+  // ---------- TRASY ----------
+  const [routes, setRoutes] = useState([]);
+  const [routesLoading, setRoutesLoading] = useState(false);
+  const [selectedLineId, setSelectedLineId] = useState('');
+  const [selectedRouteId, setSelectedRouteId] = useState('');
+  const [routeForm, setRouteForm] = useState(createEmptyRouteForm());
+  const [showRouteForm, setShowRouteForm] = useState(false);
+
+  // ---------- PRZYSTANKI NA TRASIE ----------
+  const [routeStops, setRouteStops] = useState([]);
+  const [routeStopsLoading, setRouteStopsLoading] = useState(false);
+  const [savingRouteStops, setSavingRouteStops] = useState(false);
+  const [addStopId, setAddStopId] = useState('');
+
+  // ---------- KURSY ----------
+  const [selectedDayType, setSelectedDayType] = useState('WEEKDAY');
+  const [scheduleTrips, setScheduleTrips] = useState([]);
+  const [tripsLoading, setTripsLoading] = useState(false);
+  const [newDepartureTime, setNewDepartureTime] = useState('08:00');
+  const [addingTrip, setAddingTrip] = useState(false);
+
+  // ---------- PODGLĄD PASAŻERA ----------
+  const [previewStop, setPreviewStop] = useState(null);
 
   // ---------- POJAZDY ----------
   const [vehicles, setVehicles] = useState([]);
   const [vehiclesLoading, setVehiclesLoading] = useState(false);
 
-  // ---------- WSPÓLNE ----------
-  const [error, setError] = useState(null);
-
-  // ---------- FUNKCJE WSPÓLNE ----------
-  const loadAll = useCallback(async () => {
-    try {
-      setError(null);
-      await Promise.all([loadStops(), loadSchedules(), loadVehicles()]);
-    } catch (err) {
-      setError(err.message || 'Nie udało się załadować danych.');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ---------- PRZYSTANKI ----------
+  // =================== ŁADOWANIE ===================
   const loadStops = useCallback(async () => {
     setStopsLoading(true);
     try {
@@ -148,6 +155,139 @@ const Schedule = () => {
     }
   }, [api]);
 
+  const loadLines = useCallback(async () => {
+    setLinesLoading(true);
+    try {
+      const data = await api.getLines();
+      setLines(data.lines || []);
+    } catch (err) {
+      setError(err.message || 'Błąd ładowania linii.');
+    } finally {
+      setLinesLoading(false);
+    }
+  }, [api]);
+
+  const loadRoutes = useCallback(
+    async (lineId) => {
+      if (!lineId) {
+        setRoutes([]);
+        return;
+      }
+      setRoutesLoading(true);
+      try {
+        const data = await api.getRoutes({ line_id: lineId });
+        setRoutes(data.routes || []);
+      } catch (err) {
+        setError(err.message || 'Błąd ładowania tras.');
+      } finally {
+        setRoutesLoading(false);
+      }
+    },
+    [api]
+  );
+
+  const loadRouteStops = useCallback(
+    async (routeId) => {
+      if (!routeId) {
+        setRouteStops([]);
+        return;
+      }
+      setRouteStopsLoading(true);
+      try {
+        const data = await api.getRouteStops(routeId);
+        const sorted = (data.stops || [])
+          .slice()
+          .sort((a, b) => (a.sequence_order || 0) - (b.sequence_order || 0))
+          .map((s) => ({
+            stop_id: s.stop_id,
+            stop_name: s.stop_name || '',
+            travel_time_from_start:
+              s.travel_time_from_start === undefined ||
+              s.travel_time_from_start === null
+                ? 0
+                : Number(s.travel_time_from_start),
+          }));
+        setRouteStops(sorted);
+      } catch (err) {
+        setError(err.message || 'Błąd ładowania przystanków trasy.');
+      } finally {
+        setRouteStopsLoading(false);
+      }
+    },
+    [api]
+  );
+
+  const loadScheduleTrips = useCallback(
+    async (routeId, dayType) => {
+      if (!routeId) {
+        setScheduleTrips([]);
+        return;
+      }
+      setTripsLoading(true);
+      try {
+        const data = await api.getScheduleTrips({
+          route_id: routeId,
+          day_type: dayType,
+        });
+        const sorted = (data.trips || [])
+          .slice()
+          .sort((a, b) =>
+            String(a.departure_time).localeCompare(String(b.departure_time))
+          );
+        setScheduleTrips(sorted);
+      } catch (err) {
+        setError(err.message || 'Błąd ładowania kursów.');
+      } finally {
+        setTripsLoading(false);
+      }
+    },
+    [api]
+  );
+
+  const loadVehicles = useCallback(async () => {
+    setVehiclesLoading(true);
+    try {
+      const data = await api.getVehicles();
+      setVehicles(data.vehicles || []);
+    } catch (err) {
+      setError(err.message || 'Błąd ładowania pojazdów.');
+    } finally {
+      setVehiclesLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    setError(null);
+    loadStops();
+    loadLines();
+    loadVehicles();
+  }, [loadStops, loadLines, loadVehicles]);
+
+  useEffect(() => {
+    loadRoutes(selectedLineId);
+    setSelectedRouteId('');
+    setRouteStops([]);
+    setScheduleTrips([]);
+    setPreviewStop(null);
+  }, [selectedLineId, loadRoutes]);
+
+  useEffect(() => {
+    if (selectedRouteId) {
+      loadRouteStops(selectedRouteId);
+      loadScheduleTrips(selectedRouteId, selectedDayType);
+      setPreviewStop(null);
+    } else {
+      setRouteStops([]);
+      setScheduleTrips([]);
+    }
+  }, [selectedRouteId, loadRouteStops, loadScheduleTrips, selectedDayType]);
+
+  const selectedRoute = useMemo(
+    () => routes.find((r) => r.id === selectedRouteId) || null,
+    [routes, selectedRouteId]
+  );
+
+  // =================== PRZYSTANKI (CRUD) ===================
   const resetStopForm = () => {
     setEditingStop(null);
     setStopForm(createEmptyStopForm());
@@ -183,7 +323,7 @@ const Schedule = () => {
         latitude: parseFloat(stopForm.latitude),
         longitude: parseFloat(stopForm.longitude),
       };
-      if (isNaN(payload.latitude) || isNaN(payload.longitude)) {
+      if (Number.isNaN(payload.latitude) || Number.isNaN(payload.longitude)) {
         throw new Error('Współrzędne muszą być liczbami.');
       }
       if (editingStop) {
@@ -202,815 +342,1074 @@ const Schedule = () => {
     setStopForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  // ---------- ROZKŁADY ----------
-  const loadSchedules = useCallback(async () => {
-    setSchedulesLoading(true);
-    try {
-      const data = await api.getSchedules();
-      setSchedules(data.schedules || []);
-    } catch (err) {
-      setError(err.message || 'Błąd ładowania rozkładów.');
-    } finally {
-      setSchedulesLoading(false);
-    }
-  }, [api]);
-
-  const resetScheduleForm = () => {
-    setEditingSchedule(null);
-    setScheduleForm(createEmptyScheduleForm());
-    setSelectedDayType('weekday');
-    setSelectedDirection('outbound');
-  };
-
-  const handleEditSchedule = (schedule) => {
-    setEditingSchedule(schedule);
-    const dayTypes = {};
-    ['weekday', 'weekend', 'holiday'].forEach((day) => {
-      const dayData = schedule.day_types?.[day] || { outbound: [], inbound: [] };
-      dayTypes[day] = {
-        outbound: (dayData.outbound || []).map((item) => ({
-          ...item,
-          planned_time: normalizeTime(item.planned_time),
-        })),
-        inbound: (dayData.inbound || []).map((item) => ({
-          ...item,
-          planned_time: normalizeTime(item.planned_time),
-        })),
-      };
-    });
-    setScheduleForm({
-      name: schedule.name || '',
-      day_types: dayTypes,
-    });
-    setSelectedDayType('weekday');
-    setSelectedDirection('outbound');
-  };
-
-  const handleDeleteSchedule = async (id) => {
-    if (!window.confirm(`Czy na pewno usunąć rozkład ${id}?`)) return;
-    try {
-      await api.deleteSchedule(id);
-      await loadSchedules();
-      if (editingSchedule?.schedule_id === id) resetScheduleForm();
-    } catch (err) {
-      window.alert(`Błąd usuwania: ${err.message}`);
-    }
-  };
-
-  // Przed wysłaniem normalizujemy wszystkie czasy w całym formularzu
-  const handleSubmitSchedule = async (e) => {
+  // =================== LINIE ===================
+  const handleSubmitLine = async (e) => {
     e.preventDefault();
-    setSavingSchedule(true);
     try {
-      // Normalizuj wszystkie czasy przed wysłaniem (odporne na "śmieciowe" wartości)
-      // UWAGA: backend (endpoints.js) oczekuje pola "time", a nie "planned_time",
-      // dlatego przy budowaniu payloadu mapujemy klucz na wyjściu.
-      const normalizedDayTypes = {};
-      Object.keys(scheduleForm.day_types).forEach((day) => {
-        const dayData = scheduleForm.day_types[day];
-        normalizedDayTypes[day] = {
-          outbound: (dayData.outbound || []).map((item) => ({
-            stop_id: item.stop_id,
-            time: normalizeTime(item.planned_time),
-          })),
-          inbound: (dayData.inbound || []).map((item) => ({
-            stop_id: item.stop_id,
-            time: normalizeTime(item.planned_time),
-          })),
-        };
+      const created = await api.createLine({
+        number: lineForm.number.trim(),
+        type: lineForm.type,
       });
-
-      const payload = {
-        name: scheduleForm.name.trim(),
-        day_types: normalizedDayTypes,
-      };
-
-      if (editingSchedule) {
-        await api.updateSchedule(editingSchedule.schedule_id, payload);
-      } else {
-        await api.createSchedule(payload);
-      }
-      resetScheduleForm();
-      await loadSchedules();
+      setLineForm(createEmptyLineForm());
+      setShowLineForm(false);
+      await loadLines();
+      if (created?.line?.id) setSelectedLineId(created.line.id);
     } catch (err) {
-      window.alert(`Błąd zapisu rozkładu: ${err.message}`);
-    } finally {
-      setSavingSchedule(false);
+      window.alert(`Błąd zapisu linii: ${err.message}`);
     }
   };
 
-  // Funkcje do modyfikacji sekwencji
-  const getCurrentSequence = () => {
-    return scheduleForm.day_types[selectedDayType]?.[selectedDirection] || [];
+  const handleDeleteLine = async (id) => {
+    if (
+      !window.confirm(
+        `Usunąć linię ${id}? Skasuje to również jej trasy i kursy.`
+      )
+    )
+      return;
+    try {
+      await api.deleteLine(id);
+      if (selectedLineId === id) setSelectedLineId('');
+      await loadLines();
+    } catch (err) {
+      window.alert(`Błąd usuwania linii: ${err.message}`);
+    }
   };
 
-  const addStopToSequence = () => {
-    setScheduleForm((prev) => {
-      const newDay = { ...prev.day_types[selectedDayType] };
-      newDay[selectedDirection] = [
-        ...(newDay[selectedDirection] || []),
-        { stop_id: '', planned_time: '00:00' },
-      ];
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDay,
-        },
-      };
-    });
-  };
-
-  const removeStopFromSequence = (index) => {
-    setScheduleForm((prev) => {
-      const newDay = { ...prev.day_types[selectedDayType] };
-      newDay[selectedDirection] = (newDay[selectedDirection] || []).filter(
-        (_, idx) => idx !== index
-      );
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDay,
-        },
-      };
-    });
-  };
-
-  const updateStopInSequence = (index, field, value) => {
-    setScheduleForm((prev) => {
-      const newDay = { ...prev.day_types[selectedDayType] };
-      newDay[selectedDirection] = (newDay[selectedDirection] || []).map(
-        (item, idx) => {
-          if (idx === index) {
-            // Jeśli aktualizujemy czas, zawsze normalizujemy go do HH:MM
-            if (field === 'planned_time') {
-              return { ...item, planned_time: normalizeTime(value) };
-            }
-            return { ...item, [field]: value };
-          }
-          return item;
-        }
-      );
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDay,
-        },
-      };
-    });
-  };
-
-  const moveStopUp = (index) => {
-    if (index === 0) return;
-    setScheduleForm((prev) => {
-      const newDay = { ...prev.day_types[selectedDayType] };
-      const seq = newDay[selectedDirection] || [];
-      const swapped = [...seq];
-      [swapped[index - 1], swapped[index]] = [swapped[index], swapped[index - 1]];
-      newDay[selectedDirection] = swapped;
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDay,
-        },
-      };
-    });
-  };
-
-  const moveStopDown = (index) => {
-    const seq = getCurrentSequence();
-    if (index >= seq.length - 1) return;
-    setScheduleForm((prev) => {
-      const newDay = { ...prev.day_types[selectedDayType] };
-      const swapped = [...seq];
-      [swapped[index], swapped[index + 1]] = [swapped[index + 1], swapped[index]];
-      newDay[selectedDirection] = swapped;
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDay,
-        },
-      };
-    });
-  };
-
-  // --- NOWA FUNKCJA: Kopiowanie kierunku dla bieżącego dnia ---
-  const copyDirectionForCurrentDay = (sourceDir, targetDir, reverse = false) => {
-    if (sourceDir === targetDir) {
-      window.alert('Kierunek źródłowy i docelowy muszą być różne.');
+  // =================== TRASY ===================
+  const handleSubmitRoute = async (e) => {
+    e.preventDefault();
+    if (!selectedLineId) {
+      window.alert('Najpierw wybierz linię.');
       return;
     }
+    try {
+      const created = await api.createRoute({
+        line_id: selectedLineId,
+        name: routeForm.name.trim(),
+        direction: routeForm.direction,
+        is_extended: routeForm.is_extended,
+      });
+      setRouteForm(createEmptyRouteForm());
+      setShowRouteForm(false);
+      await loadRoutes(selectedLineId);
+      if (created?.route?.id) setSelectedRouteId(created.route.id);
+    } catch (err) {
+      window.alert(`Błąd zapisu trasy: ${err.message}`);
+    }
+  };
 
-    setScheduleForm((prev) => {
-      const dayData = prev.day_types[selectedDayType];
-      if (!dayData) return prev;
+  const handleDeleteRoute = async (id) => {
+    if (
+      !window.confirm(`Usunąć trasę ${id}? Skasuje to jej przystanki i kursy.`)
+    )
+      return;
+    try {
+      await api.deleteRoute(id);
+      if (selectedRouteId === id) setSelectedRouteId('');
+      await loadRoutes(selectedLineId);
+    } catch (err) {
+      window.alert(`Błąd usuwania trasy: ${err.message}`);
+    }
+  };
 
-      const sourceList = dayData[sourceDir] || [];
-      let targetList = sourceList.map((item) => ({
-        ...item,
-        planned_time: normalizeTime(item.planned_time),
+  // =================== PRZYSTANKI NA TRASIE ===================
+  const availableStopsToAdd = useMemo(() => {
+    const used = new Set(routeStops.map((rs) => rs.stop_id));
+    return stops.filter((s) => !used.has(s.id));
+  }, [stops, routeStops]);
+
+  const handleAddStopToRoute = () => {
+    if (!addStopId) return;
+    const stop = stops.find((s) => s.id === addStopId);
+    if (!stop) return;
+    const lastTime =
+      routeStops.length > 0
+        ? routeStops[routeStops.length - 1].travel_time_from_start
+        : 0;
+    setRouteStops((prev) => [
+      ...prev,
+      {
+        stop_id: stop.id,
+        stop_name: stop.name,
+        travel_time_from_start: routeStops.length === 0 ? 0 : lastTime,
+      },
+    ]);
+    setAddStopId('');
+    setPreviewStop(null);
+  };
+
+  const handleRemoveRouteStop = (index) => {
+    setRouteStops((prev) => prev.filter((_, i) => i !== index));
+    setPreviewStop(null);
+  };
+
+  const handleRouteStopTravelTime = (index, value) => {
+    const num = parseInt(value, 10);
+    setRouteStops((prev) =>
+      prev.map((rs, i) =>
+        i === index
+          ? { ...rs, travel_time_from_start: Number.isNaN(num) ? 0 : num }
+          : rs
+      )
+    );
+    setPreviewStop(null);
+  };
+
+  const moveRouteStop = (index, delta) => {
+    setRouteStops((prev) => {
+      const target = index + delta;
+      if (target < 0 || target >= prev.length) return prev;
+      const copy = [...prev];
+      [copy[index], copy[target]] = [copy[target], copy[index]];
+      return copy;
+    });
+    setPreviewStop(null);
+  };
+
+  const handleSaveRouteStops = async () => {
+    if (!selectedRouteId) return;
+    for (const rs of routeStops) {
+      if (!rs.stop_id) {
+        window.alert('Każdy wiersz musi mieć wybrany przystanek.');
+        return;
+      }
+      if (rs.travel_time_from_start < 0) {
+        window.alert('Czas dojazdu nie może być ujemny.');
+        return;
+      }
+    }
+    setSavingRouteStops(true);
+    try {
+      const payload = routeStops.map((rs) => ({
+        stop_id: rs.stop_id,
+        travel_time_from_start: rs.travel_time_from_start,
       }));
-
-      if (reverse) {
-        targetList = targetList.slice().reverse();
-      }
-
-      // Tworzymy nowy obiekt dla dnia
-      const newDayData = {
-        ...dayData,
-        [targetDir]: targetList,
-      };
-
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDayData,
-        },
-      };
-    });
-  };
-
-  // --- ODWRÓC KOLEJNOŚĆ dla bieżącego kierunku ---
-  const reverseCurrentDirection = () => {
-    setScheduleForm((prev) => {
-      const dayData = prev.day_types[selectedDayType];
-      if (!dayData) return prev;
-
-      const currentList = dayData[selectedDirection] || [];
-      const reversed = currentList
-        .slice()
-        .reverse()
-        .map((item) => ({
-          ...item,
-          planned_time: normalizeTime(item.planned_time),
-        }));
-
-      const newDayData = {
-        ...dayData,
-        [selectedDirection]: reversed,
-      };
-
-      return {
-        ...prev,
-        day_types: {
-          ...prev.day_types,
-          [selectedDayType]: newDayData,
-        },
-      };
-    });
-  };
-
-  // --- STARA FUNKCJA (pozostawiona dla kompatybilności) ---
-  const handleCopyDirection = () => {
-    const source = window.prompt(
-      `Podaj kierunek źródłowy (outbound lub inbound) do skopiowania:`,
-      'outbound'
-    );
-    if (!source || !['outbound', 'inbound'].includes(source)) {
-      window.alert('Nieprawidłowy kierunek źródłowy.');
-      return;
-    }
-    const target = window.prompt(
-      `Podaj kierunek docelowy (outbound lub inbound):`,
-      'inbound'
-    );
-    if (!target || !['outbound', 'inbound'].includes(target)) {
-      window.alert('Nieprawidłowy kierunek docelowy.');
-      return;
-    }
-    if (source === target) {
-      window.alert('Kierunek źródłowy i docelowy muszą być różne.');
-      return;
-    }
-    const reverse = window.confirm(
-      `Czy chcesz odwrócić kolejność przystanków podczas kopiowania?`
-    );
-
-    setScheduleForm((prev) => {
-      const newDayTypes = { ...prev.day_types };
-      Object.keys(newDayTypes).forEach((day) => {
-        const dayData = { ...newDayTypes[day] };
-        const sourceList = dayData[source] || [];
-        let targetList = sourceList.map((item) => ({
-          ...item,
-          planned_time: normalizeTime(item.planned_time),
-        }));
-        if (reverse) {
-          targetList = targetList.slice().reverse();
-        }
-        dayData[target] = targetList;
-        newDayTypes[day] = dayData;
-      });
-      return {
-        ...prev,
-        day_types: newDayTypes,
-      };
-    });
-  };
-
-  // ---------- POJAZDY ----------
-  const loadVehicles = useCallback(async () => {
-    setVehiclesLoading(true);
-    try {
-      const data = await api.getVehicles();
-      setVehicles(data.vehicles || []);
+      await api.setRouteStops(selectedRouteId, payload);
+      await loadRouteStops(selectedRouteId);
+      window.alert('Układ trasy zapisany.');
     } catch (err) {
-      setError(err.message || 'Błąd ładowania pojazdów.');
+      window.alert(`Błąd zapisu układu trasy: ${err.message}`);
     } finally {
-      setVehiclesLoading(false);
+      setSavingRouteStops(false);
     }
-  }, [api]);
+  };
 
-  const handleUpdateVehicleSchedule = async (pcName, scheduleId) => {
+  const handleCopyFromOtherRoute = async () => {
+    if (!selectedRouteId) return;
+    const others = routes.filter((r) => r.id !== selectedRouteId);
+    if (others.length === 0) {
+      window.alert('Brak innej trasy w tej linii do skopiowania.');
+      return;
+    }
+    const list = others
+      .map((r, i) => `${i + 1}. ${r.name} [${DIRECTION_LABELS[r.direction]}]`)
+      .join('\n');
+    const answer = window.prompt(
+      `Z której trasy skopiować przystanki? Podaj numer:\n${list}`,
+      '1'
+    );
+    if (!answer) return;
+    const idx = parseInt(answer, 10) - 1;
+    if (Number.isNaN(idx) || idx < 0 || idx >= others.length) {
+      window.alert('Nieprawidłowy numer.');
+      return;
+    }
+    const source = others[idx];
+    const reverse = window.confirm(
+      'Odwrócić kolejność i czasy (trasa powrotna)? OK = tak, Anuluj = kopiuj 1:1.'
+    );
     try {
-      await api.updateVehicle(pcName, { schedule_id: scheduleId || '' });
+      await api.copyDirection(source.id, {
+        target_route_id: selectedRouteId,
+        reverse,
+      });
+      await loadRouteStops(selectedRouteId);
+      window.alert('Skopiowano przystanki.');
+    } catch (err) {
+      window.alert(`Błąd kopiowania: ${err.message}`);
+    }
+  };
+
+  // =================== KURSY ===================
+  const handleAddTrip = async (e) => {
+    e.preventDefault();
+    if (!selectedRouteId) {
+      window.alert('Najpierw wybierz trasę.');
+      return;
+    }
+    setAddingTrip(true);
+    try {
+      await api.createScheduleTrip({
+        route_id: selectedRouteId,
+        day_type: selectedDayType,
+        departure_time: normalizeTimeHHMM(newDepartureTime),
+      });
+      await loadScheduleTrips(selectedRouteId, selectedDayType);
+    } catch (err) {
+      window.alert(`Błąd dodawania kursu: ${err.message}`);
+    } finally {
+      setAddingTrip(false);
+    }
+  };
+
+  const handleDeleteTrip = async (tripId) => {
+    try {
+      await api.deleteScheduleTrip(tripId);
+      await loadScheduleTrips(selectedRouteId, selectedDayType);
+    } catch (err) {
+      window.alert(`Błąd usuwania kursu: ${err.message}`);
+    }
+  };
+
+  // =================== PODGLĄD PASAŻERA ===================
+  const previewDepartures = useMemo(() => {
+    if (!previewStop) return [];
+    const rs = routeStops.find((s) => s.stop_id === previewStop);
+    if (!rs) return [];
+    return scheduleTrips
+      .map((trip) =>
+        timeFromMinutes(
+          minutesFromTime(trip.departure_time) +
+            Number(rs.travel_time_from_start || 0)
+        )
+      )
+      .sort((a, b) => a.localeCompare(b));
+  }, [previewStop, routeStops, scheduleTrips]);
+
+  const previewStopName = useMemo(() => {
+    const rs = routeStops.find((s) => s.stop_id === previewStop);
+    return rs ? rs.stop_name || rs.stop_id : '';
+  }, [previewStop, routeStops]);
+
+  // =================== POJAZDY ===================
+  const handleUpdateVehicleRoute = async (pcName, routeId) => {
+    try {
+      await api.updateVehicle(pcName, { route_id: routeId || '' });
       await loadVehicles();
     } catch (err) {
       window.alert(`Błąd aktualizacji pojazdu: ${err.message}`);
     }
   };
 
-  // ---------- EFEKT ----------
-  useEffect(() => {
-    loadAll();
-  }, [loadAll]);
+  const allRoutesFlat = useMemo(() => routes, [routes]);
 
-  // ---------- RENDER ----------
-  if (error && !stops.length && !schedules.length && !vehicles.length) {
-    return (
-      <section className={styles.pageShell}>
-        <div className={styles.stateCard}>
-          <AlertCircle className={styles.stateIconError} />
-          <div>
-            <h2 className={styles.stateTitle}>Błąd ładowania</h2>
-            <p className={styles.stateText}>{error}</p>
-            <button onClick={loadAll} className={styles.primaryButton}>
-              Spróbuj ponownie
-            </button>
-          </div>
-        </div>
-      </section>
-    );
-  }
+  // =================== RENDER ===================
+  const btnPrimary =
+    'inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50';
+  const btnSecondary =
+    'inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50';
+  const btnIcon =
+    'inline-flex items-center justify-center rounded-md p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30';
+  const btnIconDanger =
+    'inline-flex items-center justify-center rounded-md p-2 text-red-500 transition hover:bg-red-50 hover:text-red-700';
+  const inputCls =
+    'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100';
+  const labelCls = 'mb-1 block text-xs font-medium text-slate-600';
+  const cardCls = 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm';
 
   return (
-    <section className={styles.pageShell}>
-      <div className={styles.page}>
-        <header className={styles.hero}>
-          <div>
-            <p className={styles.eyebrow}>Zarządzanie infrastrukturą</p>
-            <h1 className={styles.title}>Konfiguracja rozkładów</h1>
-            <p className={styles.subtitle}>
-              Zarządzaj przystankami, rozkładami i przypisuj je do pojazdów.
-            </p>
-          </div>
+    <section className="min-h-screen bg-slate-50 p-4 md:p-8">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <header>
+          <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600">
+            Zarządzanie infrastrukturą
+          </p>
+          <h1 className="mt-1 text-2xl font-bold text-slate-900">
+            Konfiguracja rozkładów
+          </h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Linie, warianty tras (w tym powrotne i wydłużone), przystanki na
+            trasie, kursy oraz przypisanie do pojazdów.
+          </p>
         </header>
 
-        {/* Zakładki główne */}
-        <div className={styles.mainTabs}>
-          <button
-            className={`${styles.mainTab} ${activeTab === 'stops' ? styles.mainTabActive : ''}`}
-            onClick={() => setActiveTab('stops')}
-          >
-            <MapPin className={styles.mainTabIcon} />
-            Przystanki
-          </button>
-          <button
-            className={`${styles.mainTab} ${activeTab === 'schedules' ? styles.mainTabActive : ''}`}
-            onClick={() => setActiveTab('schedules')}
-          >
-            <CalendarClock className={styles.mainTabIcon} />
-            Rozkłady
-          </button>
-          <button
-            className={`${styles.mainTab} ${activeTab === 'vehicles' ? styles.mainTabActive : ''}`}
-            onClick={() => setActiveTab('vehicles')}
-          >
-            <Truck className={styles.mainTabIcon} />
-            Pojazdy
-          </button>
+        {error && (
+          <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          {[
+            { key: 'routes', label: 'Trasy i rozkłady', icon: RouteIcon },
+            { key: 'stops', label: 'Przystanki', icon: MapPin },
+            { key: 'vehicles', label: 'Pojazdy', icon: Truck },
+          ].map((t) => {
+            const Icon = t.icon;
+            const active = activeTab === t.key;
+            return (
+              <button
+                key={t.key}
+                onClick={() => setActiveTab(t.key)}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
+                  active
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'bg-white text-slate-600 hover:bg-slate-100'
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {t.label}
+              </button>
+            );
+          })}
         </div>
 
-        {/* ZAWARTOŚĆ ZAKŁADKI PRZYSTANKI */}
-        {activeTab === 'stops' && (
-          <div className={styles.contentGrid}>
-            <section className={styles.formCard}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h2 className={styles.sectionTitle}>
-                    {editingStop ? 'Edytuj przystanek' : 'Dodaj nowy przystanek'}
-                  </h2>
-                  <p className={styles.sectionText}>
-                    Wprowadź unikalne ID, nazwę oraz współrzędne geograficzne.
-                  </p>
+        {/* ================= TRASY I ROZKŁADY ================= */}
+        {activeTab === 'routes' && (
+          <div className="space-y-6">
+            <div className={cardCls}>
+              <div className="flex flex-col gap-4 md:flex-row md:items-end">
+                <div className="flex-1">
+                  <label className={labelCls}>Linia</label>
+                  <div className="relative">
+                    <select
+                      className={`${inputCls} appearance-none pr-9`}
+                      value={selectedLineId}
+                      onChange={(e) => setSelectedLineId(e.target.value)}
+                    >
+                      <option value="">— wybierz linię —</option>
+                      {lines.map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {LINE_TYPE_LABELS[l.type] || l.type} {l.number}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    className={btnSecondary}
+                    onClick={() => setShowLineForm((v) => !v)}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Nowa linia
+                  </button>
+                  {selectedLineId && (
+                    <button
+                      className={btnIconDanger}
+                      onClick={() => handleDeleteLine(selectedLineId)}
+                      title="Usuń linię"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
               </div>
-              <form onSubmit={handleSubmitStop} className={styles.form}>
-                <div className={styles.formGrid}>
-                  <div className={styles.field}>
-                    <label htmlFor="stopId" className={styles.label}>ID przystanku</label>
+
+              {showLineForm && (
+                <form
+                  onSubmit={handleSubmitLine}
+                  className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-3"
+                >
+                  <div>
+                    <label className={labelCls}>Numer</label>
                     <input
-                      id="stopId"
-                      type="text"
-                      className={styles.input}
+                      className={inputCls}
+                      value={lineForm.number}
+                      onChange={(e) =>
+                        setLineForm((p) => ({ ...p, number: e.target.value }))
+                      }
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Typ</label>
+                    <div className="relative">
+                      <select
+                        className={`${inputCls} appearance-none pr-9`}
+                        value={lineForm.type}
+                        onChange={(e) =>
+                          setLineForm((p) => ({ ...p, type: e.target.value }))
+                        }
+                      >
+                        {Object.entries(LINE_TYPE_LABELS).map(([v, l]) => (
+                          <option key={v} value={v}>
+                            {l}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    </div>
+                  </div>
+                  <div className="flex items-end">
+                    <button type="submit" className={btnPrimary}>
+                      <Save className="h-4 w-4" />
+                      Zapisz linię
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+
+            {selectedLineId && (
+              <div className={cardCls}>
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-slate-900">
+                      Warianty tras
+                    </h2>
+                    <p className="text-sm text-slate-500">
+                      Wybierz wariant (kierunek / trasa wydłużona) do edycji.
+                    </p>
+                  </div>
+                  <button
+                    className={btnSecondary}
+                    onClick={() => setShowRouteForm((v) => !v)}
+                  >
+                    <Plus className="h-4 w-4" />
+                    Nowy wariant
+                  </button>
+                </div>
+
+                {showRouteForm && (
+                  <form
+                    onSubmit={handleSubmitRoute}
+                    className="mb-4 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-4"
+                  >
+                    <div className="md:col-span-2">
+                      <label className={labelCls}>Nazwa trasy</label>
+                      <input
+                        className={inputCls}
+                        value={routeForm.name}
+                        onChange={(e) =>
+                          setRouteForm((p) => ({ ...p, name: e.target.value }))
+                        }
+                        placeholder="np. Dworzec → Lotnisko"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Kierunek</label>
+                      <div className="relative">
+                        <select
+                          className={`${inputCls} appearance-none pr-9`}
+                          value={routeForm.direction}
+                          onChange={(e) =>
+                            setRouteForm((p) => ({
+                              ...p,
+                              direction: e.target.value,
+                            }))
+                          }
+                        >
+                          {Object.entries(DIRECTION_LABELS).map(([v, l]) => (
+                            <option key={v} value={v}>
+                              {l}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      </div>
+                    </div>
+                    <div className="flex items-end justify-between gap-2">
+                      <label className="flex items-center gap-2 text-sm text-slate-700">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded border-slate-300"
+                          checked={routeForm.is_extended}
+                          onChange={(e) =>
+                            setRouteForm((p) => ({
+                              ...p,
+                              is_extended: e.target.checked,
+                            }))
+                          }
+                        />
+                        Wydłużona
+                      </label>
+                      <button type="submit" className={btnPrimary}>
+                        <Save className="h-4 w-4" />
+                        Zapisz
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {routesLoading ? (
+                  <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    Ładowanie tras…
+                  </div>
+                ) : routes.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+                    Brak tras dla tej linii. Dodaj pierwszy wariant.
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {routes.map((r) => {
+                      const active = r.id === selectedRouteId;
+                      return (
+                        <div
+                          key={r.id}
+                          className={`group flex items-center gap-2 rounded-xl border px-3 py-2 transition ${
+                            active
+                              ? 'border-indigo-500 bg-indigo-50'
+                              : 'border-slate-200 bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <button
+                            className="flex items-center gap-2 text-left"
+                            onClick={() => setSelectedRouteId(r.id)}
+                          >
+                            <RouteIcon
+                              className={`h-4 w-4 ${
+                                active ? 'text-indigo-600' : 'text-slate-400'
+                              }`}
+                            />
+                            <span className="text-sm font-medium text-slate-800">
+                              {r.name}
+                            </span>
+                            <span className="text-xs text-slate-500">
+                              {DIRECTION_LABELS[r.direction]}
+                            </span>
+                            {r.is_extended && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                                <Sparkles className="h-3 w-3" />
+                                Trasa wydłużona
+                              </span>
+                            )}
+                          </button>
+                          <button
+                            className={btnIconDanger}
+                            onClick={() => handleDeleteRoute(r.id)}
+                            title="Usuń trasę"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {selectedRoute && (
+              <div className="grid gap-6 lg:grid-cols-2">
+                {/* EDYTOR PRZYSTANKÓW TRASY */}
+                <div className={cardCls}>
+                  <div className="mb-4 flex items-center justify-between">
+                    <div>
+                      <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
+                        <ListOrdered className="h-5 w-5 text-indigo-600" />
+                        Przystanki trasy
+                      </h2>
+                      <p className="text-sm text-slate-500">
+                        {selectedRoute.name} · {DIRECTION_LABELS[selectedRoute.direction]}
+                        {selectedRoute.is_extended ? ' · wydłużona' : ''}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    <button
+                      className={btnSecondary}
+                      onClick={handleCopyFromOtherRoute}
+                    >
+                      <Copy className="h-4 w-4" />
+                      Kopiuj z innej trasy (z odwróceniem)
+                    </button>
+                  </div>
+
+                  <div className="mb-4 flex gap-2">
+                    <div className="relative flex-1">
+                      <select
+                        className={`${inputCls} appearance-none pr-9`}
+                        value={addStopId}
+                        onChange={(e) => setAddStopId(e.target.value)}
+                      >
+                        <option value="">— dodaj przystanek —</option>
+                        {availableStopsToAdd.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.id})
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    </div>
+                    <button
+                      className={btnSecondary}
+                      onClick={handleAddStopToRoute}
+                      disabled={!addStopId}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Dodaj
+                    </button>
+                  </div>
+
+                  {routeStopsLoading ? (
+                    <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                      Ładowanie…
+                    </div>
+                  ) : routeStops.length === 0 ? (
+                    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-slate-300 p-8 text-center">
+                      <MapPinned className="h-8 w-8 text-slate-300" />
+                      <p className="text-sm font-medium text-slate-600">
+                        Brak przystanków na trasie
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Dodaj przystanki i zapisz układ.
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="space-y-2">
+                      {routeStops.map((rs, idx) => (
+                        <li
+                          key={`${rs.stop_id}-${idx}`}
+                          className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2"
+                        >
+                          <button
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs font-semibold text-slate-600"
+                            onClick={() => setPreviewStop(rs.stop_id)}
+                            title="Podgląd odjazdów pasażera"
+                          >
+                            {idx + 1}
+                          </button>
+                          <button
+                            className="min-w-0 flex-1 text-left"
+                            onClick={() => setPreviewStop(rs.stop_id)}
+                          >
+                            <p className="truncate text-sm font-medium text-slate-800">
+                              {rs.stop_name || rs.stop_id}
+                            </p>
+                            <p className="truncate text-xs text-slate-400">
+                              {rs.stop_id}
+                            </p>
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              className="w-20 rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:border-indigo-500"
+                              value={rs.travel_time_from_start}
+                              onChange={(e) =>
+                                handleRouteStopTravelTime(idx, e.target.value)
+                              }
+                              title="Czas dojazdu od pętli (min)"
+                            />
+                            <span className="text-xs text-slate-400">min</span>
+                          </div>
+                          <div className="flex flex-col">
+                            <button
+                              className={btnIcon}
+                              onClick={() => moveRouteStop(idx, -1)}
+                              disabled={idx === 0}
+                            >
+                              <ArrowUpDown className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              className={btnIcon}
+                              onClick={() => moveRouteStop(idx, 1)}
+                              disabled={idx === routeStops.length - 1}
+                            >
+                              <ArrowUpDown
+                                className="h-3.5 w-3.5"
+                                style={{ transform: 'rotate(180deg)' }}
+                              />
+                            </button>
+                          </div>
+                          <button
+                            className={btnIconDanger}
+                            onClick={() => handleRemoveRouteStop(idx)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div className="mt-4 flex gap-2">
+                    <button
+                      className={btnPrimary}
+                      onClick={handleSaveRouteStops}
+                      disabled={savingRouteStops}
+                    >
+                      {savingRouteStops ? (
+                        <>
+                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                          Zapisywanie…
+                        </>
+                      ) : (
+                        <>
+                          <Save className="h-4 w-4" />
+                          Zapisz układ trasy
+                        </>
+                      )}
+                    </button>
+                    <button
+                      className={btnSecondary}
+                      onClick={() => loadRouteStops(selectedRouteId)}
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      Przywróć
+                    </button>
+                  </div>
+
+                  {previewStop && (
+                    <div className="mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                      <div className="mb-2 flex items-center justify-between">
+                        <h3 className="flex items-center gap-2 text-sm font-semibold text-indigo-900">
+                          <Clock3 className="h-4 w-4" />
+                          Odjazdy z: {previewStopName}
+                        </h3>
+                        <button
+                          className="text-xs text-indigo-600 hover:underline"
+                          onClick={() => setPreviewStop(null)}
+                        >
+                          Zamknij
+                        </button>
+                      </div>
+                      <p className="mb-2 text-xs text-indigo-700">
+                        {DAY_TYPES.find((d) => d.key === selectedDayType)?.label}{' '}
+                        · wyliczone: odjazd z pętli + czas dojazdu
+                      </p>
+                      {previewDepartures.length === 0 ? (
+                        <p className="text-sm text-indigo-700">
+                          Brak kursów dla tego typu dnia.
+                        </p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {previewDepartures.map((t, i) => (
+                            <span
+                              key={`${t}-${i}`}
+                              className="rounded-lg bg-white px-2.5 py-1 text-sm font-medium text-indigo-800 shadow-sm"
+                            >
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* KURSY */}
+                <div className={cardCls}>
+                  <div className="mb-4">
+                    <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
+                      <CalendarClock className="h-5 w-5 text-indigo-600" />
+                      Kursy (odjazdy z pętli)
+                    </h2>
+                    <p className="text-sm text-slate-500">
+                      Godziny odjazdu pierwszego przystanku dla wybranego typu
+                      dnia.
+                    </p>
+                  </div>
+
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    {DAY_TYPES.map((d) => {
+                      const active = selectedDayType === d.key;
+                      return (
+                        <button
+                          key={d.key}
+                          onClick={() => setSelectedDayType(d.key)}
+                          className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                            active
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          <CalendarClock className="h-4 w-4" />
+                          {d.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <form onSubmit={handleAddTrip} className="mb-4 flex gap-2">
+                    <div className="relative flex-1">
+                      <Clock3 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="time"
+                        className={`${inputCls} pl-9`}
+                        value={newDepartureTime}
+                        onChange={(e) => setNewDepartureTime(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className={btnPrimary}
+                      disabled={addingTrip}
+                    >
+                      {addingTrip ? (
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Plus className="h-4 w-4" />
+                      )}
+                      Dodaj kurs
+                    </button>
+                  </form>
+
+                  {tripsLoading ? (
+                    <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                      Ładowanie kursów…
+                    </div>
+                  ) : scheduleTrips.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+                      Brak kursów dla tego typu dnia.
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {scheduleTrips.map((trip) => (
+                        <div
+                          key={trip.id}
+                          className="group inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white py-1.5 pl-3 pr-1.5 text-sm"
+                        >
+                          <span className="font-medium text-slate-800">
+                            {normalizeTimeHHMM(trip.departure_time)}
+                          </span>
+                          <button
+                            className="rounded p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                            onClick={() => handleDeleteTrip(trip.id)}
+                            title="Usuń kurs"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ================= PRZYSTANKI ================= */}
+        {activeTab === 'stops' && (
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className={cardCls}>
+              <h2 className="text-lg font-semibold text-slate-900">
+                {editingStop ? 'Edytuj przystanek' : 'Dodaj nowy przystanek'}
+              </h2>
+              <p className="mb-4 text-sm text-slate-500">
+                Unikalne ID, nazwa i współrzędne geograficzne.
+              </p>
+              <form onSubmit={handleSubmitStop} className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className={labelCls}>ID przystanku</label>
+                    <input
+                      className={inputCls}
                       value={stopForm.id}
                       onChange={(e) => updateStopField('id', e.target.value)}
                       required
                       disabled={!!editingStop}
                     />
                   </div>
-                  <div className={styles.field}>
-                    <label htmlFor="stopName" className={styles.label}>Nazwa</label>
+                  <div>
+                    <label className={labelCls}>Nazwa</label>
                     <input
-                      id="stopName"
-                      type="text"
-                      className={styles.input}
+                      className={inputCls}
                       value={stopForm.name}
                       onChange={(e) => updateStopField('name', e.target.value)}
                       required
                     />
                   </div>
-                  <div className={styles.field}>
-                    <label htmlFor="stopLat" className={styles.label}>Szerokość geograficzna</label>
+                  <div>
+                    <label className={labelCls}>Szerokość</label>
                     <input
-                      id="stopLat"
                       type="number"
                       step="any"
-                      className={styles.input}
+                      className={inputCls}
                       value={stopForm.latitude}
-                      onChange={(e) => updateStopField('latitude', e.target.value)}
+                      onChange={(e) =>
+                        updateStopField('latitude', e.target.value)
+                      }
                       required
                     />
                   </div>
-                  <div className={styles.field}>
-                    <label htmlFor="stopLng" className={styles.label}>Długość geograficzna</label>
+                  <div>
+                    <label className={labelCls}>Długość</label>
                     <input
-                      id="stopLng"
                       type="number"
                       step="any"
-                      className={styles.input}
+                      className={inputCls}
                       value={stopForm.longitude}
-                      onChange={(e) => updateStopField('longitude', e.target.value)}
+                      onChange={(e) =>
+                        updateStopField('longitude', e.target.value)
+                      }
                       required
                     />
                   </div>
                 </div>
-                <div className={styles.formActions}>
-                  <button type="submit" className={styles.primaryButton}>
-                    <Save className={styles.buttonIcon} />
+                <div className="flex gap-2">
+                  <button type="submit" className={btnPrimary}>
+                    <Save className="h-4 w-4" />
                     {editingStop ? 'Zapisz zmiany' : 'Dodaj przystanek'}
                   </button>
-                  <button type="button" className={styles.secondaryButton} onClick={resetStopForm}>
-                    <RotateCcw className={styles.buttonIcon} />
+                  <button
+                    type="button"
+                    className={btnSecondary}
+                    onClick={resetStopForm}
+                  >
+                    <RotateCcw className="h-4 w-4" />
                     Anuluj
                   </button>
                 </div>
               </form>
-            </section>
+            </div>
 
-            <section className={styles.listCard}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h2 className={styles.sectionTitle}>Lista przystanków</h2>
-                  <p className={styles.sectionText}>
-                    {stops.length} przystanków w bazie.
-                  </p>
+            <div className={cardCls}>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Lista przystanków
+              </h2>
+              <p className="mb-4 text-sm text-slate-500">
+                {stops.length} przystanków w bazie.
+              </p>
+              {stopsLoading ? (
+                <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  Ładowanie…
                 </div>
-              </div>
-              <div className={styles.tableWrap}>
-                <table className={styles.table}>
-                  <thead>
-                    <tr><th>ID</th><th>Nazwa</th><th>Szerokość</th><th>Długość</th><th>Akcje</th></tr>
-                  </thead>
-                  <tbody>
-                    {stops.length === 0 ? (
-                      <tr><td colSpan="5"><div className={styles.emptyTable}>Brak przystanków.</div></td></tr>
-                    ) : (
-                      stops.map((stop) => (
-                        <tr key={stop.id}>
-                          <td>{stop.id}</td>
-                          <td>{stop.name}</td>
-                          <td>{stop.latitude}</td>
-                          <td>{stop.longitude}</td>
-                          <td>
-                            <div className={styles.tableActions}>
-                              <button className={styles.iconButton} onClick={() => handleEditStop(stop)}>
-                                <Pencil className={styles.buttonIcon} />
-                              </button>
-                              <button className={styles.iconButtonDanger} onClick={() => handleDeleteStop(stop.id)}>
-                                <Trash2 className={styles.buttonIcon} />
-                              </button>
-                            </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-xs uppercase text-slate-400">
+                        <th className="py-2 pr-3">ID</th>
+                        <th className="py-2 pr-3">Nazwa</th>
+                        <th className="py-2 pr-3">Szer.</th>
+                        <th className="py-2 pr-3">Dł.</th>
+                        <th className="py-2">Akcje</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {stops.length === 0 ? (
+                        <tr>
+                          <td colSpan="5" className="py-6 text-center text-slate-400">
+                            Brak przystanków.
                           </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                      ) : (
+                        stops.map((stop) => (
+                          <tr
+                            key={stop.id}
+                            className="border-b border-slate-100"
+                          >
+                            <td className="py-2 pr-3 font-mono text-xs text-slate-500">
+                              {stop.id}
+                            </td>
+                            <td className="py-2 pr-3 text-slate-800">
+                              {stop.name}
+                            </td>
+                            <td className="py-2 pr-3 text-slate-500">
+                              {stop.latitude}
+                            </td>
+                            <td className="py-2 pr-3 text-slate-500">
+                              {stop.longitude}
+                            </td>
+                            <td className="py-2">
+                              <div className="flex gap-1">
+                                <button
+                                  className={btnIcon}
+                                  onClick={() => handleEditStop(stop)}
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </button>
+                                <button
+                                  className={btnIconDanger}
+                                  onClick={() => handleDeleteStop(stop.id)}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* ZAWARTOŚĆ ZAKŁADKI ROZKŁADY */}
-        {activeTab === 'schedules' && (
-          <div className={styles.contentGrid}>
-            <section className={styles.formCard}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h2 className={styles.sectionTitle}>
-                    {editingSchedule ? 'Edytuj rozkład' : 'Dodaj nowy rozkład'}
-                  </h2>
-                  <p className={styles.sectionText}>
-                    Podaj nazwę, a następnie dla każdego dnia i kierunku zdefiniuj sekwencję przystanków.
-                  </p>
-                </div>
-              </div>
-              <form onSubmit={handleSubmitSchedule} className={styles.form}>
-                <div className={styles.field}>
-                  <label htmlFor="scheduleName" className={styles.label}>Nazwa rozkładu</label>
-                  <input
-                    id="scheduleName"
-                    type="text"
-                    className={styles.input}
-                    value={scheduleForm.name}
-                    onChange={(e) => setScheduleForm((prev) => ({ ...prev, name: e.target.value }))}
-                    required
-                  />
-                </div>
-
-                {/* Zakładki dni */}
-                <div className={styles.dayTabs}>
-                  {Object.keys(DAY_TYPE_LABELS).map((day) => (
-                    <button
-                      key={day}
-                      type="button"
-                      onClick={() => setSelectedDayType(day)}
-                      className={selectedDayType === day ? `${styles.dayTab} ${styles.dayTabActive}` : styles.dayTab}
-                    >
-                      <CalendarClock className={styles.dayTabIcon} />
-                      {DAY_TYPE_LABELS[day]}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Zakładki kierunków */}
-                <div className={styles.directionTabs}>
-                  {Object.keys(DIRECTION_LABELS).map((dir) => (
-                    <button
-                      key={dir}
-                      type="button"
-                      onClick={() => setSelectedDirection(dir)}
-                      className={selectedDirection === dir ? `${styles.directionTab} ${styles.directionTabActive}` : styles.directionTab}
-                    >
-                      <ArrowRightLeft className={styles.directionTabIcon} />
-                      {DIRECTION_LABELS[dir]}
-                    </button>
-                  ))}
-                </div>
-
-                {/* NOWE PRZYCISKI KOPIOWANIA DLA BIEŻĄCEGO DNIA */}
-                <div className={styles.copyRow}>
-                  <div className={styles.copyButtonGroup}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('outbound', 'inbound', false)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Tam → Z powrotem
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('outbound', 'inbound', true)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Tam → Z powrotem (odwróć)
-                    </button>
-                  </div>
-                  <div className={styles.copyButtonGroup}>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('inbound', 'outbound', false)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Z powrotem → Tam
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.secondaryButton}
-                      onClick={() => copyDirectionForCurrentDay('inbound', 'outbound', true)}
-                    >
-                      <Copy className={styles.buttonIcon} />
-                      Kopiuj Z powrotem → Tam (odwróć)
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    className={styles.secondaryButton}
-                    onClick={reverseCurrentDirection}
-                  >
-                    <ArrowUpDown className={styles.buttonIcon} />
-                    Odwróć kolejność (bieżący kierunek)
-                  </button>
-                </div>
-
-                {/* Stary przycisk kopiowania (z promptami) – można zostawić jako opcję uniwersalną */}
-                <div className={styles.copyRow}>
-                  <button type="button" className={styles.secondaryButton} onClick={handleCopyDirection}>
-                    <Copy className={styles.buttonIcon} />
-                    Kopiuj z innego kierunku (wszystkie dni)
-                  </button>
-                  <span className={styles.copyHint}>Skopiuj sekwencję z wybranego kierunku (z opcją odwrócenia) dla WSZYSTKICH dni</span>
-                </div>
-
-                {/* Sekwencja */}
-                <div className={styles.sequenceCard}>
-                  <div className={styles.sequenceHeader}>
-                    <div>
-                      <h3 className={styles.sequenceTitle}>
-                        Sekwencja: {DAY_TYPE_LABELS[selectedDayType]} – {DIRECTION_LABELS[selectedDirection]}
-                      </h3>
-                    </div>
-                    <button type="button" className={styles.secondaryButton} onClick={addStopToSequence}>
-                      <Plus className={styles.buttonIcon} />
-                      Dodaj przystanek
-                    </button>
-                  </div>
-                  <div className={styles.sequenceList}>
-                    {getCurrentSequence().length === 0 ? (
-                      <div className={styles.emptySequence}>
-                        <MapPinned className={styles.emptySequenceIcon} />
-                        <p className={styles.emptySequenceTitle}>Brak przystanków</p>
-                        <p className={styles.emptySequenceText}>Dodaj pierwszy przystanek.</p>
-                      </div>
-                    ) : (
-                      getCurrentSequence().map((item, idx) => (
-                        <div key={`${selectedDayType}-${selectedDirection}-${idx}`} className={styles.sequenceRow}>
-                          <div className={styles.sequenceIndex}>
-                            <ListOrdered className={styles.sequenceIndexIcon} />
-                            <span>{idx + 1}</span>
-                          </div>
-                          <div className={styles.sequenceFieldWide}>
-                            <div className={styles.selectWrap}>
-                              <select
-                                className={styles.select}
-                                value={item.stop_id}
-                                onChange={(e) => updateStopInSequence(idx, 'stop_id', e.target.value)}
-                                required
-                              >
-                                <option value="">Wybierz przystanek</option>
-                                {stops.map((stop) => (
-                                  <option key={stop.id} value={stop.id}>
-                                    {stop.name} ({stop.id})
-                                  </option>
-                                ))}
-                              </select>
-                              <ChevronDown className={styles.selectIcon} />
-                            </div>
-                          </div>
-                          <div className={styles.sequenceField}>
-                            <div className={styles.timeWrap}>
-                              <Clock3 className={styles.timeIcon} />
-                              <input
-                                type="time"
-                                className={styles.input}
-                                value={normalizeTime(item.planned_time)}
-                                onChange={(e) =>
-                                  updateStopInSequence(idx, 'planned_time', e.target.value)
-                                }
-                                required
-                              />
-                            </div>
-                          </div>
-                          <div className={styles.sequenceMoveButtons}>
-                            <button type="button" className={styles.iconButton} onClick={() => moveStopUp(idx)} disabled={idx === 0}>
-                              <ArrowUpDown className={styles.buttonIcon} />
-                            </button>
-                            <button type="button" className={styles.iconButton} onClick={() => moveStopDown(idx)} disabled={idx === getCurrentSequence().length - 1}>
-                              <ArrowUpDown className={styles.buttonIcon} style={{ transform: 'rotate(180deg)' }} />
-                            </button>
-                          </div>
-                          <button type="button" className={styles.iconButtonDanger} onClick={() => removeStopFromSequence(idx)}>
-                            <Trash2 className={styles.buttonIcon} />
-                          </button>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className={styles.formActions}>
-                  <button type="submit" className={styles.primaryButton} disabled={savingSchedule}>
-                    {savingSchedule ? (
-                      <><LoaderCircle className={`${styles.buttonIcon} ${styles.spin}`} /> Zapisywanie...</>
-                    ) : (
-                      <><Save className={styles.buttonIcon} /> {editingSchedule ? 'Zapisz zmiany' : 'Dodaj rozkład'}</>
-                    )}
-                  </button>
-                  <button type="button" className={styles.secondaryButton} onClick={resetScheduleForm}>
-                    <RotateCcw className={styles.buttonIcon} /> Anuluj
-                  </button>
-                </div>
-              </form>
-            </section>
-
-            <section className={styles.listCard}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h2 className={styles.sectionTitle}>Lista rozkładów</h2>
-                  <p className={styles.sectionText}>{schedules.length} rozkładów</p>
-                </div>
-              </div>
-              <div className={styles.tableWrap}>
-                <table className={styles.table}>
-                  <thead><tr><th>Nazwa</th><th>ID</th><th>Akcje</th></tr></thead>
-                  <tbody>
-                    {schedules.length === 0 ? (
-                      <tr><td colSpan="3"><div className={styles.emptyTable}>Brak rozkładów.</div></td></tr>
-                    ) : (
-                      schedules.map((s) => (
-                        <tr key={s.schedule_id}>
-                          <td>{s.name}</td>
-                          <td>{s.schedule_id}</td>
-                          <td>
-                            <div className={styles.tableActions}>
-                              <button className={styles.iconButton} onClick={() => handleEditSchedule(s)}>
-                                <Pencil className={styles.buttonIcon} />
-                              </button>
-                              <button className={styles.iconButtonDanger} onClick={() => handleDeleteSchedule(s.schedule_id)}>
-                                <Trash2 className={styles.buttonIcon} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
-        )}
-
-        {/* ZAWARTOŚĆ ZAKŁADKI POJAZDY */}
+        {/* ================= POJAZDY ================= */}
         {activeTab === 'vehicles' && (
-          <div className={styles.contentGridSingle}>
-            <section className={styles.listCard}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h2 className={styles.sectionTitle}>Pojazdy</h2>
-                  <p className={styles.sectionText}>
-                    Przypisz rozkład do każdego pojazdu.
-                  </p>
-                </div>
+          <div className={cardCls}>
+            <h2 className="text-lg font-semibold text-slate-900">Pojazdy</h2>
+            <p className="mb-4 text-sm text-slate-500">
+              Przypisz wariant trasy do każdego pojazdu (pcName).
+            </p>
+            {vehiclesLoading ? (
+              <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+                Ładowanie pojazdów…
               </div>
-              <div className={styles.tableWrap}>
-                <table className={styles.table}>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
                   <thead>
-                    <tr><th>Pojazd (pcName)</th><th>Przypisany rozkład</th><th>Status</th></tr>
+                    <tr className="border-b border-slate-200 text-xs uppercase text-slate-400">
+                      <th className="py-2 pr-3">Pojazd (pcName)</th>
+                      <th className="py-2 pr-3">Przypisana trasa</th>
+                      <th className="py-2">Status</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {vehicles.length === 0 ? (
-                      <tr><td colSpan="3"><div className={styles.emptyTable}>Brak pojazdów.</div></td></tr>
+                      <tr>
+                        <td colSpan="3" className="py-6 text-center text-slate-400">
+                          Brak pojazdów.
+                        </td>
+                      </tr>
                     ) : (
                       vehicles.map((vehicle) => {
-                        const currentScheduleId = vehicle.schedule_id || '';
+                        const currentRouteId =
+                          vehicle.route_id || vehicle.schedule_id || '';
                         return (
-                          <tr key={vehicle.pcName}>
-                            <td>{vehicle.pcName}</td>
-                            <td>
-                              <div className={styles.selectWrap} style={{ maxWidth: '300px' }}>
+                          <tr
+                            key={vehicle.pcName}
+                            className="border-b border-slate-100"
+                          >
+                            <td className="py-2 pr-3 font-medium text-slate-800">
+                              {vehicle.pcName}
+                            </td>
+                            <td className="py-2 pr-3">
+                              <div className="relative max-w-xs">
                                 <select
-                                  className={styles.select}
-                                  value={currentScheduleId}
-                                  onChange={(e) => handleUpdateVehicleSchedule(vehicle.pcName, e.target.value)}
+                                  className={`${inputCls} appearance-none pr-9`}
+                                  value={currentRouteId}
+                                  onChange={(e) =>
+                                    handleUpdateVehicleRoute(
+                                      vehicle.pcName,
+                                      e.target.value
+                                    )
+                                  }
                                 >
                                   <option value="">Brak</option>
-                                  {schedules.map((s) => (
-                                    <option key={s.schedule_id} value={s.schedule_id}>
-                                      {s.name} ({s.schedule_id})
+                                  {allRoutesFlat.map((r) => (
+                                    <option key={r.id} value={r.id}>
+                                      {r.name} ({DIRECTION_LABELS[r.direction]})
+                                      {r.is_extended ? ' · wydł.' : ''}
                                     </option>
                                   ))}
                                 </select>
-                                <ChevronDown className={styles.selectIcon} />
+                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                               </div>
+                              {allRoutesFlat.length === 0 && (
+                                <p className="mt-1 text-xs text-slate-400">
+                                  Wybierz linię w zakładce „Trasy”, aby zobaczyć
+                                  jej warianty.
+                                </p>
+                              )}
                             </td>
-                            <td>
-                              <span className={currentScheduleId ? styles.statusSuccess : styles.statusDanger}>
-                                {currentScheduleId ? (
-                                  <><CircleCheck className={styles.statusIcon} /> Przypisany</>
-                                ) : (
-                                  <><CircleX className={styles.statusIcon} /> Brak</>
-                                )}
-                              </span>
+                            <td className="py-2">
+                              {currentRouteId ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                                  Przypisany
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
+                                  Brak
+                                </span>
+                              )}
                             </td>
                           </tr>
                         );
@@ -1019,7 +1418,7 @@ const Schedule = () => {
                   </tbody>
                 </table>
               </div>
-            </section>
+            )}
           </div>
         )}
       </div>

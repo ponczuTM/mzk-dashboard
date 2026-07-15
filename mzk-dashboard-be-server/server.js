@@ -2,22 +2,27 @@
 
 const http = require('http');
 
-// Importujemy moduły
+// Importujemy moduły wymagane do uruchomienia bazy
 const sqlite = require('./sqlite');
 const funcs = require('./functions');
-const endpoints = require('./endpoints');
+
 
 // Wyciągamy potrzebne zmienne
 const { ensureDatabaseReady, PORT, SYNC_INTERVAL_MS } = sqlite;
 const { analyzeAllCurrentVehicles } = funcs;
-const { routeRequest } = endpoints;
+
+
+// WAŻNE: musi wykonać się przed require('./endpoints')
+ensureDatabaseReady();
+
+
+// Dopiero teraz endpoints.js może używać db.connection
+const { routeRequest, initScheduleSchema } = require('./endpoints');
 
 let server = null;
 
 // --------------------- URUCHOMIENIE ---------------------
 async function startServer() {
-  ensureDatabaseReady();
-
   server = http.createServer((req, res) => {
     routeRequest(req, res).catch(err => {
       console.error('[serverRoom] Krytyczny błąd obsługi HTTP:', err);
@@ -139,8 +144,11 @@ function gracefulShutdown(signal) {
   console.log(`\n[serverRoom] Otrzymano ${signal}. Zamykam serwer...`);
 
   try {
-    if (sqlite.db) {
-      sqlite.db.close();
+    if (sqlite.db?.connection) {
+      sqlite.db.connection.close();
+      sqlite.db.connection = null;
+      sqlite.dbState.ready = false;
+    
       console.log('[serverRoom] Połączenie SQLite zamknięte.');
     }
   } catch (err) {
