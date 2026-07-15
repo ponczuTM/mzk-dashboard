@@ -127,6 +127,70 @@ function createApi(baseUrl) {
     copyDirection: (routeId, payload) =>
       post(`/routes/${encodeURIComponent(routeId)}/copy-direction`, payload),
 
+    // --- ROZKŁADY jako niezależne byty ---
+    // W modelu backendu trasa (route) musi należeć do linii (line).
+    // Front nie zarządza liniami ręcznie: rozkłady to wolne elementy,
+    // dlatego wszystkie podpinamy pod jedną ukrytą linię-kontener.
+    // Pojazdy (pcName) pojawiają się same przez /api/data i dostają
+    // przypisany rozkład przez PUT /vehicles/:pcName { route_id }.
+    ensureScheduleContainer: async () => {
+      const CONTAINER_ID = '__SCHEDULES__';
+      try {
+        await get(`/lines/${encodeURIComponent(CONTAINER_ID)}`);
+      } catch (err) {
+        await post('/lines', {
+          id: CONTAINER_ID,
+          number: 'ROZKŁADY',
+          type: 'bus',
+          metadata: { container: true, hidden: true },
+        });
+      }
+      return CONTAINER_ID;
+    },
+    listSchedules: async () => {
+      const data = await get('/routes', { line_id: '__SCHEDULES__' });
+      const routes = data.routes || [];
+      return {
+        ok: true,
+        count: routes.length,
+        schedules: routes.map((r) => ({
+          ...r,
+          schedule_id: r.id,
+          active: true,
+        })),
+      };
+    },
+    createSchedule: async (payload) => {
+      const CONTAINER_ID = '__SCHEDULES__';
+      try {
+        await get(`/lines/${encodeURIComponent(CONTAINER_ID)}`);
+      } catch (err) {
+        await post('/lines', {
+          id: CONTAINER_ID,
+          number: 'ROZKŁADY',
+          type: 'bus',
+          metadata: { container: true, hidden: true },
+        });
+      }
+      return post('/routes', {
+        line_id: CONTAINER_ID,
+        name: payload.name,
+        direction: payload.direction || 'FROM_START',
+        is_extended: payload.is_extended === true,
+        stops: payload.stops,
+        metadata: payload.metadata,
+      });
+    },
+    updateSchedule: (id, payload) =>
+      put(`/routes/${encodeURIComponent(id)}`, {
+        line_id: '__SCHEDULES__',
+        name: payload.name,
+        direction: payload.direction || 'FROM_START',
+        is_extended: payload.is_extended === true,
+        metadata: payload.metadata,
+      }),
+    deleteSchedule: (id) => del(`/routes/${encodeURIComponent(id)}`),
+
     // --- Kursy rozkładowe (schedule_trips) ---
     getScheduleTrips: (query) => get('/trips/schedule', query),
     getScheduleTrip: (id) =>

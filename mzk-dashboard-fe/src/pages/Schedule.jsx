@@ -19,9 +19,11 @@ import {
   MapPin,
   Truck,
   Sparkles,
-  Bus,
-  TramFront,
+  Radio,
+  CircleCheck,
+  CircleSlash,
 } from 'lucide-react';
+import styles from './Schedule.module.css';
 
 const DAY_TYPES = [
   { key: 'WEEKDAY', label: 'Dzień powszedni' },
@@ -34,14 +36,6 @@ const DIRECTION_LABELS = {
   TO_START: 'Powrót (do pętli)',
 };
 
-const LINE_TYPE_LABELS = {
-  bus: 'Autobus',
-  tram: 'Tramwaj',
-  trolley: 'Trolejbus',
-  train: 'Kolej',
-  metro: 'Metro',
-};
-
 const createEmptyStopForm = () => ({
   id: '',
   name: '',
@@ -49,12 +43,7 @@ const createEmptyStopForm = () => ({
   longitude: '',
 });
 
-const createEmptyLineForm = () => ({
-  number: '',
-  type: 'bus',
-});
-
-const createEmptyRouteForm = () => ({
+const createEmptyScheduleForm = () => ({
   name: '',
   direction: 'FROM_START',
   is_extended: false,
@@ -91,15 +80,22 @@ const timeFromMinutes = (totalMinutes) => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 };
 
-const LineTypeIcon = ({ type, className }) => {
-  if (type === 'tram') return <TramFront className={className} />;
-  return <Bus className={className} />;
+const formatSeen = (value) => {
+  if (!value) return 'nigdy';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const diffMs = Date.now() - date.getTime();
+  const diffSec = Math.round(diffMs / 1000);
+  if (diffSec < 60) return `${diffSec} s temu`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min temu`;
+  return date.toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' });
 };
 
 const Schedule = () => {
   const { api } = useBackend();
 
-  const [activeTab, setActiveTab] = useState('routes');
+  const [activeTab, setActiveTab] = useState('schedules');
   const [error, setError] = useState(null);
 
   // ---------- PRZYSTANKI ----------
@@ -108,21 +104,15 @@ const Schedule = () => {
   const [stopForm, setStopForm] = useState(createEmptyStopForm());
   const [editingStop, setEditingStop] = useState(null);
 
-  // ---------- LINIE ----------
-  const [lines, setLines] = useState([]);
-  const [linesLoading, setLinesLoading] = useState(false);
-  const [lineForm, setLineForm] = useState(createEmptyLineForm());
-  const [showLineForm, setShowLineForm] = useState(false);
+  // ---------- ROZKŁADY ----------
+  const [schedules, setSchedules] = useState([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(false);
+  const [selectedScheduleId, setSelectedScheduleId] = useState('');
+  const [scheduleForm, setScheduleForm] = useState(createEmptyScheduleForm());
+  const [editingScheduleId, setEditingScheduleId] = useState(null);
+  const [savingSchedule, setSavingSchedule] = useState(false);
 
-  // ---------- TRASY ----------
-  const [routes, setRoutes] = useState([]);
-  const [routesLoading, setRoutesLoading] = useState(false);
-  const [selectedLineId, setSelectedLineId] = useState('');
-  const [selectedRouteId, setSelectedRouteId] = useState('');
-  const [routeForm, setRouteForm] = useState(createEmptyRouteForm());
-  const [showRouteForm, setShowRouteForm] = useState(false);
-
-  // ---------- PRZYSTANKI NA TRASIE ----------
+  // ---------- PRZYSTANKI NA ROZKŁADZIE ----------
   const [routeStops, setRouteStops] = useState([]);
   const [routeStopsLoading, setRouteStopsLoading] = useState(false);
   const [savingRouteStops, setSavingRouteStops] = useState(false);
@@ -149,52 +139,33 @@ const Schedule = () => {
       const data = await api.getStops();
       setStops(data.stops || []);
     } catch (err) {
-      setError(err.message || 'Błąd ładowania przystanków.');
+      setError(err.message || 'Nie udało się pobrać przystanków.');
     } finally {
       setStopsLoading(false);
     }
   }, [api]);
 
-  const loadLines = useCallback(async () => {
-    setLinesLoading(true);
+  const loadSchedules = useCallback(async () => {
+    setSchedulesLoading(true);
     try {
-      const data = await api.getLines();
-      setLines(data.lines || []);
+      const data = await api.listSchedules();
+      setSchedules(data.schedules || []);
     } catch (err) {
-      setError(err.message || 'Błąd ładowania linii.');
+      setError(err.message || 'Nie udało się pobrać rozkładów.');
     } finally {
-      setLinesLoading(false);
+      setSchedulesLoading(false);
     }
   }, [api]);
 
-  const loadRoutes = useCallback(
-    async (lineId) => {
-      if (!lineId) {
-        setRoutes([]);
-        return;
-      }
-      setRoutesLoading(true);
-      try {
-        const data = await api.getRoutes({ line_id: lineId });
-        setRoutes(data.routes || []);
-      } catch (err) {
-        setError(err.message || 'Błąd ładowania tras.');
-      } finally {
-        setRoutesLoading(false);
-      }
-    },
-    [api]
-  );
-
   const loadRouteStops = useCallback(
-    async (routeId) => {
-      if (!routeId) {
+    async (scheduleId) => {
+      if (!scheduleId) {
         setRouteStops([]);
         return;
       }
       setRouteStopsLoading(true);
       try {
-        const data = await api.getRouteStops(routeId);
+        const data = await api.getRouteStops(scheduleId);
         const sorted = (data.stops || [])
           .slice()
           .sort((a, b) => (a.sequence_order || 0) - (b.sequence_order || 0))
@@ -209,7 +180,7 @@ const Schedule = () => {
           }));
         setRouteStops(sorted);
       } catch (err) {
-        setError(err.message || 'Błąd ładowania przystanków trasy.');
+        setError(err.message || 'Nie udało się pobrać przystanków rozkładu.');
       } finally {
         setRouteStopsLoading(false);
       }
@@ -218,15 +189,15 @@ const Schedule = () => {
   );
 
   const loadScheduleTrips = useCallback(
-    async (routeId, dayType) => {
-      if (!routeId) {
+    async (scheduleId, dayType) => {
+      if (!scheduleId) {
         setScheduleTrips([]);
         return;
       }
       setTripsLoading(true);
       try {
         const data = await api.getScheduleTrips({
-          route_id: routeId,
+          route_id: scheduleId,
           day_type: dayType,
         });
         const sorted = (data.trips || [])
@@ -236,7 +207,7 @@ const Schedule = () => {
           );
         setScheduleTrips(sorted);
       } catch (err) {
-        setError(err.message || 'Błąd ładowania kursów.');
+        setError(err.message || 'Nie udało się pobrać kursów.');
       } finally {
         setTripsLoading(false);
       }
@@ -250,7 +221,7 @@ const Schedule = () => {
       const data = await api.getVehicles();
       setVehicles(data.vehicles || []);
     } catch (err) {
-      setError(err.message || 'Błąd ładowania pojazdów.');
+      setError(err.message || 'Nie udało się pobrać pojazdów.');
     } finally {
       setVehiclesLoading(false);
     }
@@ -259,32 +230,24 @@ const Schedule = () => {
   useEffect(() => {
     setError(null);
     loadStops();
-    loadLines();
+    loadSchedules();
     loadVehicles();
-  }, [loadStops, loadLines, loadVehicles]);
+  }, [loadStops, loadSchedules, loadVehicles]);
 
   useEffect(() => {
-    loadRoutes(selectedLineId);
-    setSelectedRouteId('');
-    setRouteStops([]);
-    setScheduleTrips([]);
-    setPreviewStop(null);
-  }, [selectedLineId, loadRoutes]);
-
-  useEffect(() => {
-    if (selectedRouteId) {
-      loadRouteStops(selectedRouteId);
-      loadScheduleTrips(selectedRouteId, selectedDayType);
+    if (selectedScheduleId) {
+      loadRouteStops(selectedScheduleId);
+      loadScheduleTrips(selectedScheduleId, selectedDayType);
       setPreviewStop(null);
     } else {
       setRouteStops([]);
       setScheduleTrips([]);
     }
-  }, [selectedRouteId, loadRouteStops, loadScheduleTrips, selectedDayType]);
+  }, [selectedScheduleId, selectedDayType, loadRouteStops, loadScheduleTrips]);
 
-  const selectedRoute = useMemo(
-    () => routes.find((r) => r.id === selectedRouteId) || null,
-    [routes, selectedRouteId]
+  const selectedSchedule = useMemo(
+    () => schedules.find((s) => s.id === selectedScheduleId) || null,
+    [schedules, selectedScheduleId]
   );
 
   // =================== PRZYSTANKI (CRUD) ===================
@@ -304,13 +267,13 @@ const Schedule = () => {
   };
 
   const handleDeleteStop = async (id) => {
-    if (!window.confirm(`Czy na pewno usunąć przystanek ${id}?`)) return;
+    if (!window.confirm(`Usunąć przystanek ${id}?`)) return;
     try {
       await api.deleteStop(id);
       await loadStops();
       if (editingStop?.id === id) resetStopForm();
     } catch (err) {
-      window.alert(`Błąd usuwania: ${err.message}`);
+      window.alert(`Nie udało się usunąć: ${err.message}`);
     }
   };
 
@@ -334,7 +297,7 @@ const Schedule = () => {
       resetStopForm();
       await loadStops();
     } catch (err) {
-      window.alert(`Błąd zapisu przystanku: ${err.message}`);
+      window.alert(`Nie udało się zapisać przystanku: ${err.message}`);
     }
   };
 
@@ -342,77 +305,72 @@ const Schedule = () => {
     setStopForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  // =================== LINIE ===================
-  const handleSubmitLine = async (e) => {
+  // =================== ROZKŁADY ===================
+  const resetScheduleForm = () => {
+    setEditingScheduleId(null);
+    setScheduleForm(createEmptyScheduleForm());
+  };
+
+  const handleEditScheduleMeta = (schedule) => {
+    setEditingScheduleId(schedule.id);
+    setScheduleForm({
+      name: schedule.name || '',
+      direction: schedule.direction || 'FROM_START',
+      is_extended: Boolean(schedule.is_extended),
+    });
+  };
+
+  const handleSubmitSchedule = async (e) => {
     e.preventDefault();
+    if (!scheduleForm.name.trim()) {
+      window.alert('Podaj nazwę rozkładu.');
+      return;
+    }
+    setSavingSchedule(true);
     try {
-      const created = await api.createLine({
-        number: lineForm.number.trim(),
-        type: lineForm.type,
-      });
-      setLineForm(createEmptyLineForm());
-      setShowLineForm(false);
-      await loadLines();
-      if (created?.line?.id) setSelectedLineId(created.line.id);
+      if (editingScheduleId) {
+        await api.updateSchedule(editingScheduleId, {
+          name: scheduleForm.name.trim(),
+          direction: scheduleForm.direction,
+          is_extended: scheduleForm.is_extended,
+        });
+        await loadSchedules();
+      } else {
+        const created = await api.createSchedule({
+          name: scheduleForm.name.trim(),
+          direction: scheduleForm.direction,
+          is_extended: scheduleForm.is_extended,
+        });
+        await loadSchedules();
+        if (created?.route?.id) setSelectedScheduleId(created.route.id);
+      }
+      resetScheduleForm();
     } catch (err) {
-      window.alert(`Błąd zapisu linii: ${err.message}`);
+      window.alert(`Nie udało się zapisać rozkładu: ${err.message}`);
+    } finally {
+      setSavingSchedule(false);
     }
   };
 
-  const handleDeleteLine = async (id) => {
+  const handleDeleteSchedule = async (id) => {
     if (
       !window.confirm(
-        `Usunąć linię ${id}? Skasuje to również jej trasy i kursy.`
+        'Usunąć ten rozkład? Skasuje to jego przystanki i wszystkie kursy.'
       )
     )
       return;
     try {
-      await api.deleteLine(id);
-      if (selectedLineId === id) setSelectedLineId('');
-      await loadLines();
+      await api.deleteSchedule(id);
+      if (selectedScheduleId === id) setSelectedScheduleId('');
+      if (editingScheduleId === id) resetScheduleForm();
+      await loadSchedules();
+      await loadVehicles();
     } catch (err) {
-      window.alert(`Błąd usuwania linii: ${err.message}`);
+      window.alert(`Nie udało się usunąć rozkładu: ${err.message}`);
     }
   };
 
-  // =================== TRASY ===================
-  const handleSubmitRoute = async (e) => {
-    e.preventDefault();
-    if (!selectedLineId) {
-      window.alert('Najpierw wybierz linię.');
-      return;
-    }
-    try {
-      const created = await api.createRoute({
-        line_id: selectedLineId,
-        name: routeForm.name.trim(),
-        direction: routeForm.direction,
-        is_extended: routeForm.is_extended,
-      });
-      setRouteForm(createEmptyRouteForm());
-      setShowRouteForm(false);
-      await loadRoutes(selectedLineId);
-      if (created?.route?.id) setSelectedRouteId(created.route.id);
-    } catch (err) {
-      window.alert(`Błąd zapisu trasy: ${err.message}`);
-    }
-  };
-
-  const handleDeleteRoute = async (id) => {
-    if (
-      !window.confirm(`Usunąć trasę ${id}? Skasuje to jej przystanki i kursy.`)
-    )
-      return;
-    try {
-      await api.deleteRoute(id);
-      if (selectedRouteId === id) setSelectedRouteId('');
-      await loadRoutes(selectedLineId);
-    } catch (err) {
-      window.alert(`Błąd usuwania trasy: ${err.message}`);
-    }
-  };
-
-  // =================== PRZYSTANKI NA TRASIE ===================
+  // =================== PRZYSTANKI NA ROZKŁADZIE ===================
   const availableStopsToAdd = useMemo(() => {
     const used = new Set(routeStops.map((rs) => rs.stop_id));
     return stops.filter((s) => !used.has(s.id));
@@ -467,7 +425,7 @@ const Schedule = () => {
   };
 
   const handleSaveRouteStops = async () => {
-    if (!selectedRouteId) return;
+    if (!selectedScheduleId) return;
     for (const rs of routeStops) {
       if (!rs.stop_id) {
         window.alert('Każdy wiersz musi mieć wybrany przystanek.');
@@ -484,28 +442,28 @@ const Schedule = () => {
         stop_id: rs.stop_id,
         travel_time_from_start: rs.travel_time_from_start,
       }));
-      await api.setRouteStops(selectedRouteId, payload);
-      await loadRouteStops(selectedRouteId);
-      window.alert('Układ trasy zapisany.');
+      await api.setRouteStops(selectedScheduleId, payload);
+      await loadRouteStops(selectedScheduleId);
+      window.alert('Układ rozkładu zapisany.');
     } catch (err) {
-      window.alert(`Błąd zapisu układu trasy: ${err.message}`);
+      window.alert(`Nie udało się zapisać układu: ${err.message}`);
     } finally {
       setSavingRouteStops(false);
     }
   };
 
-  const handleCopyFromOtherRoute = async () => {
-    if (!selectedRouteId) return;
-    const others = routes.filter((r) => r.id !== selectedRouteId);
+  const handleCopyFromOtherSchedule = async () => {
+    if (!selectedScheduleId) return;
+    const others = schedules.filter((s) => s.id !== selectedScheduleId);
     if (others.length === 0) {
-      window.alert('Brak innej trasy w tej linii do skopiowania.');
+      window.alert('Brak innego rozkładu do skopiowania.');
       return;
     }
     const list = others
-      .map((r, i) => `${i + 1}. ${r.name} [${DIRECTION_LABELS[r.direction]}]`)
+      .map((s, i) => `${i + 1}. ${s.name} [${DIRECTION_LABELS[s.direction]}]`)
       .join('\n');
     const answer = window.prompt(
-      `Z której trasy skopiować przystanki? Podaj numer:\n${list}`,
+      `Z którego rozkładu skopiować przystanki? Podaj numer:\n${list}`,
       '1'
     );
     if (!answer) return;
@@ -516,37 +474,37 @@ const Schedule = () => {
     }
     const source = others[idx];
     const reverse = window.confirm(
-      'Odwrócić kolejność i czasy (trasa powrotna)? OK = tak, Anuluj = kopiuj 1:1.'
+      'Odwrócić kolejność i czasy (rozkład powrotny)? OK = tak, Anuluj = kopiuj 1:1.'
     );
     try {
       await api.copyDirection(source.id, {
-        target_route_id: selectedRouteId,
+        target_route_id: selectedScheduleId,
         reverse,
       });
-      await loadRouteStops(selectedRouteId);
+      await loadRouteStops(selectedScheduleId);
       window.alert('Skopiowano przystanki.');
     } catch (err) {
-      window.alert(`Błąd kopiowania: ${err.message}`);
+      window.alert(`Nie udało się skopiować: ${err.message}`);
     }
   };
 
   // =================== KURSY ===================
   const handleAddTrip = async (e) => {
     e.preventDefault();
-    if (!selectedRouteId) {
-      window.alert('Najpierw wybierz trasę.');
+    if (!selectedScheduleId) {
+      window.alert('Najpierw wybierz rozkład.');
       return;
     }
     setAddingTrip(true);
     try {
       await api.createScheduleTrip({
-        route_id: selectedRouteId,
+        route_id: selectedScheduleId,
         day_type: selectedDayType,
         departure_time: normalizeTimeHHMM(newDepartureTime),
       });
-      await loadScheduleTrips(selectedRouteId, selectedDayType);
+      await loadScheduleTrips(selectedScheduleId, selectedDayType);
     } catch (err) {
-      window.alert(`Błąd dodawania kursu: ${err.message}`);
+      window.alert(`Nie udało się dodać kursu: ${err.message}`);
     } finally {
       setAddingTrip(false);
     }
@@ -555,9 +513,9 @@ const Schedule = () => {
   const handleDeleteTrip = async (tripId) => {
     try {
       await api.deleteScheduleTrip(tripId);
-      await loadScheduleTrips(selectedRouteId, selectedDayType);
+      await loadScheduleTrips(selectedScheduleId, selectedDayType);
     } catch (err) {
-      window.alert(`Błąd usuwania kursu: ${err.message}`);
+      window.alert(`Nie udało się usunąć kursu: ${err.message}`);
     }
   };
 
@@ -582,57 +540,38 @@ const Schedule = () => {
   }, [previewStop, routeStops]);
 
   // =================== POJAZDY ===================
-  const handleUpdateVehicleRoute = async (pcName, routeId) => {
+  const handleUpdateVehicleSchedule = async (pcName, scheduleId) => {
     try {
-      await api.updateVehicle(pcName, { route_id: routeId || '' });
+      await api.updateVehicle(pcName, { route_id: scheduleId || '' });
       await loadVehicles();
     } catch (err) {
-      window.alert(`Błąd aktualizacji pojazdu: ${err.message}`);
+      window.alert(`Nie udało się zaktualizować pojazdu: ${err.message}`);
     }
   };
 
-  const allRoutesFlat = useMemo(() => routes, [routes]);
-
-  // =================== RENDER ===================
-  const btnPrimary =
-    'inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50';
-  const btnSecondary =
-    'inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-50';
-  const btnIcon =
-    'inline-flex items-center justify-center rounded-md p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-30';
-  const btnIconDanger =
-    'inline-flex items-center justify-center rounded-md p-2 text-red-500 transition hover:bg-red-50 hover:text-red-700';
-  const inputCls =
-    'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100';
-  const labelCls = 'mb-1 block text-xs font-medium text-slate-600';
-  const cardCls = 'rounded-2xl border border-slate-200 bg-white p-5 shadow-sm';
-
   return (
-    <section className="min-h-screen bg-slate-50 p-4 md:p-8">
-      <div className="mx-auto max-w-6xl space-y-6">
-        <header>
-          <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600">
-            Zarządzanie infrastrukturą
-          </p>
-          <h1 className="mt-1 text-2xl font-bold text-slate-900">
-            Konfiguracja rozkładów
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Linie, warianty tras (w tym powrotne i wydłużone), przystanki na
-            trasie, kursy oraz przypisanie do pojazdów.
+    <section className={styles.page}>
+      <div className={styles.container}>
+        <header className={styles.header}>
+          <p className={styles.headerLabel}>Zarządzanie infrastrukturą</p>
+          <h1 className={styles.title}>Rozkłady, przystanki i pojazdy</h1>
+          <p className={styles.subtitle}>
+            Rozkłady jazdy to samodzielne elementy. Definiujesz je tutaj, a w
+            zakładce Pojazdy przypisujesz do konkretnego pojazdu, który zgłasza
+            się do serwera.
           </p>
         </header>
 
         {error && (
-          <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+          <div className={styles.alert}>
+            <AlertCircle size={20} className={styles.alertIcon} />
             <span>{error}</span>
           </div>
         )}
 
-        <div className="flex flex-wrap gap-2">
+        <div className={styles.tabs}>
           {[
-            { key: 'routes', label: 'Trasy i rozkłady', icon: RouteIcon },
+            { key: 'schedules', label: 'Rozkłady jazdy', icon: CalendarClock },
             { key: 'stops', label: 'Przystanki', icon: MapPin },
             { key: 'vehicles', label: 'Pojazdy', icon: Truck },
           ].map((t) => {
@@ -642,279 +581,208 @@ const Schedule = () => {
               <button
                 key={t.key}
                 onClick={() => setActiveTab(t.key)}
-                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition ${
-                  active
-                    ? 'bg-indigo-600 text-white shadow'
-                    : 'bg-white text-slate-600 hover:bg-slate-100'
-                }`}
+                className={`${styles.tab} ${active ? styles.tabActive : styles.tabInactive}`}
               >
-                <Icon className="h-4 w-4" />
+                <Icon size={16} />
                 {t.label}
               </button>
             );
           })}
         </div>
 
-        {/* ================= TRASY I ROZKŁADY ================= */}
-        {activeTab === 'routes' && (
-          <div className="space-y-6">
-            <div className={cardCls}>
-              <div className="flex flex-col gap-4 md:flex-row md:items-end">
-                <div className="flex-1">
-                  <label className={labelCls}>Linia</label>
-                  <div className="relative">
+        {/* ================= ROZKŁADY JAZDY ================= */}
+        {activeTab === 'schedules' && (
+          <div className={styles.section}>
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <div>
+                  <h2 className={styles.cardTitle}>
+                    {editingScheduleId ? 'Edytuj rozkład' : 'Nowy rozkład'}
+                  </h2>
+                  <p className={styles.cardDescription}>
+                    Nadaj nazwę, wskaż kierunek i zaznacz, czy to trasa
+                    wydłużona.
+                  </p>
+                </div>
+                {editingScheduleId && (
+                  <button className={styles.btnSecondary} onClick={resetScheduleForm}>
+                    <RotateCcw size={16} />
+                    Anuluj edycję
+                  </button>
+                )}
+              </div>
+
+              <form
+                onSubmit={handleSubmitSchedule}
+                className={styles.formSchedule}
+              >
+                <div className={styles.formScheduleName}>
+                  <label className={styles.label}>Nazwa rozkładu</label>
+                  <input
+                    className={styles.input}
+                    value={scheduleForm.name}
+                    onChange={(e) =>
+                      setScheduleForm((p) => ({ ...p, name: e.target.value }))
+                    }
+                    placeholder="np. Dworzec → Lotnisko"
+                    required
+                  />
+                </div>
+                <div className={styles.formScheduleDirection}>
+                  <label className={styles.label}>Kierunek</label>
+                  <div className={styles.selectWrapper}>
                     <select
-                      className={`${inputCls} appearance-none pr-9`}
-                      value={selectedLineId}
-                      onChange={(e) => setSelectedLineId(e.target.value)}
+                      className={styles.select}
+                      value={scheduleForm.direction}
+                      onChange={(e) =>
+                        setScheduleForm((p) => ({
+                          ...p,
+                          direction: e.target.value,
+                        }))
+                      }
                     >
-                      <option value="">— wybierz linię —</option>
-                      {lines.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {LINE_TYPE_LABELS[l.type] || l.type} {l.number}
+                      {Object.entries(DIRECTION_LABELS).map(([v, l]) => (
+                        <option key={v} value={v}>
+                          {l}
                         </option>
                       ))}
                     </select>
-                    <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <ChevronDown size={16} className={styles.selectIcon} />
                   </div>
                 </div>
-                <div className="flex gap-2">
+                <div className={styles.formScheduleExtended}>
+                  <label className={styles.checkboxLabel}>
+                    <input
+                      type="checkbox"
+                      className={styles.checkbox}
+                      checked={scheduleForm.is_extended}
+                      onChange={(e) =>
+                        setScheduleForm((p) => ({
+                          ...p,
+                          is_extended: e.target.checked,
+                        }))
+                      }
+                    />
+                    Wydłużona
+                  </label>
+                </div>
+                <div className={styles.formScheduleSubmit}>
                   <button
-                    className={btnSecondary}
-                    onClick={() => setShowLineForm((v) => !v)}
+                    type="submit"
+                    className={styles.btnPrimary}
+                    disabled={savingSchedule}
                   >
-                    <Plus className="h-4 w-4" />
-                    Nowa linia
+                    {savingSchedule ? (
+                      <LoaderCircle size={16} className={styles.spinner} />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    {editingScheduleId ? 'Zapisz' : 'Utwórz'}
                   </button>
-                  {selectedLineId && (
-                    <button
-                      className={btnIconDanger}
-                      onClick={() => handleDeleteLine(selectedLineId)}
-                      title="Usuń linię"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <div>
+                  <h2 className={styles.cardTitle}>Rozkłady</h2>
+                  <p className={styles.cardDescription}>
+                    Wybierz rozkład, aby edytować jego przystanki i kursy.
+                  </p>
                 </div>
               </div>
 
-              {showLineForm && (
-                <form
-                  onSubmit={handleSubmitLine}
-                  className="mt-4 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-3"
-                >
-                  <div>
-                    <label className={labelCls}>Numer</label>
-                    <input
-                      className={inputCls}
-                      value={lineForm.number}
-                      onChange={(e) =>
-                        setLineForm((p) => ({ ...p, number: e.target.value }))
-                      }
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className={labelCls}>Typ</label>
-                    <div className="relative">
-                      <select
-                        className={`${inputCls} appearance-none pr-9`}
-                        value={lineForm.type}
-                        onChange={(e) =>
-                          setLineForm((p) => ({ ...p, type: e.target.value }))
-                        }
+              {schedulesLoading ? (
+                <div className={styles.loading}>
+                  <LoaderCircle size={16} className={styles.spinner} />
+                  Ładowanie rozkładów…
+                </div>
+              ) : schedules.length === 0 ? (
+                <div className={styles.emptyState}>
+                  Nie ma jeszcze żadnego rozkładu. Utwórz pierwszy powyżej.
+                </div>
+              ) : (
+                <div className={styles.scheduleList}>
+                  {schedules.map((s) => {
+                    const active = s.id === selectedScheduleId;
+                    return (
+                      <div
+                        key={s.id}
+                        className={`${styles.scheduleItem} ${active ? styles.scheduleItemActive : styles.scheduleItemInactive}`}
                       >
-                        {Object.entries(LINE_TYPE_LABELS).map(([v, l]) => (
-                          <option key={v} value={v}>
-                            {l}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    </div>
-                  </div>
-                  <div className="flex items-end">
-                    <button type="submit" className={btnPrimary}>
-                      <Save className="h-4 w-4" />
-                      Zapisz linię
-                    </button>
-                  </div>
-                </form>
+                        <button
+                          className={styles.scheduleItemButton}
+                          onClick={() => setSelectedScheduleId(s.id)}
+                        >
+                          <RouteIcon
+                            size={16}
+                            className={active ? styles.iconActive : styles.iconInactive}
+                          />
+                          <span className={styles.scheduleName}>{s.name}</span>
+                          <span className={styles.scheduleDirection}>
+                            {DIRECTION_LABELS[s.direction]}
+                          </span>
+                          {s.is_extended && (
+                            <span className={styles.extendedBadge}>
+                              <Sparkles size={12} />
+                              Wydłużona
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          className={styles.btnIcon}
+                          onClick={() => handleEditScheduleMeta(s)}
+                          title="Zmień nazwę / kierunek"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                        <button
+                          className={styles.btnIconDanger}
+                          onClick={() => handleDeleteSchedule(s.id)}
+                          title="Usuń rozkład"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
-            {selectedLineId && (
-              <div className={cardCls}>
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-slate-900">
-                      Warianty tras
-                    </h2>
-                    <p className="text-sm text-slate-500">
-                      Wybierz wariant (kierunek / trasa wydłużona) do edycji.
-                    </p>
-                  </div>
-                  <button
-                    className={btnSecondary}
-                    onClick={() => setShowRouteForm((v) => !v)}
-                  >
-                    <Plus className="h-4 w-4" />
-                    Nowy wariant
-                  </button>
-                </div>
-
-                {showRouteForm && (
-                  <form
-                    onSubmit={handleSubmitRoute}
-                    className="mb-4 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-4"
-                  >
-                    <div className="md:col-span-2">
-                      <label className={labelCls}>Nazwa trasy</label>
-                      <input
-                        className={inputCls}
-                        value={routeForm.name}
-                        onChange={(e) =>
-                          setRouteForm((p) => ({ ...p, name: e.target.value }))
-                        }
-                        placeholder="np. Dworzec → Lotnisko"
-                        required
-                      />
-                    </div>
+            {selectedSchedule && (
+              <div className={styles.twoColumn}>
+                {/* EDYTOR PRZYSTANKÓW */}
+                <div className={styles.card}>
+                  <div className={styles.cardHeader}>
                     <div>
-                      <label className={labelCls}>Kierunek</label>
-                      <div className="relative">
-                        <select
-                          className={`${inputCls} appearance-none pr-9`}
-                          value={routeForm.direction}
-                          onChange={(e) =>
-                            setRouteForm((p) => ({
-                              ...p,
-                              direction: e.target.value,
-                            }))
-                          }
-                        >
-                          {Object.entries(DIRECTION_LABELS).map(([v, l]) => (
-                            <option key={v} value={v}>
-                              {l}
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      </div>
-                    </div>
-                    <div className="flex items-end justify-between gap-2">
-                      <label className="flex items-center gap-2 text-sm text-slate-700">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded border-slate-300"
-                          checked={routeForm.is_extended}
-                          onChange={(e) =>
-                            setRouteForm((p) => ({
-                              ...p,
-                              is_extended: e.target.checked,
-                            }))
-                          }
-                        />
-                        Wydłużona
-                      </label>
-                      <button type="submit" className={btnPrimary}>
-                        <Save className="h-4 w-4" />
-                        Zapisz
-                      </button>
-                    </div>
-                  </form>
-                )}
-
-                {routesLoading ? (
-                  <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                    <LoaderCircle className="h-4 w-4 animate-spin" />
-                    Ładowanie tras…
-                  </div>
-                ) : routes.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
-                    Brak tras dla tej linii. Dodaj pierwszy wariant.
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {routes.map((r) => {
-                      const active = r.id === selectedRouteId;
-                      return (
-                        <div
-                          key={r.id}
-                          className={`group flex items-center gap-2 rounded-xl border px-3 py-2 transition ${
-                            active
-                              ? 'border-indigo-500 bg-indigo-50'
-                              : 'border-slate-200 bg-white hover:border-slate-300'
-                          }`}
-                        >
-                          <button
-                            className="flex items-center gap-2 text-left"
-                            onClick={() => setSelectedRouteId(r.id)}
-                          >
-                            <RouteIcon
-                              className={`h-4 w-4 ${
-                                active ? 'text-indigo-600' : 'text-slate-400'
-                              }`}
-                            />
-                            <span className="text-sm font-medium text-slate-800">
-                              {r.name}
-                            </span>
-                            <span className="text-xs text-slate-500">
-                              {DIRECTION_LABELS[r.direction]}
-                            </span>
-                            {r.is_extended && (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
-                                <Sparkles className="h-3 w-3" />
-                                Trasa wydłużona
-                              </span>
-                            )}
-                          </button>
-                          <button
-                            className={btnIconDanger}
-                            onClick={() => handleDeleteRoute(r.id)}
-                            title="Usuń trasę"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {selectedRoute && (
-              <div className="grid gap-6 lg:grid-cols-2">
-                {/* EDYTOR PRZYSTANKÓW TRASY */}
-                <div className={cardCls}>
-                  <div className="mb-4 flex items-center justify-between">
-                    <div>
-                      <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
-                        <ListOrdered className="h-5 w-5 text-indigo-600" />
-                        Przystanki trasy
+                      <h2 className={styles.cardTitle}>
+                        <ListOrdered size={20} className={styles.iconPrimary} />
+                        Przystanki rozkładu
                       </h2>
-                      <p className="text-sm text-slate-500">
-                        {selectedRoute.name} · {DIRECTION_LABELS[selectedRoute.direction]}
-                        {selectedRoute.is_extended ? ' · wydłużona' : ''}
+                      <p className={styles.cardDescription}>
+                        {selectedSchedule.name} ·{' '}
+                        {DIRECTION_LABELS[selectedSchedule.direction]}
+                        {selectedSchedule.is_extended ? ' · wydłużona' : ''}
                       </p>
                     </div>
                   </div>
 
-                  <div className="mb-3 flex flex-wrap gap-2">
+                  <div className={styles.buttonGroup}>
                     <button
-                      className={btnSecondary}
-                      onClick={handleCopyFromOtherRoute}
+                      className={styles.btnSecondary}
+                      onClick={handleCopyFromOtherSchedule}
                     >
-                      <Copy className="h-4 w-4" />
-                      Kopiuj z innej trasy (z odwróceniem)
+                      <Copy size={16} />
+                      Kopiuj z innego rozkładu (z odwróceniem)
                     </button>
                   </div>
 
-                  <div className="mb-4 flex gap-2">
-                    <div className="relative flex-1">
+                  <div className={styles.addStopRow}>
+                    <div className={styles.selectWrapper}>
                       <select
-                        className={`${inputCls} appearance-none pr-9`}
+                        className={styles.select}
                         value={addStopId}
                         onChange={(e) => setAddStopId(e.target.value)}
                       >
@@ -925,157 +793,147 @@ const Schedule = () => {
                           </option>
                         ))}
                       </select>
-                      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <ChevronDown size={16} className={styles.selectIcon} />
                     </div>
                     <button
-                      className={btnSecondary}
+                      className={styles.btnSecondary}
                       onClick={handleAddStopToRoute}
                       disabled={!addStopId}
                     >
-                      <Plus className="h-4 w-4" />
+                      <Plus size={16} />
                       Dodaj
                     </button>
                   </div>
 
                   {routeStopsLoading ? (
-                    <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                    <div className={styles.loading}>
+                      <LoaderCircle size={16} className={styles.spinner} />
                       Ładowanie…
                     </div>
                   ) : routeStops.length === 0 ? (
-                    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-slate-300 p-8 text-center">
-                      <MapPinned className="h-8 w-8 text-slate-300" />
-                      <p className="text-sm font-medium text-slate-600">
-                        Brak przystanków na trasie
-                      </p>
-                      <p className="text-xs text-slate-400">
+                    <div className={styles.emptyState}>
+                      <MapPinned size={32} className={styles.emptyIcon} />
+                      <p className={styles.emptyTitle}>Brak przystanków w rozkładzie</p>
+                      <p className={styles.emptyDescription}>
                         Dodaj przystanki i zapisz układ.
                       </p>
                     </div>
                   ) : (
-                    <ul className="space-y-2">
+                    <ul className={styles.stopList}>
                       {routeStops.map((rs, idx) => (
                         <li
                           key={`${rs.stop_id}-${idx}`}
-                          className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-2"
+                          className={styles.stopItem}
                         >
                           <button
-                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-xs font-semibold text-slate-600"
+                            className={styles.stopIndex}
                             onClick={() => setPreviewStop(rs.stop_id)}
-                            title="Podgląd odjazdów pasażera"
+                            title="Podgląd odjazdów"
                           >
                             {idx + 1}
                           </button>
                           <button
-                            className="min-w-0 flex-1 text-left"
+                            className={styles.stopInfo}
                             onClick={() => setPreviewStop(rs.stop_id)}
                           >
-                            <p className="truncate text-sm font-medium text-slate-800">
+                            <p className={styles.stopName}>
                               {rs.stop_name || rs.stop_id}
                             </p>
-                            <p className="truncate text-xs text-slate-400">
-                              {rs.stop_id}
-                            </p>
+                            <p className={styles.stopId}>{rs.stop_id}</p>
                           </button>
-                          <div className="flex items-center gap-1">
+                          <div className={styles.stopTime}>
                             <input
                               type="number"
                               min="0"
-                              className="w-20 rounded-lg border border-slate-300 px-2 py-1 text-sm outline-none focus:border-indigo-500"
+                              className={styles.stopTimeInput}
                               value={rs.travel_time_from_start}
                               onChange={(e) =>
                                 handleRouteStopTravelTime(idx, e.target.value)
                               }
                               title="Czas dojazdu od pętli (min)"
                             />
-                            <span className="text-xs text-slate-400">min</span>
+                            <span className={styles.stopTimeLabel}>min</span>
                           </div>
-                          <div className="flex flex-col">
+                          <div className={styles.stopMove}>
                             <button
-                              className={btnIcon}
+                              className={styles.btnIcon}
                               onClick={() => moveRouteStop(idx, -1)}
                               disabled={idx === 0}
                             >
-                              <ArrowUpDown className="h-3.5 w-3.5" />
+                              <ArrowUpDown size={14} />
                             </button>
                             <button
-                              className={btnIcon}
+                              className={styles.btnIcon}
                               onClick={() => moveRouteStop(idx, 1)}
                               disabled={idx === routeStops.length - 1}
                             >
-                              <ArrowUpDown
-                                className="h-3.5 w-3.5"
-                                style={{ transform: 'rotate(180deg)' }}
-                              />
+                              <ArrowUpDown size={14} style={{ transform: 'rotate(180deg)' }} />
                             </button>
                           </div>
                           <button
-                            className={btnIconDanger}
+                            className={styles.btnIconDanger}
                             onClick={() => handleRemoveRouteStop(idx)}
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 size={16} />
                           </button>
                         </li>
                       ))}
                     </ul>
                   )}
 
-                  <div className="mt-4 flex gap-2">
+                  <div className={styles.buttonGroup}>
                     <button
-                      className={btnPrimary}
+                      className={styles.btnPrimary}
                       onClick={handleSaveRouteStops}
                       disabled={savingRouteStops}
                     >
                       {savingRouteStops ? (
                         <>
-                          <LoaderCircle className="h-4 w-4 animate-spin" />
+                          <LoaderCircle size={16} className={styles.spinner} />
                           Zapisywanie…
                         </>
                       ) : (
                         <>
-                          <Save className="h-4 w-4" />
-                          Zapisz układ trasy
+                          <Save size={16} />
+                          Zapisz układ rozkładu
                         </>
                       )}
                     </button>
                     <button
-                      className={btnSecondary}
-                      onClick={() => loadRouteStops(selectedRouteId)}
+                      className={styles.btnSecondary}
+                      onClick={() => loadRouteStops(selectedScheduleId)}
                     >
-                      <RotateCcw className="h-4 w-4" />
+                      <RotateCcw size={16} />
                       Przywróć
                     </button>
                   </div>
 
                   {previewStop && (
-                    <div className="mt-5 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
-                      <div className="mb-2 flex items-center justify-between">
-                        <h3 className="flex items-center gap-2 text-sm font-semibold text-indigo-900">
-                          <Clock3 className="h-4 w-4" />
+                    <div className={styles.preview}>
+                      <div className={styles.previewHeader}>
+                        <h3 className={styles.previewTitle}>
+                          <Clock3 size={16} />
                           Odjazdy z: {previewStopName}
                         </h3>
                         <button
-                          className="text-xs text-indigo-600 hover:underline"
+                          className={styles.previewClose}
                           onClick={() => setPreviewStop(null)}
                         >
                           Zamknij
                         </button>
                       </div>
-                      <p className="mb-2 text-xs text-indigo-700">
+                      <p className={styles.previewSub}>
                         {DAY_TYPES.find((d) => d.key === selectedDayType)?.label}{' '}
-                        · wyliczone: odjazd z pętli + czas dojazdu
+                        · odjazd z pętli + czas dojazdu
                       </p>
                       {previewDepartures.length === 0 ? (
-                        <p className="text-sm text-indigo-700">
+                        <p className={styles.previewEmpty}>
                           Brak kursów dla tego typu dnia.
                         </p>
                       ) : (
-                        <div className="flex flex-wrap gap-2">
+                        <div className={styles.previewTimes}>
                           {previewDepartures.map((t, i) => (
-                            <span
-                              key={`${t}-${i}`}
-                              className="rounded-lg bg-white px-2.5 py-1 text-sm font-medium text-indigo-800 shadow-sm"
-                            >
+                            <span key={`${t}-${i}`} className={styles.previewTime}>
                               {t}
                             </span>
                           ))}
@@ -1086,44 +944,42 @@ const Schedule = () => {
                 </div>
 
                 {/* KURSY */}
-                <div className={cardCls}>
-                  <div className="mb-4">
-                    <h2 className="flex items-center gap-2 text-lg font-semibold text-slate-900">
-                      <CalendarClock className="h-5 w-5 text-indigo-600" />
-                      Kursy (odjazdy z pętli)
-                    </h2>
-                    <p className="text-sm text-slate-500">
-                      Godziny odjazdu pierwszego przystanku dla wybranego typu
-                      dnia.
-                    </p>
+                <div className={styles.card}>
+                  <div className={styles.cardHeader}>
+                    <div>
+                      <h2 className={styles.cardTitle}>
+                        <CalendarClock size={20} className={styles.iconPrimary} />
+                        Kursy (odjazdy z pętli)
+                      </h2>
+                      <p className={styles.cardDescription}>
+                        Godziny startu z pierwszego przystanku dla wybranego typu
+                        dnia.
+                      </p>
+                    </div>
                   </div>
 
-                  <div className="mb-4 flex flex-wrap gap-2">
+                  <div className={styles.dayTypeTabs}>
                     {DAY_TYPES.map((d) => {
                       const active = selectedDayType === d.key;
                       return (
                         <button
                           key={d.key}
                           onClick={() => setSelectedDayType(d.key)}
-                          className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                            active
-                              ? 'bg-indigo-600 text-white'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          }`}
+                          className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
                         >
-                          <CalendarClock className="h-4 w-4" />
+                          <CalendarClock size={16} />
                           {d.label}
                         </button>
                       );
                     })}
                   </div>
 
-                  <form onSubmit={handleAddTrip} className="mb-4 flex gap-2">
-                    <div className="relative flex-1">
-                      <Clock3 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <form onSubmit={handleAddTrip} className={styles.addTripRow}>
+                    <div className={styles.selectWrapper}>
+                      <Clock3 size={16} className={styles.inputIcon} />
                       <input
                         type="time"
-                        className={`${inputCls} pl-9`}
+                        className={`${styles.input} ${styles.inputWithIcon}`}
                         value={newDepartureTime}
                         onChange={(e) => setNewDepartureTime(e.target.value)}
                         required
@@ -1131,43 +987,40 @@ const Schedule = () => {
                     </div>
                     <button
                       type="submit"
-                      className={btnPrimary}
+                      className={styles.btnPrimary}
                       disabled={addingTrip}
                     >
                       {addingTrip ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        <LoaderCircle size={16} className={styles.spinner} />
                       ) : (
-                        <Plus className="h-4 w-4" />
+                        <Plus size={16} />
                       )}
                       Dodaj kurs
                     </button>
                   </form>
 
                   {tripsLoading ? (
-                    <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                    <div className={styles.loading}>
+                      <LoaderCircle size={16} className={styles.spinner} />
                       Ładowanie kursów…
                     </div>
                   ) : scheduleTrips.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+                    <div className={styles.emptyState}>
                       Brak kursów dla tego typu dnia.
                     </div>
                   ) : (
-                    <div className="flex flex-wrap gap-2">
+                    <div className={styles.tripList}>
                       {scheduleTrips.map((trip) => (
-                        <div
-                          key={trip.id}
-                          className="group inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white py-1.5 pl-3 pr-1.5 text-sm"
-                        >
-                          <span className="font-medium text-slate-800">
+                        <div key={trip.id} className={styles.tripItem}>
+                          <span className={styles.tripTime}>
                             {normalizeTimeHHMM(trip.departure_time)}
                           </span>
                           <button
-                            className="rounded p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                            className={styles.tripDelete}
                             onClick={() => handleDeleteTrip(trip.id)}
                             title="Usuń kurs"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            <Trash2 size={14} />
                           </button>
                         </div>
                       ))}
@@ -1181,20 +1034,20 @@ const Schedule = () => {
 
         {/* ================= PRZYSTANKI ================= */}
         {activeTab === 'stops' && (
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className={cardCls}>
-              <h2 className="text-lg font-semibold text-slate-900">
-                {editingStop ? 'Edytuj przystanek' : 'Dodaj nowy przystanek'}
+          <div className={styles.twoColumn}>
+            <div className={styles.card}>
+              <h2 className={styles.cardTitle}>
+                {editingStop ? 'Edytuj przystanek' : 'Nowy przystanek'}
               </h2>
-              <p className="mb-4 text-sm text-slate-500">
+              <p className={styles.cardDescription}>
                 Unikalne ID, nazwa i współrzędne geograficzne.
               </p>
-              <form onSubmit={handleSubmitStop} className="space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2">
+              <form onSubmit={handleSubmitStop} className={styles.stopForm}>
+                <div className={styles.stopFormGrid}>
                   <div>
-                    <label className={labelCls}>ID przystanku</label>
+                    <label className={styles.label}>ID przystanku</label>
                     <input
-                      className={inputCls}
+                      className={styles.input}
                       value={stopForm.id}
                       onChange={(e) => updateStopField('id', e.target.value)}
                       required
@@ -1202,20 +1055,20 @@ const Schedule = () => {
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>Nazwa</label>
+                    <label className={styles.label}>Nazwa</label>
                     <input
-                      className={inputCls}
+                      className={styles.input}
                       value={stopForm.name}
                       onChange={(e) => updateStopField('name', e.target.value)}
                       required
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>Szerokość</label>
+                    <label className={styles.label}>Szerokość</label>
                     <input
                       type="number"
                       step="any"
-                      className={inputCls}
+                      className={styles.input}
                       value={stopForm.latitude}
                       onChange={(e) =>
                         updateStopField('latitude', e.target.value)
@@ -1224,11 +1077,11 @@ const Schedule = () => {
                     />
                   </div>
                   <div>
-                    <label className={labelCls}>Długość</label>
+                    <label className={styles.label}>Długość</label>
                     <input
                       type="number"
                       step="any"
-                      className={inputCls}
+                      className={styles.input}
                       value={stopForm.longitude}
                       onChange={(e) =>
                         updateStopField('longitude', e.target.value)
@@ -1237,85 +1090,72 @@ const Schedule = () => {
                     />
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  <button type="submit" className={btnPrimary}>
-                    <Save className="h-4 w-4" />
+                <div className={styles.buttonGroup}>
+                  <button type="submit" className={styles.btnPrimary}>
+                    <Save size={16} />
                     {editingStop ? 'Zapisz zmiany' : 'Dodaj przystanek'}
                   </button>
                   <button
                     type="button"
-                    className={btnSecondary}
+                    className={styles.btnSecondary}
                     onClick={resetStopForm}
                   >
-                    <RotateCcw className="h-4 w-4" />
+                    <RotateCcw size={16} />
                     Anuluj
                   </button>
                 </div>
               </form>
             </div>
 
-            <div className={cardCls}>
-              <h2 className="text-lg font-semibold text-slate-900">
-                Lista przystanków
-              </h2>
-              <p className="mb-4 text-sm text-slate-500">
-                {stops.length} przystanków w bazie.
+            <div className={styles.card}>
+              <h2 className={styles.cardTitle}>Przystanki</h2>
+              <p className={styles.cardDescription}>
+                {stops.length} w bazie.
               </p>
               {stopsLoading ? (
-                <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                <div className={styles.loading}>
+                  <LoaderCircle size={16} className={styles.spinner} />
                   Ładowanie…
                 </div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-sm">
+                <div className={styles.tableWrapper}>
+                  <table className={styles.table}>
                     <thead>
-                      <tr className="border-b border-slate-200 text-xs uppercase text-slate-400">
-                        <th className="py-2 pr-3">ID</th>
-                        <th className="py-2 pr-3">Nazwa</th>
-                        <th className="py-2 pr-3">Szer.</th>
-                        <th className="py-2 pr-3">Dł.</th>
-                        <th className="py-2">Akcje</th>
+                      <tr className={styles.tableHead}>
+                        <th>ID</th>
+                        <th>Nazwa</th>
+                        <th>Szer.</th>
+                        <th>Dł.</th>
+                        <th>Akcje</th>
                       </tr>
                     </thead>
                     <tbody>
                       {stops.length === 0 ? (
                         <tr>
-                          <td colSpan="5" className="py-6 text-center text-slate-400">
+                          <td colSpan="5" className={styles.tableEmpty}>
                             Brak przystanków.
                           </td>
                         </tr>
                       ) : (
                         stops.map((stop) => (
-                          <tr
-                            key={stop.id}
-                            className="border-b border-slate-100"
-                          >
-                            <td className="py-2 pr-3 font-mono text-xs text-slate-500">
-                              {stop.id}
-                            </td>
-                            <td className="py-2 pr-3 text-slate-800">
-                              {stop.name}
-                            </td>
-                            <td className="py-2 pr-3 text-slate-500">
-                              {stop.latitude}
-                            </td>
-                            <td className="py-2 pr-3 text-slate-500">
-                              {stop.longitude}
-                            </td>
-                            <td className="py-2">
-                              <div className="flex gap-1">
+                          <tr key={stop.id} className={styles.tableRow}>
+                            <td className={styles.tableCell}>{stop.id}</td>
+                            <td className={styles.tableCell}>{stop.name}</td>
+                            <td className={styles.tableCell}>{stop.latitude}</td>
+                            <td className={styles.tableCell}>{stop.longitude}</td>
+                            <td className={styles.tableCell}>
+                              <div className={styles.tableActions}>
                                 <button
-                                  className={btnIcon}
+                                  className={styles.btnIcon}
                                   onClick={() => handleEditStop(stop)}
                                 >
-                                  <Pencil className="h-4 w-4" />
+                                  <Pencil size={16} />
                                 </button>
                                 <button
-                                  className={btnIconDanger}
+                                  className={styles.btnIconDanger}
                                   onClick={() => handleDeleteStop(stop.id)}
                                 >
-                                  <Trash2 className="h-4 w-4" />
+                                  <Trash2 size={16} />
                                 </button>
                               </div>
                             </td>
@@ -1332,81 +1172,99 @@ const Schedule = () => {
 
         {/* ================= POJAZDY ================= */}
         {activeTab === 'vehicles' && (
-          <div className={cardCls}>
-            <h2 className="text-lg font-semibold text-slate-900">Pojazdy</h2>
-            <p className="mb-4 text-sm text-slate-500">
-              Przypisz wariant trasy do każdego pojazdu (pcName).
-            </p>
+          <div className={styles.card}>
+            <div className={styles.cardHeader}>
+              <div>
+                <h2 className={styles.cardTitle}>Pojazdy</h2>
+                <p className={styles.cardDescription}>
+                  Pojazdy pojawiają się automatycznie, gdy zgłaszają się do
+                  serwera. Przypisz każdemu rozkład jazdy.
+                </p>
+              </div>
+              <button className={styles.btnSecondary} onClick={loadVehicles}>
+                <RotateCcw size={16} />
+                Odśwież
+              </button>
+            </div>
             {vehiclesLoading ? (
-              <div className="flex items-center gap-2 py-6 text-sm text-slate-500">
-                <LoaderCircle className="h-4 w-4 animate-spin" />
+              <div className={styles.loading}>
+                <LoaderCircle size={16} className={styles.spinner} />
                 Ładowanie pojazdów…
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
+              <div className={styles.tableWrapper}>
+                <table className={styles.table}>
                   <thead>
-                    <tr className="border-b border-slate-200 text-xs uppercase text-slate-400">
-                      <th className="py-2 pr-3">Pojazd (pcName)</th>
-                      <th className="py-2 pr-3">Przypisana trasa</th>
-                      <th className="py-2">Status</th>
+                    <tr className={styles.tableHead}>
+                      <th>Pojazd (pcName)</th>
+                      <th>Ostatni sygnał</th>
+                      <th>Przypisany rozkład</th>
+                      <th>Status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {vehicles.length === 0 ? (
                       <tr>
-                        <td colSpan="3" className="py-6 text-center text-slate-400">
-                          Brak pojazdów.
+                        <td colSpan="4" className={styles.tableEmpty}>
+                          Żaden pojazd nie zgłosił się jeszcze do serwera.
                         </td>
                       </tr>
                     ) : (
                       vehicles.map((vehicle) => {
-                        const currentRouteId =
+                        const currentScheduleId =
                           vehicle.route_id || vehicle.schedule_id || '';
                         return (
-                          <tr
-                            key={vehicle.pcName}
-                            className="border-b border-slate-100"
-                          >
-                            <td className="py-2 pr-3 font-medium text-slate-800">
-                              {vehicle.pcName}
+                          <tr key={vehicle.pcName} className={styles.tableRow}>
+                            <td className={styles.tableCell}>
+                              <div className={styles.vehicleName}>
+                                <Radio size={16} className={styles.vehicleIcon} />
+                                <span className={styles.vehiclePcName}>
+                                  {vehicle.pcName}
+                                </span>
+                              </div>
                             </td>
-                            <td className="py-2 pr-3">
-                              <div className="relative max-w-xs">
+                            <td className={styles.tableCell}>
+                              {formatSeen(vehicle.last_seen_at)}
+                            </td>
+                            <td className={styles.tableCell}>
+                              <div className={styles.selectWrapper}>
                                 <select
-                                  className={`${inputCls} appearance-none pr-9`}
-                                  value={currentRouteId}
+                                  className={styles.select}
+                                  value={currentScheduleId}
                                   onChange={(e) =>
-                                    handleUpdateVehicleRoute(
+                                    handleUpdateVehicleSchedule(
                                       vehicle.pcName,
                                       e.target.value
                                     )
                                   }
                                 >
                                   <option value="">Brak</option>
-                                  {allRoutesFlat.map((r) => (
-                                    <option key={r.id} value={r.id}>
-                                      {r.name} ({DIRECTION_LABELS[r.direction]})
-                                      {r.is_extended ? ' · wydł.' : ''}
+                                  {schedules.map((s) => (
+                                    <option key={s.id} value={s.id}>
+                                      {s.name} (
+                                      {DIRECTION_LABELS[s.direction]}
+                                      {s.is_extended ? ', wydł.' : ''})
                                     </option>
                                   ))}
                                 </select>
-                                <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                                <ChevronDown size={16} className={styles.selectIcon} />
                               </div>
-                              {allRoutesFlat.length === 0 && (
-                                <p className="mt-1 text-xs text-slate-400">
-                                  Wybierz linię w zakładce „Trasy”, aby zobaczyć
-                                  jej warianty.
+                              {schedules.length === 0 && (
+                                <p className={styles.helperText}>
+                                  Najpierw utwórz rozkład w zakładce „Rozkłady
+                                  jazdy”.
                                 </p>
                               )}
                             </td>
-                            <td className="py-2">
-                              {currentRouteId ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                            <td className={styles.tableCell}>
+                              {currentScheduleId ? (
+                                <span className={styles.statusAssigned}>
+                                  <CircleCheck size={14} />
                                   Przypisany
                                 </span>
                               ) : (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500">
+                                <span className={styles.statusUnassigned}>
+                                  <CircleSlash size={14} />
                                   Brak
                                 </span>
                               )}
