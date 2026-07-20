@@ -103,136 +103,33 @@ function createApi(baseUrl) {
       put(`/stops/${encodeURIComponent(id)}`, payload),
     deleteStop: (id) => del(`/stops/${encodeURIComponent(id)}`),
 
-    // --- Linie (lines) ---
-    getLines: (query) => get('/lines', query),
-    getLine: (id) => get(`/lines/${encodeURIComponent(id)}`),
-    createLine: (payload) => post('/lines', payload),
-    updateLine: (id, payload) =>
-      put(`/lines/${encodeURIComponent(id)}`, payload),
-    deleteLine: (id) => del(`/lines/${encodeURIComponent(id)}`),
-
-    // --- Warianty tras (routes) ---
-    getRoutes: (query) => get('/routes', query),
-    getRoute: (id) => get(`/routes/${encodeURIComponent(id)}`),
-    createRoute: (payload) => post('/routes', payload),
-    updateRoute: (id, payload) =>
-      put(`/routes/${encodeURIComponent(id)}`, payload),
-    deleteRoute: (id) => del(`/routes/${encodeURIComponent(id)}`),
-
-    // --- Przystanki na trasie (route_stops) ---
-    getRouteStops: (routeId) =>
-      get(`/routes/${encodeURIComponent(routeId)}/stops`),
-    setRouteStops: (routeId, stops) =>
-      put(`/routes/${encodeURIComponent(routeId)}/stops`, { stops }),
-    copyDirection: (routeId, payload) =>
-      post(`/routes/${encodeURIComponent(routeId)}/copy-direction`, payload),
-
-    // --- ROZKŁADY jako niezależne byty ---
-    // W modelu backendu trasa (route) musi należeć do linii (line).
-    // Front nie zarządza liniami ręcznie: rozkłady to wolne elementy,
-    // dlatego wszystkie podpinamy pod jedną ukrytą linię-kontener.
-    // Pojazdy (pcName) pojawiają się same przez /api/data i dostają
-    // przypisany rozkład przez PUT /vehicles/:pcName { route_id }.
-    ensureScheduleContainer: async () => {
-      const CONTAINER_ID = '__SCHEDULES__';
-      try {
-        await get(`/lines/${encodeURIComponent(CONTAINER_ID)}`);
-      } catch (err) {
-        await post('/lines', {
-          id: CONTAINER_ID,
-          number: 'ROZKŁADY',
-          type: 'bus',
-          metadata: { container: true, hidden: true },
-        });
-      }
-      return CONTAINER_ID;
-    },
-    listSchedules: async () => {
-      const data = await get('/routes', { line_id: '__SCHEDULES__' });
-      const routes = data.routes || [];
-      return {
-        ok: true,
-        count: routes.length,
-        schedules: routes.map((r) => ({
-          ...r,
-          schedule_id: r.id,
-          active: true,
-        })),
-      };
-    },
-    createSchedule: async (payload) => {
-      const CONTAINER_ID = '__SCHEDULES__';
-      try {
-        await get(`/lines/${encodeURIComponent(CONTAINER_ID)}`);
-      } catch (err) {
-        await post('/lines', {
-          id: CONTAINER_ID,
-          number: 'ROZKŁADY',
-          type: 'bus',
-          metadata: { container: true, hidden: true },
-        });
-      }
-      return post('/routes', {
-        line_id: CONTAINER_ID,
-        name: payload.name,
-        direction: payload.direction || 'FROM_START',
-        is_extended: payload.is_extended === true,
-        stops: payload.stops,
-        metadata: payload.metadata,
-      });
-    },
+    // --- ROZKŁADY (schedules) ---
+    // Jeden rozkład = jedna nazwa + dwie strony jazdy (FROM_START / TO_START),
+    // tworzone automatycznie przy POST /schedules. Dla każdej strony i typu dnia
+    // (WEEKDAY/WEEKEND/HOLIDAY) zapisana jest uporządkowana lista przystanków
+    // z bezwzględną godziną HH:MM.
+    getSchedules: (query) => get('/schedules', query),
+    getSchedule: (id) => get(`/schedules/${encodeURIComponent(id)}`),
+    createSchedule: (payload) => post('/schedules', payload),
     updateSchedule: (id, payload) =>
-      put(`/routes/${encodeURIComponent(id)}`, {
-        line_id: '__SCHEDULES__',
-        name: payload.name,
-        direction: payload.direction || 'FROM_START',
-        is_extended: payload.is_extended === true,
-        metadata: payload.metadata,
-      }),
-    deleteSchedule: (id) => del(`/routes/${encodeURIComponent(id)}`),
+      put(`/schedules/${encodeURIComponent(id)}`, payload),
+    deleteSchedule: (id) => del(`/schedules/${encodeURIComponent(id)}`),
 
-    // --- Kursy rozkładowe (schedule_trips) ---
-    getScheduleTrips: (query) => get('/trips/schedule', query),
-    getScheduleTrip: (id) =>
-      get(`/trips/schedule/${encodeURIComponent(id)}`),
-    createScheduleTrip: (payload) => post('/trips/schedule', payload),
-    updateScheduleTrip: (id, payload) =>
-      put(`/trips/schedule/${encodeURIComponent(id)}`, payload),
-    deleteScheduleTrip: (id) =>
-      del(`/trips/schedule/${encodeURIComponent(id)}`),
-
-    // --- Zbudowane rozkłady ---
-    getScheduleByRoute: (routeId) =>
-      get('/schedules/route', { route_id: routeId }),
-    getScheduleByLine: (lineId, direction, dayType) =>
-      get('/schedules/by-line', {
-        line_id: lineId,
-        direction,
-        day_type: dayType,
-      }),
-
-    // --- Zgodność wsteczna: "schedules" == warianty tras (routes) ---
-    // Stary interfejs oczekiwał { schedules: [{ schedule_id, name, active, ... }] }.
-    // W nowym modelu odpowiednikiem rozkładu jest wariant trasy (route),
-    // dlatego mapujemy routes -> schedules, zachowując też oryginalne pola.
-    getSchedules: async (query) => {
-      const routeQuery = {};
-      if (query && typeof query === 'object') {
-        if (query.line_id) routeQuery.line_id = query.line_id;
-        if (query.direction) routeQuery.direction = query.direction;
-        if (query.is_extended !== undefined)
-          routeQuery.is_extended = query.is_extended;
-      }
-      const data = await get('/routes', routeQuery);
-      const routes = data.routes || [];
-      const schedules = routes.map((r) => ({
-        ...r,
-        schedule_id: r.id,
-        name: r.name,
-        active: true,
-      }));
-      return { ok: true, count: schedules.length, schedules, routes };
-    },
+    getScheduleSideStops: (scheduleId, sideId, dayType) =>
+      get(
+        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/stops`,
+        { day_type: dayType }
+      ),
+    setScheduleSideStops: (scheduleId, sideId, dayType, stops) =>
+      put(
+        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/stops`,
+        { day_type: dayType, stops }
+      ),
+    copyScheduleSideStops: (scheduleId, sideId, payload) =>
+      post(
+        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/copy`,
+        payload
+      ),
 
     // --- Typy dni ---
     getServiceDays: () => get('/service-days'),

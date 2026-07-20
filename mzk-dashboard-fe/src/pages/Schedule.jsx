@@ -13,12 +13,10 @@ import {
   Route as RouteIcon,
   Clock3,
   MapPinned,
-  ListOrdered,
   ArrowUpDown,
   Copy,
   MapPin,
   Truck,
-  Sparkles,
   Radio,
   CircleCheck,
   CircleSlash,
@@ -31,9 +29,11 @@ const DAY_TYPES = [
   { key: 'HOLIDAY', label: 'Święto' },
 ];
 
+const SIDE_DIRECTIONS = ['FROM_START', 'TO_START'];
+
 const DIRECTION_LABELS = {
-  FROM_START: 'Tam (od pętli)',
-  TO_START: 'Powrót (do pętli)',
+  FROM_START: 'Strona 1 (tam)',
+  TO_START: 'Strona 2 (powrót)',
 };
 
 const createEmptyStopForm = () => ({
@@ -45,14 +45,13 @@ const createEmptyStopForm = () => ({
 
 const createEmptyScheduleForm = () => ({
   name: '',
-  direction: 'FROM_START',
-  is_extended: false,
+  line_id: '',
 });
 
 const normalizeTimeHHMM = (time) => {
-  if (time === null || time === undefined || time === '') return '00:00';
+  if (time === null || time === undefined || time === '') return '';
   const parts = String(time).trim().split(':');
-  if (parts.length < 2) return '00:00';
+  if (parts.length < 2) return '';
   const hours = parseInt(parts[0], 10);
   const minutes = parseInt(parts[1], 10);
   if (
@@ -63,21 +62,9 @@ const normalizeTimeHHMM = (time) => {
     minutes < 0 ||
     minutes > 59
   ) {
-    return '00:00';
+    return '';
   }
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-};
-
-const minutesFromTime = (time) => {
-  const [h, m] = normalizeTimeHHMM(time).split(':').map((n) => parseInt(n, 10));
-  return h * 60 + m;
-};
-
-const timeFromMinutes = (totalMinutes) => {
-  const wrapped = ((totalMinutes % 1440) + 1440) % 1440;
-  const h = Math.floor(wrapped / 60);
-  const m = Math.floor(wrapped % 60);
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 };
 
 const formatSeen = (value) => {
@@ -112,21 +99,13 @@ const Schedule = () => {
   const [editingScheduleId, setEditingScheduleId] = useState(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
-  // ---------- PRZYSTANKI NA ROZKŁADZIE ----------
-  const [routeStops, setRouteStops] = useState([]);
-  const [routeStopsLoading, setRouteStopsLoading] = useState(false);
-  const [savingRouteStops, setSavingRouteStops] = useState(false);
-  const [addStopId, setAddStopId] = useState('');
-
-  // ---------- KURSY ----------
+  // ---------- STRONY I GODZINY PRZYSTANKÓW ----------
+  const [selectedSide, setSelectedSide] = useState('FROM_START');
   const [selectedDayType, setSelectedDayType] = useState('WEEKDAY');
-  const [scheduleTrips, setScheduleTrips] = useState([]);
-  const [tripsLoading, setTripsLoading] = useState(false);
-  const [newDepartureTime, setNewDepartureTime] = useState('08:00');
-  const [addingTrip, setAddingTrip] = useState(false);
-
-  // ---------- PODGLĄD PASAŻERA ----------
-  const [previewStop, setPreviewStop] = useState(null);
+  const [sideStops, setSideStops] = useState([]);
+  const [sideStopsLoading, setSideStopsLoading] = useState(false);
+  const [savingSideStops, setSavingSideStops] = useState(false);
+  const [addStopId, setAddStopId] = useState('');
 
   // ---------- POJAZDY ----------
   const [vehicles, setVehicles] = useState([]);
@@ -148,7 +127,7 @@ const Schedule = () => {
   const loadSchedules = useCallback(async () => {
     setSchedulesLoading(true);
     try {
-      const data = await api.listSchedules();
+      const data = await api.getSchedules();
       setSchedules(data.schedules || []);
     } catch (err) {
       setError(err.message || 'Nie udało się pobrać rozkładów.');
@@ -157,59 +136,28 @@ const Schedule = () => {
     }
   }, [api]);
 
-  const loadRouteStops = useCallback(
-    async (scheduleId) => {
-      if (!scheduleId) {
-        setRouteStops([]);
+  const loadSideStops = useCallback(
+    async (scheduleId, sideId, dayType) => {
+      if (!scheduleId || !sideId) {
+        setSideStops([]);
         return;
       }
-      setRouteStopsLoading(true);
+      setSideStopsLoading(true);
       try {
-        const data = await api.getRouteStops(scheduleId);
+        const data = await api.getScheduleSideStops(scheduleId, sideId, dayType);
         const sorted = (data.stops || [])
           .slice()
           .sort((a, b) => (a.sequence_order || 0) - (b.sequence_order || 0))
           .map((s) => ({
             stop_id: s.stop_id,
             stop_name: s.stop_name || '',
-            travel_time_from_start:
-              s.travel_time_from_start === undefined ||
-              s.travel_time_from_start === null
-                ? 0
-                : Number(s.travel_time_from_start),
+            time: normalizeTimeHHMM(s.time),
           }));
-        setRouteStops(sorted);
+        setSideStops(sorted);
       } catch (err) {
-        setError(err.message || 'Nie udało się pobrać przystanków rozkładu.');
+        setError(err.message || 'Nie udało się pobrać godzin przystanków.');
       } finally {
-        setRouteStopsLoading(false);
-      }
-    },
-    [api]
-  );
-
-  const loadScheduleTrips = useCallback(
-    async (scheduleId, dayType) => {
-      if (!scheduleId) {
-        setScheduleTrips([]);
-        return;
-      }
-      setTripsLoading(true);
-      try {
-        const data = await api.getScheduleTrips({
-          route_id: scheduleId,
-          day_type: dayType,
-        });
-        const sorted = (data.trips || [])
-          .slice()
-          .sort((a, b) =>
-            String(a.departure_time).localeCompare(String(b.departure_time))
-          );
-        setScheduleTrips(sorted);
-      } catch (err) {
-        setError(err.message || 'Nie udało się pobrać kursów.');
-      } finally {
-        setTripsLoading(false);
+        setSideStopsLoading(false);
       }
     },
     [api]
@@ -234,21 +182,23 @@ const Schedule = () => {
     loadVehicles();
   }, [loadStops, loadSchedules, loadVehicles]);
 
-  useEffect(() => {
-    if (selectedScheduleId) {
-      loadRouteStops(selectedScheduleId);
-      loadScheduleTrips(selectedScheduleId, selectedDayType);
-      setPreviewStop(null);
-    } else {
-      setRouteStops([]);
-      setScheduleTrips([]);
-    }
-  }, [selectedScheduleId, selectedDayType, loadRouteStops, loadScheduleTrips]);
-
   const selectedSchedule = useMemo(
     () => schedules.find((s) => s.id === selectedScheduleId) || null,
     [schedules, selectedScheduleId]
   );
+
+  const selectedSideObj = useMemo(() => {
+    if (!selectedSchedule) return null;
+    return (selectedSchedule.sides || []).find((s) => s.direction === selectedSide) || null;
+  }, [selectedSchedule, selectedSide]);
+
+  useEffect(() => {
+    if (selectedSideObj) {
+      loadSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType);
+    } else {
+      setSideStops([]);
+    }
+  }, [selectedScheduleId, selectedSideObj, selectedDayType, loadSideStops]);
 
   // =================== PRZYSTANKI (CRUD) ===================
   const resetStopForm = () => {
@@ -315,8 +265,7 @@ const Schedule = () => {
     setEditingScheduleId(schedule.id);
     setScheduleForm({
       name: schedule.name || '',
-      direction: schedule.direction || 'FROM_START',
-      is_extended: Boolean(schedule.is_extended),
+      line_id: schedule.line_id || '',
     });
   };
 
@@ -331,18 +280,16 @@ const Schedule = () => {
       if (editingScheduleId) {
         await api.updateSchedule(editingScheduleId, {
           name: scheduleForm.name.trim(),
-          direction: scheduleForm.direction,
-          is_extended: scheduleForm.is_extended,
+          line_id: scheduleForm.line_id.trim(),
         });
         await loadSchedules();
       } else {
         const created = await api.createSchedule({
           name: scheduleForm.name.trim(),
-          direction: scheduleForm.direction,
-          is_extended: scheduleForm.is_extended,
+          line_id: scheduleForm.line_id.trim(),
         });
         await loadSchedules();
-        if (created?.route?.id) setSelectedScheduleId(created.route.id);
+        if (created?.schedule?.id) setSelectedScheduleId(created.schedule.id);
       }
       resetScheduleForm();
     } catch (err) {
@@ -355,7 +302,7 @@ const Schedule = () => {
   const handleDeleteSchedule = async (id) => {
     if (
       !window.confirm(
-        'Usunąć ten rozkład? Skasuje to jego przystanki i wszystkie kursy.'
+        'Usunąć ten rozkład? Skasuje to obie jego strony i wszystkie zapisane godziny przystanków.'
       )
     )
       return;
@@ -370,100 +317,106 @@ const Schedule = () => {
     }
   };
 
-  // =================== PRZYSTANKI NA ROZKŁADZIE ===================
+  // =================== GODZINY PRZYSTANKÓW (STRONA + TYP DNIA) ===================
   const availableStopsToAdd = useMemo(() => {
-    const used = new Set(routeStops.map((rs) => rs.stop_id));
+    const used = new Set(sideStops.map((rs) => rs.stop_id));
     return stops.filter((s) => !used.has(s.id));
-  }, [stops, routeStops]);
+  }, [stops, sideStops]);
 
-  const handleAddStopToRoute = () => {
+  const handleAddSideStop = () => {
     if (!addStopId) return;
     const stop = stops.find((s) => s.id === addStopId);
     if (!stop) return;
-    const lastTime =
-      routeStops.length > 0
-        ? routeStops[routeStops.length - 1].travel_time_from_start
-        : 0;
-    setRouteStops((prev) => [
+    setSideStops((prev) => [
       ...prev,
       {
         stop_id: stop.id,
         stop_name: stop.name,
-        travel_time_from_start: routeStops.length === 0 ? 0 : lastTime,
+        time: '',
       },
     ]);
     setAddStopId('');
-    setPreviewStop(null);
   };
 
-  const handleRemoveRouteStop = (index) => {
-    setRouteStops((prev) => prev.filter((_, i) => i !== index));
-    setPreviewStop(null);
+  const handleRemoveSideStop = (index) => {
+    setSideStops((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handleRouteStopTravelTime = (index, value) => {
-    const num = parseInt(value, 10);
-    setRouteStops((prev) =>
-      prev.map((rs, i) =>
-        i === index
-          ? { ...rs, travel_time_from_start: Number.isNaN(num) ? 0 : num }
-          : rs
-      )
+  const handleSideStopTime = (index, value) => {
+    setSideStops((prev) =>
+      prev.map((rs, i) => (i === index ? { ...rs, time: value } : rs))
     );
-    setPreviewStop(null);
   };
 
-  const moveRouteStop = (index, delta) => {
-    setRouteStops((prev) => {
+  const moveSideStop = (index, delta) => {
+    setSideStops((prev) => {
       const target = index + delta;
       if (target < 0 || target >= prev.length) return prev;
       const copy = [...prev];
       [copy[index], copy[target]] = [copy[target], copy[index]];
       return copy;
     });
-    setPreviewStop(null);
   };
 
-  const handleSaveRouteStops = async () => {
-    if (!selectedScheduleId) return;
-    for (const rs of routeStops) {
+  const handleSaveSideStops = async () => {
+    if (!selectedScheduleId || !selectedSideObj) return;
+    for (const rs of sideStops) {
       if (!rs.stop_id) {
         window.alert('Każdy wiersz musi mieć wybrany przystanek.');
         return;
       }
-      if (rs.travel_time_from_start < 0) {
-        window.alert('Czas dojazdu nie może być ujemny.');
+      if (!normalizeTimeHHMM(rs.time)) {
+        window.alert(`Podaj poprawną godzinę (HH:MM) dla przystanku ${rs.stop_name || rs.stop_id}.`);
         return;
       }
     }
-    setSavingRouteStops(true);
+    setSavingSideStops(true);
     try {
-      const payload = routeStops.map((rs) => ({
+      const payload = sideStops.map((rs) => ({
         stop_id: rs.stop_id,
-        travel_time_from_start: rs.travel_time_from_start,
+        time: normalizeTimeHHMM(rs.time),
       }));
-      await api.setRouteStops(selectedScheduleId, payload);
-      await loadRouteStops(selectedScheduleId);
-      window.alert('Układ rozkładu zapisany.');
+      await api.setScheduleSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType, payload);
+      await loadSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType);
+      await loadSchedules();
+      window.alert('Godziny przystanków zapisane.');
     } catch (err) {
-      window.alert(`Nie udało się zapisać układu: ${err.message}`);
+      window.alert(`Nie udało się zapisać: ${err.message}`);
     } finally {
-      setSavingRouteStops(false);
+      setSavingSideStops(false);
     }
   };
 
-  const handleCopyFromOtherSchedule = async () => {
-    if (!selectedScheduleId) return;
-    const others = schedules.filter((s) => s.id !== selectedScheduleId);
-    if (others.length === 0) {
-      window.alert('Brak innego rozkładu do skopiowania.');
+  const handleCopyFromOtherSide = async () => {
+    if (!selectedSchedule || !selectedSideObj) return;
+    const otherSide = (selectedSchedule.sides || []).find((s) => s.direction !== selectedSide);
+    if (!otherSide) {
+      window.alert('Brak drugiej strony rozkładu.');
       return;
     }
-    const list = others
-      .map((s, i) => `${i + 1}. ${s.name} [${DIRECTION_LABELS[s.direction]}]`)
-      .join('\n');
+    const reverse = window.confirm(
+      `Skopiować przystanki z „${DIRECTION_LABELS[otherSide.direction]}” (${DAY_TYPES.find((d) => d.key === selectedDayType)?.label})?\nOK = odwróć kolejność (kurs powrotny), Anuluj = kopiuj 1:1.\nGodziny trzeba będzie zweryfikować ręcznie po skopiowaniu.`
+    );
+    try {
+      await api.copyScheduleSideStops(selectedScheduleId, selectedSideObj.id, {
+        source_side_id: otherSide.id,
+        source_day_type: selectedDayType,
+        day_type: selectedDayType,
+        reverse,
+      });
+      await loadSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType);
+      window.alert('Skopiowano przystanki. Zweryfikuj godziny.');
+    } catch (err) {
+      window.alert(`Nie udało się skopiować: ${err.message}`);
+    }
+  };
+
+  const handleCopyFromOtherDayType = async () => {
+    if (!selectedSchedule || !selectedSideObj) return;
+    const others = DAY_TYPES.filter((d) => d.key !== selectedDayType);
+    const list = others.map((d, i) => `${i + 1}. ${d.label}`).join('\n');
     const answer = window.prompt(
-      `Z którego rozkładu skopiować przystanki? Podaj numer:\n${list}`,
+      `Z którego typu dnia skopiować przystanki (ta sama strona)? Podaj numer:\n${list}`,
       '1'
     );
     if (!answer) return;
@@ -472,77 +425,24 @@ const Schedule = () => {
       window.alert('Nieprawidłowy numer.');
       return;
     }
-    const source = others[idx];
-    const reverse = window.confirm(
-      'Odwrócić kolejność i czasy (rozkład powrotny)? OK = tak, Anuluj = kopiuj 1:1.'
-    );
     try {
-      await api.copyDirection(source.id, {
-        target_route_id: selectedScheduleId,
-        reverse,
+      await api.copyScheduleSideStops(selectedScheduleId, selectedSideObj.id, {
+        source_side_id: selectedSideObj.id,
+        source_day_type: others[idx].key,
+        day_type: selectedDayType,
+        reverse: false,
       });
-      await loadRouteStops(selectedScheduleId);
+      await loadSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType);
       window.alert('Skopiowano przystanki.');
     } catch (err) {
       window.alert(`Nie udało się skopiować: ${err.message}`);
     }
   };
 
-  // =================== KURSY ===================
-  const handleAddTrip = async (e) => {
-    e.preventDefault();
-    if (!selectedScheduleId) {
-      window.alert('Najpierw wybierz rozkład.');
-      return;
-    }
-    setAddingTrip(true);
-    try {
-      await api.createScheduleTrip({
-        route_id: selectedScheduleId,
-        day_type: selectedDayType,
-        departure_time: normalizeTimeHHMM(newDepartureTime),
-      });
-      await loadScheduleTrips(selectedScheduleId, selectedDayType);
-    } catch (err) {
-      window.alert(`Nie udało się dodać kursu: ${err.message}`);
-    } finally {
-      setAddingTrip(false);
-    }
-  };
-
-  const handleDeleteTrip = async (tripId) => {
-    try {
-      await api.deleteScheduleTrip(tripId);
-      await loadScheduleTrips(selectedScheduleId, selectedDayType);
-    } catch (err) {
-      window.alert(`Nie udało się usunąć kursu: ${err.message}`);
-    }
-  };
-
-  // =================== PODGLĄD PASAŻERA ===================
-  const previewDepartures = useMemo(() => {
-    if (!previewStop) return [];
-    const rs = routeStops.find((s) => s.stop_id === previewStop);
-    if (!rs) return [];
-    return scheduleTrips
-      .map((trip) =>
-        timeFromMinutes(
-          minutesFromTime(trip.departure_time) +
-            Number(rs.travel_time_from_start || 0)
-        )
-      )
-      .sort((a, b) => a.localeCompare(b));
-  }, [previewStop, routeStops, scheduleTrips]);
-
-  const previewStopName = useMemo(() => {
-    const rs = routeStops.find((s) => s.stop_id === previewStop);
-    return rs ? rs.stop_name || rs.stop_id : '';
-  }, [previewStop, routeStops]);
-
   // =================== POJAZDY ===================
   const handleUpdateVehicleSchedule = async (pcName, scheduleId) => {
     try {
-      await api.updateVehicle(pcName, { route_id: scheduleId || '' });
+      await api.updateVehicle(pcName, { schedule_id: scheduleId || '' });
       await loadVehicles();
     } catch (err) {
       window.alert(`Nie udało się zaktualizować pojazdu: ${err.message}`);
@@ -556,9 +456,10 @@ const Schedule = () => {
           <p className={styles.headerLabel}>Zarządzanie infrastrukturą</p>
           <h1 className={styles.title}>Rozkłady, przystanki i pojazdy</h1>
           <p className={styles.subtitle}>
-            Rozkłady jazdy to samodzielne elementy. Definiujesz je tutaj, a w
-            zakładce Pojazdy przypisujesz do konkretnego pojazdu, który zgłasza
-            się do serwera.
+            Każdy rozkład ma dwie strony jazdy (tam i powrót). Dla każdej strony
+            i typu dnia zapisujesz listę przystanków z dokładną godziną
+            (HH:MM). W zakładce Pojazdy przypisujesz rozkład do konkretnego
+            pojazdu.
           </p>
         </header>
 
@@ -600,8 +501,8 @@ const Schedule = () => {
                     {editingScheduleId ? 'Edytuj rozkład' : 'Nowy rozkład'}
                   </h2>
                   <p className={styles.cardDescription}>
-                    Nadaj nazwę, wskaż kierunek i zaznacz, czy to trasa
-                    wydłużona.
+                    Nadaj nazwę i (opcjonalnie) numer linii. Dwie strony jazdy
+                    (tam / powrót) tworzone są automatycznie.
                   </p>
                 </div>
                 {editingScheduleId && (
@@ -624,48 +525,21 @@ const Schedule = () => {
                     onChange={(e) =>
                       setScheduleForm((p) => ({ ...p, name: e.target.value }))
                     }
-                    placeholder="np. Dworzec → Lotnisko"
+                    placeholder="np. Dworzec ↔ Lotnisko"
                     required
                   />
                 </div>
-                <div className={styles.formScheduleDirection}>
-                  <label className={styles.label}>Kierunek</label>
-                  <div className={styles.selectWrapper}>
-                    <select
-                      className={styles.select}
-                      value={scheduleForm.direction}
-                      onChange={(e) =>
-                        setScheduleForm((p) => ({
-                          ...p,
-                          direction: e.target.value,
-                        }))
-                      }
-                    >
-                      {Object.entries(DIRECTION_LABELS).map(([v, l]) => (
-                        <option key={v} value={v}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown size={16} className={styles.selectIcon} />
-                  </div>
-                </div>
-                <div className={styles.formScheduleExtended}>
-                  <label className={styles.checkboxLabel}>
-                    <input
-                      type="checkbox"
-                      className={styles.checkbox}
-                      checked={scheduleForm.is_extended}
-                      onChange={(e) =>
-                        setScheduleForm((p) => ({
-                          ...p,
-                          is_extended: e.target.checked,
-                        }))
-                      }
-                    />
-                    Wydłużona
-                  </label>
-                </div>
+                {/* <div className={styles.formScheduleDirection}>
+                  <label className={styles.label}>Numer linii (opcjonalnie)</label>
+                  <input
+                    className={styles.input}
+                    value={scheduleForm.line_id}
+                    onChange={(e) =>
+                      setScheduleForm((p) => ({ ...p, line_id: e.target.value }))
+                    }
+                    placeholder="np. 12"
+                  />
+                </div> */}
                 <div className={styles.formScheduleSubmit}>
                   <button
                     type="submit"
@@ -688,7 +562,7 @@ const Schedule = () => {
                 <div>
                   <h2 className={styles.cardTitle}>Rozkłady</h2>
                   <p className={styles.cardDescription}>
-                    Wybierz rozkład, aby edytować jego przystanki i kursy.
+                    Wybierz rozkład, aby edytować godziny jego przystanków.
                   </p>
                 </div>
               </div>
@@ -713,27 +587,26 @@ const Schedule = () => {
                       >
                         <button
                           className={styles.scheduleItemButton}
-                          onClick={() => setSelectedScheduleId(s.id)}
+                          onClick={() => {
+                            setSelectedScheduleId(s.id);
+                            setSelectedSide('FROM_START');
+                          }}
                         >
                           <RouteIcon
                             size={16}
                             className={active ? styles.iconActive : styles.iconInactive}
                           />
                           <span className={styles.scheduleName}>{s.name}</span>
-                          <span className={styles.scheduleDirection}>
-                            {DIRECTION_LABELS[s.direction]}
-                          </span>
-                          {s.is_extended && (
-                            <span className={styles.extendedBadge}>
-                              <Sparkles size={12} />
-                              Wydłużona
+                          {s.line_id && (
+                            <span className={styles.scheduleDirection}>
+                              linia {s.line_id}
                             </span>
                           )}
                         </button>
                         <button
                           className={styles.btnIcon}
                           onClick={() => handleEditScheduleMeta(s)}
-                          title="Zmień nazwę / kierunek"
+                          title="Zmień nazwę / numer linii"
                         >
                           <Pencil size={14} />
                         </button>
@@ -752,280 +625,192 @@ const Schedule = () => {
             </div>
 
             {selectedSchedule && (
-              <div className={styles.twoColumn}>
-                {/* EDYTOR PRZYSTANKÓW */}
-                <div className={styles.card}>
-                  <div className={styles.cardHeader}>
-                    <div>
-                      <h2 className={styles.cardTitle}>
-                        <ListOrdered size={20} className={styles.iconPrimary} />
-                        Przystanki rozkładu
-                      </h2>
-                      <p className={styles.cardDescription}>
-                        {selectedSchedule.name} ·{' '}
-                        {DIRECTION_LABELS[selectedSchedule.direction]}
-                        {selectedSchedule.is_extended ? ' · wydłużona' : ''}
-                      </p>
-                    </div>
+              <div className={styles.card}>
+                <div className={styles.cardHeader}>
+                  <div>
+                    <h2 className={styles.cardTitle}>
+                      <CalendarClock size={20} className={styles.iconPrimary} />
+                      {selectedSchedule.name}
+                    </h2>
+                    <p className={styles.cardDescription}>
+                      Wybierz stronę i typ dnia, następnie ustaw godzinę
+                      (HH:MM) dla każdego przystanku.
+                    </p>
                   </div>
-
-                  <div className={styles.buttonGroup}>
-                    <button
-                      className={styles.btnSecondary}
-                      onClick={handleCopyFromOtherSchedule}
-                    >
-                      <Copy size={16} />
-                      Kopiuj z innego rozkładu (z odwróceniem)
-                    </button>
-                  </div>
-
-                  <div className={styles.addStopRow}>
-                    <div className={styles.selectWrapper}>
-                      <select
-                        className={styles.select}
-                        value={addStopId}
-                        onChange={(e) => setAddStopId(e.target.value)}
-                      >
-                        <option value="">— dodaj przystanek —</option>
-                        {availableStopsToAdd.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.name} ({s.id})
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown size={16} className={styles.selectIcon} />
-                    </div>
-                    <button
-                      className={styles.btnSecondary}
-                      onClick={handleAddStopToRoute}
-                      disabled={!addStopId}
-                    >
-                      <Plus size={16} />
-                      Dodaj
-                    </button>
-                  </div>
-
-                  {routeStopsLoading ? (
-                    <div className={styles.loading}>
-                      <LoaderCircle size={16} className={styles.spinner} />
-                      Ładowanie…
-                    </div>
-                  ) : routeStops.length === 0 ? (
-                    <div className={styles.emptyState}>
-                      <MapPinned size={32} className={styles.emptyIcon} />
-                      <p className={styles.emptyTitle}>Brak przystanków w rozkładzie</p>
-                      <p className={styles.emptyDescription}>
-                        Dodaj przystanki i zapisz układ.
-                      </p>
-                    </div>
-                  ) : (
-                    <ul className={styles.stopList}>
-                      {routeStops.map((rs, idx) => (
-                        <li
-                          key={`${rs.stop_id}-${idx}`}
-                          className={styles.stopItem}
-                        >
-                          <button
-                            className={styles.stopIndex}
-                            onClick={() => setPreviewStop(rs.stop_id)}
-                            title="Podgląd odjazdów"
-                          >
-                            {idx + 1}
-                          </button>
-                          <button
-                            className={styles.stopInfo}
-                            onClick={() => setPreviewStop(rs.stop_id)}
-                          >
-                            <p className={styles.stopName}>
-                              {rs.stop_name || rs.stop_id}
-                            </p>
-                            <p className={styles.stopId}>{rs.stop_id}</p>
-                          </button>
-                          <div className={styles.stopTime}>
-                            <input
-                              type="number"
-                              min="0"
-                              className={styles.stopTimeInput}
-                              value={rs.travel_time_from_start}
-                              onChange={(e) =>
-                                handleRouteStopTravelTime(idx, e.target.value)
-                              }
-                              title="Czas dojazdu od pętli (min)"
-                            />
-                            <span className={styles.stopTimeLabel}>min</span>
-                          </div>
-                          <div className={styles.stopMove}>
-                            <button
-                              className={styles.btnIcon}
-                              onClick={() => moveRouteStop(idx, -1)}
-                              disabled={idx === 0}
-                            >
-                              <ArrowUpDown size={14} />
-                            </button>
-                            <button
-                              className={styles.btnIcon}
-                              onClick={() => moveRouteStop(idx, 1)}
-                              disabled={idx === routeStops.length - 1}
-                            >
-                              <ArrowUpDown size={14} style={{ transform: 'rotate(180deg)' }} />
-                            </button>
-                          </div>
-                          <button
-                            className={styles.btnIconDanger}
-                            onClick={() => handleRemoveRouteStop(idx)}
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-
-                  <div className={styles.buttonGroup}>
-                    <button
-                      className={styles.btnPrimary}
-                      onClick={handleSaveRouteStops}
-                      disabled={savingRouteStops}
-                    >
-                      {savingRouteStops ? (
-                        <>
-                          <LoaderCircle size={16} className={styles.spinner} />
-                          Zapisywanie…
-                        </>
-                      ) : (
-                        <>
-                          <Save size={16} />
-                          Zapisz układ rozkładu
-                        </>
-                      )}
-                    </button>
-                    <button
-                      className={styles.btnSecondary}
-                      onClick={() => loadRouteStops(selectedScheduleId)}
-                    >
-                      <RotateCcw size={16} />
-                      Przywróć
-                    </button>
-                  </div>
-
-                  {previewStop && (
-                    <div className={styles.preview}>
-                      <div className={styles.previewHeader}>
-                        <h3 className={styles.previewTitle}>
-                          <Clock3 size={16} />
-                          Odjazdy z: {previewStopName}
-                        </h3>
-                        <button
-                          className={styles.previewClose}
-                          onClick={() => setPreviewStop(null)}
-                        >
-                          Zamknij
-                        </button>
-                      </div>
-                      <p className={styles.previewSub}>
-                        {DAY_TYPES.find((d) => d.key === selectedDayType)?.label}{' '}
-                        · odjazd z pętli + czas dojazdu
-                      </p>
-                      {previewDepartures.length === 0 ? (
-                        <p className={styles.previewEmpty}>
-                          Brak kursów dla tego typu dnia.
-                        </p>
-                      ) : (
-                        <div className={styles.previewTimes}>
-                          {previewDepartures.map((t, i) => (
-                            <span key={`${t}-${i}`} className={styles.previewTime}>
-                              {t}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
 
-                {/* KURSY */}
-                <div className={styles.card}>
-                  <div className={styles.cardHeader}>
-                    <div>
-                      <h2 className={styles.cardTitle}>
-                        <CalendarClock size={20} className={styles.iconPrimary} />
-                        Kursy (odjazdy z pętli)
-                      </h2>
-                      <p className={styles.cardDescription}>
-                        Godziny startu z pierwszego przystanku dla wybranego typu
-                        dnia.
-                      </p>
-                    </div>
-                  </div>
+                <div className={styles.dayTypeTabs}>
+                  {SIDE_DIRECTIONS.map((direction) => {
+                    const active = selectedSide === direction;
+                    return (
+                      <button
+                        key={direction}
+                        onClick={() => setSelectedSide(direction)}
+                        className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
+                      >
+                        <RouteIcon size={16} />
+                        {DIRECTION_LABELS[direction]}
+                      </button>
+                    );
+                  })}
+                </div>
 
-                  <div className={styles.dayTypeTabs}>
-                    {DAY_TYPES.map((d) => {
-                      const active = selectedDayType === d.key;
-                      return (
-                        <button
-                          key={d.key}
-                          onClick={() => setSelectedDayType(d.key)}
-                          className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
-                        >
-                          <CalendarClock size={16} />
-                          {d.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <form onSubmit={handleAddTrip} className={styles.addTripRow}>
-                    <div className={styles.selectWrapper}>
-                      <Clock3 size={16} className={styles.inputIcon} />
-                      <input
-                        type="time"
-                        className={`${styles.input} ${styles.inputWithIcon}`}
-                        value={newDepartureTime}
-                        onChange={(e) => setNewDepartureTime(e.target.value)}
-                        required
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className={styles.btnPrimary}
-                      disabled={addingTrip}
-                    >
-                      {addingTrip ? (
-                        <LoaderCircle size={16} className={styles.spinner} />
-                      ) : (
-                        <Plus size={16} />
-                      )}
-                      Dodaj kurs
-                    </button>
-                  </form>
-
-                  {tripsLoading ? (
-                    <div className={styles.loading}>
-                      <LoaderCircle size={16} className={styles.spinner} />
-                      Ładowanie kursów…
-                    </div>
-                  ) : scheduleTrips.length === 0 ? (
-                    <div className={styles.emptyState}>
-                      Brak kursów dla tego typu dnia.
-                    </div>
-                  ) : (
-                    <div className={styles.tripList}>
-                      {scheduleTrips.map((trip) => (
-                        <div key={trip.id} className={styles.tripItem}>
-                          <span className={styles.tripTime}>
-                            {normalizeTimeHHMM(trip.departure_time)}
+                <div className={styles.dayTypeTabs}>
+                  {DAY_TYPES.map((d) => {
+                    const active = selectedDayType === d.key;
+                    return (
+                      <button
+                        key={d.key}
+                        onClick={() => setSelectedDayType(d.key)}
+                        className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
+                      >
+                        <CalendarClock size={16} />
+                        {d.label}
+                        {selectedSideObj?.stop_counts?.[d.key] > 0 && (
+                          <span className={styles.extendedBadge}>
+                            {selectedSideObj.stop_counts[d.key]}
                           </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className={styles.buttonGroup}>
+                  <button
+                    className={styles.btnSecondary}
+                    onClick={handleCopyFromOtherSide}
+                  >
+                    <Copy size={16} />
+                    Kopiuj z drugiej strony
+                  </button>
+                  <button
+                    className={styles.btnSecondary}
+                    onClick={handleCopyFromOtherDayType}
+                  >
+                    <Copy size={16} />
+                    Kopiuj z innego typu dnia
+                  </button>
+                </div>
+
+                <div className={styles.addStopRow}>
+                  <div className={styles.selectWrapper}>
+                    <select
+                      className={styles.select}
+                      value={addStopId}
+                      onChange={(e) => setAddStopId(e.target.value)}
+                    >
+                      <option value="">— dodaj przystanek —</option>
+                      {availableStopsToAdd.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.id})
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown size={16} className={styles.selectIcon} />
+                  </div>
+                  <button
+                    className={styles.btnSecondary}
+                    onClick={handleAddSideStop}
+                    disabled={!addStopId}
+                  >
+                    <Plus size={16} />
+                    Dodaj
+                  </button>
+                </div>
+
+                {sideStopsLoading ? (
+                  <div className={styles.loading}>
+                    <LoaderCircle size={16} className={styles.spinner} />
+                    Ładowanie…
+                  </div>
+                ) : sideStops.length === 0 ? (
+                  <div className={styles.emptyState}>
+                    <MapPinned size={32} className={styles.emptyIcon} />
+                    <p className={styles.emptyTitle}>Brak przystanków dla tej strony i typu dnia</p>
+                    <p className={styles.emptyDescription}>
+                      Dodaj przystanki, ustaw godziny i zapisz.
+                    </p>
+                  </div>
+                ) : (
+                  <ul className={styles.stopList}>
+                    {sideStops.map((rs, idx) => (
+                      <li
+                        key={`${rs.stop_id}-${idx}`}
+                        className={styles.stopItem}
+                      >
+                        <span className={styles.stopIndex}>{idx + 1}</span>
+                        <div className={styles.stopInfo}>
+                          <p className={styles.stopName}>
+                            {rs.stop_name || rs.stop_id}
+                          </p>
+                          <p className={styles.stopId}>{rs.stop_id}</p>
+                        </div>
+                        <div className={styles.stopTime}>
+                          <Clock3 size={14} className={styles.inputIcon} />
+                          <input
+                            type="time"
+                            className={styles.stopTimeInput}
+                            value={rs.time}
+                            onChange={(e) => handleSideStopTime(idx, e.target.value)}
+                            title="Godzina bycia na przystanku (HH:MM)"
+                          />
+                        </div>
+                        <div className={styles.stopMove}>
                           <button
-                            className={styles.tripDelete}
-                            onClick={() => handleDeleteTrip(trip.id)}
-                            title="Usuń kurs"
+                            className={styles.btnIcon}
+                            onClick={() => moveSideStop(idx, -1)}
+                            disabled={idx === 0}
                           >
-                            <Trash2 size={14} />
+                            <ArrowUpDown size={14} />
+                          </button>
+                          <button
+                            className={styles.btnIcon}
+                            onClick={() => moveSideStop(idx, 1)}
+                            disabled={idx === sideStops.length - 1}
+                          >
+                            <ArrowUpDown size={14} style={{ transform: 'rotate(180deg)' }} />
                           </button>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                        <button
+                          className={styles.btnIconDanger}
+                          onClick={() => handleRemoveSideStop(idx)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                <div className={styles.buttonGroup}>
+                  <button
+                    className={styles.btnPrimary}
+                    onClick={handleSaveSideStops}
+                    disabled={savingSideStops}
+                  >
+                    {savingSideStops ? (
+                      <>
+                        <LoaderCircle size={16} className={styles.spinner} />
+                        Zapisywanie…
+                      </>
+                    ) : (
+                      <>
+                        <Save size={16} />
+                        Zapisz godziny
+                      </>
+                    )}
+                  </button>
+                  <button
+                    className={styles.btnSecondary}
+                    onClick={() =>
+                      selectedSideObj &&
+                      loadSideStops(selectedScheduleId, selectedSideObj.id, selectedDayType)
+                    }
+                  >
+                    <RotateCcw size={16} />
+                    Przywróć
+                  </button>
                 </div>
               </div>
             )}
@@ -1211,8 +996,7 @@ const Schedule = () => {
                       </tr>
                     ) : (
                       vehicles.map((vehicle) => {
-                        const currentScheduleId =
-                          vehicle.route_id || vehicle.schedule_id || '';
+                        const currentScheduleId = vehicle.schedule_id || '';
                         return (
                           <tr key={vehicle.pcName} className={styles.tableRow}>
                             <td className={styles.tableCell}>
@@ -1241,9 +1025,8 @@ const Schedule = () => {
                                   <option value="">Brak</option>
                                   {schedules.map((s) => (
                                     <option key={s.id} value={s.id}>
-                                      {s.name} (
-                                      {DIRECTION_LABELS[s.direction]}
-                                      {s.is_extended ? ', wydł.' : ''})
+                                      {s.name}
+                                      {s.line_id ? ` (linia ${s.line_id})` : ''}
                                     </option>
                                   ))}
                                 </select>

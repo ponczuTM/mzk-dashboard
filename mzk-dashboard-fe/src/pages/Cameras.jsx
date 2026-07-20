@@ -205,7 +205,7 @@ const Cameras = () => {
               <Server className={styles.heroMetaIcon} />
               <div>
                 <span className={styles.heroMetaLabel}>Pakiet live</span>
-                <strong className={styles.heroMetaValue}>Auto refresh 10 s</strong>
+                <strong className={styles.heroMetaValue}>Auto refresh 100 s</strong>
               </div>
             </div>
           </div>

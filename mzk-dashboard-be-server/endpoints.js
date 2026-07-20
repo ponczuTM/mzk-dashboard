@@ -24,7 +24,6 @@ const {
   requiredString,
   optionalString,
   firstDefined,
-  toFiniteNumber,
   normalizeStop,
   stopFromRow,
   findStopById,
@@ -41,26 +40,17 @@ function generateId() {
   return crypto.randomBytes(16).toString('hex');
 }
 
-function parseTimeToMinutes(timeStr) {
-  const parts = String(timeStr).split(':');
-  if (parts.length < 2) return null;
-  const h = parseInt(parts[0], 10);
-  const m = parseInt(parts[1], 10);
-  const s = parts.length > 2 ? parseInt(parts[2], 10) : 0;
-  if (Number.isNaN(h) || Number.isNaN(m) || Number.isNaN(s)) return null;
-  return h * 60 + m + s / 60;
+function validateTimeHHMM(value) {
+  return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(String(value));
 }
 
-function validateTime(timeStr) {
-  return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/.test(String(timeStr));
-}
-
-function minutesToTimeString(totalMinutes) {
-  const wrapped = ((totalMinutes % (24 * 60)) + 24 * 60) % (24 * 60);
-  const hours = Math.floor(wrapped / 60);
-  const mins = Math.floor(wrapped % 60);
-  const secs = Math.round((wrapped - Math.floor(wrapped)) * 60);
-  return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+function normalizeTimeHHMM(value) {
+  const text = requiredString(value, 'time');
+  if (!validateTimeHHMM(text)) {
+    throw new Error(`Nieprawidłowy format godziny: ${text}. Oczekiwano HH:MM`);
+  }
+  const [h, m] = text.split(':');
+  return `${h.padStart(2, '0')}:${m}`;
 }
 
 function firstParam(value) {
@@ -68,10 +58,8 @@ function firstParam(value) {
   return value;
 }
 
-function toIntWithFallback(value, fallback) {
-  const parsed = toFiniteNumber(value);
-  return parsed === null ? fallback : parsed;
-}
+const DAY_TYPES_UPPER = ['WEEKDAY', 'WEEKEND', 'HOLIDAY'];
+const SCHEDULE_DIRECTIONS = ['FROM_START', 'TO_START'];
 
 function initScheduleSchema() {
   const conn = db.connection;
@@ -80,157 +68,111 @@ function initScheduleSchema() {
     throw new Error('Nie można zainicjalizować schematu: db.connection jest null.');
   }
 
+  // Sprzątamy tabele z poprzedniego modelu (linia -> trasa -> przystanki z minutami dojazdu),
+  // zastąpionego przez schedules -> schedule_sides -> schedule_stops (godziny bezwzględne HH:MM).
   conn.exec(`
-    CREATE TABLE IF NOT EXISTS lines (
-      id TEXT PRIMARY KEY,
-      number TEXT NOT NULL,
-      type TEXT NOT NULL,
-      metadata TEXT DEFAULT '{}'
-    );
+    DROP TABLE IF EXISTS schedule_trips;
+    DROP TABLE IF EXISTS route_stops;
+    DROP TABLE IF EXISTS routes;
+    DROP TABLE IF EXISTS service_days;
+    DROP TABLE IF EXISTS lines;
+  `);
 
-    CREATE TABLE IF NOT EXISTS routes (
+  conn.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_sides (
       id TEXT PRIMARY KEY,
-      line_id TEXT NOT NULL,
-      name TEXT NOT NULL,
+      schedule_id TEXT NOT NULL,
       direction TEXT NOT NULL CHECK (direction IN ('FROM_START', 'TO_START')),
-      is_extended INTEGER NOT NULL DEFAULT 0,
       metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (line_id) REFERENCES lines(id) ON DELETE CASCADE
+      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
+      UNIQUE (schedule_id, direction)
     );
 
-    CREATE TABLE IF NOT EXISTS route_stops (
+    CREATE TABLE IF NOT EXISTS schedule_stops (
       id TEXT PRIMARY KEY,
-      route_id TEXT NOT NULL,
+      side_id TEXT NOT NULL,
+      day_type TEXT NOT NULL CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
       stop_id TEXT NOT NULL,
       sequence_order INTEGER NOT NULL,
-      travel_time_from_start INTEGER NOT NULL DEFAULT 0,
+      time TEXT NOT NULL,
       metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
+      FOREIGN KEY (side_id) REFERENCES schedule_sides(id) ON DELETE CASCADE,
       FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS service_days (
-      id TEXT PRIMARY KEY,
-      day_type TEXT NOT NULL UNIQUE CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
-      metadata TEXT DEFAULT '{}'
-    );
-
-    CREATE TABLE IF NOT EXISTS schedule_trips (
-      id TEXT PRIMARY KEY,
-      route_id TEXT NOT NULL,
-      service_day_id TEXT NOT NULL,
-      departure_time TEXT NOT NULL,
-      metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
-      FOREIGN KEY (service_day_id) REFERENCES service_days(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_routes_line_id ON routes(line_id);
-    CREATE INDEX IF NOT EXISTS idx_routes_line_dir ON routes(line_id, direction);
-    CREATE INDEX IF NOT EXISTS idx_route_stops_route_id ON route_stops(route_id);
-    CREATE INDEX IF NOT EXISTS idx_route_stops_stop_id ON route_stops(stop_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_trips_route_id ON schedule_trips(route_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_trips_service_day_id ON schedule_trips(service_day_id);
+    CREATE INDEX IF NOT EXISTS idx_schedule_sides_schedule_id ON schedule_sides(schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_schedule_stops_side_day ON schedule_stops(side_id, day_type);
+    CREATE INDEX IF NOT EXISTS idx_schedule_stops_stop_id ON schedule_stops(stop_id);
   `);
-
-  const insertServiceDay = conn.prepare(`
-    INSERT OR IGNORE INTO service_days(id, day_type, metadata)
-    VALUES(?, ?, '{}')
-  `);
-  const dayTypes = ['WEEKDAY', 'WEEKEND', 'HOLIDAY'];
-  for (const dayType of dayTypes) {
-    insertServiceDay.run(dayType, dayType);
-  }
 }
 
 initScheduleSchema();
 
-function lineFromRow(row) {
+function scheduleFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
-    number: row.number,
-    type: row.type,
-    metadata: jsonParse(row.metadata, {})
-  };
-}
-
-function routeFromRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    line_id: row.line_id,
     name: row.name,
+    line_id: row.line_id || null,
+    metadata: jsonParse(row.metadata, {}),
+    pcName: row.pcName || null,
+    pcId: row.pcId || null,
+    active: row.active !== 0,
+    updated_at: row.updated_at
+  };
+}
+
+function scheduleSideFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    schedule_id: row.schedule_id,
     direction: row.direction,
-    is_extended: Boolean(row.is_extended),
     metadata: jsonParse(row.metadata, {})
   };
 }
 
-function routeStopFromRow(row) {
+function scheduleStopFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
-    route_id: row.route_id,
+    side_id: row.side_id,
+    day_type: row.day_type,
     stop_id: row.stop_id,
     sequence_order: row.sequence_order,
-    travel_time_from_start: row.travel_time_from_start,
+    time: row.time,
     metadata: jsonParse(row.metadata, {})
   };
 }
 
-function serviceDayFromRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    day_type: row.day_type,
-    metadata: jsonParse(row.metadata, {})
-  };
+function findScheduleById(id) {
+  return scheduleFromRow(db.connection.prepare('SELECT * FROM schedules WHERE id = ?').get(id));
 }
 
-function scheduleTripFromRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    route_id: row.route_id,
-    service_day_id: row.service_day_id,
-    departure_time: row.departure_time,
-    metadata: jsonParse(row.metadata, {})
-  };
+function findScheduleSideById(id) {
+  return scheduleSideFromRow(db.connection.prepare('SELECT * FROM schedule_sides WHERE id = ?').get(id));
 }
 
-function getServiceDayIdByType(dayType) {
-  const map = { weekday: 'WEEKDAY', weekend: 'WEEKEND', holiday: 'HOLIDAY' };
-  return map[String(dayType || '').toLowerCase()] || null;
+function getScheduleSides(scheduleId) {
+  return db.connection.prepare('SELECT * FROM schedule_sides WHERE schedule_id = ? ORDER BY direction').all(scheduleId).map(scheduleSideFromRow);
 }
 
-function findLineById(id) {
-  return lineFromRow(db.connection.prepare('SELECT * FROM lines WHERE id = ?').get(id));
+function getScheduleSideStopCounts(sideId) {
+  const rows = db.connection.prepare('SELECT day_type, COUNT(*) AS count FROM schedule_stops WHERE side_id = ? GROUP BY day_type').all(sideId);
+  const result = { WEEKDAY: 0, WEEKEND: 0, HOLIDAY: 0 };
+  for (const row of rows) result[row.day_type] = Number(row.count || 0);
+  return result;
 }
 
-function findRouteById(id) {
-  return routeFromRow(db.connection.prepare('SELECT * FROM routes WHERE id = ?').get(id));
-}
-
-function findServiceDayByType(dayType) {
-  const id = getServiceDayIdByType(dayType);
-  if (!id) return null;
-  return serviceDayFromRow(db.connection.prepare('SELECT * FROM service_days WHERE id = ?').get(id));
-}
-
-function findScheduleTripById(id) {
-  return scheduleTripFromRow(db.connection.prepare('SELECT * FROM schedule_trips WHERE id = ?').get(id));
-}
-
-function getRouteStopsWithDetails(routeId) {
+function getScheduleStopsWithDetails(sideId, dayType) {
   return db.connection.prepare(`
-    SELECT rs.*, s.name AS stop_name, s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
-    FROM route_stops rs
-    JOIN stops s ON s.id = rs.stop_id
-    WHERE rs.route_id = ?
-    ORDER BY rs.sequence_order
-  `).all(routeId).map(row => ({
-    ...routeStopFromRow(row),
+    SELECT ss.*, s.name AS stop_name, s.latitude, s.longitude, s.zone
+    FROM schedule_stops ss
+    JOIN stops s ON s.id = ss.stop_id
+    WHERE ss.side_id = ? AND ss.day_type = ?
+    ORDER BY ss.sequence_order
+  `).all(sideId, dayType).map(row => ({
+    ...scheduleStopFromRow(row),
     stop_name: row.stop_name,
     latitude: row.latitude,
     longitude: row.longitude,
@@ -238,118 +180,27 @@ function getRouteStopsWithDetails(routeId) {
   }));
 }
 
-function computeStopTimes(routeId, departureTime) {
-  const conn = db.connection;
-  const stops = conn.prepare(`
-    SELECT rs.*, s.name AS stop_name, s.latitude, s.longitude, s.zone
-    FROM route_stops rs
-    JOIN stops s ON s.id = rs.stop_id
-    WHERE rs.route_id = ?
-    ORDER BY rs.sequence_order
-  `).all(routeId);
-
-  const baseMinutes = parseTimeToMinutes(departureTime);
-  if (baseMinutes === null) return [];
-
-  return stops.map(rs => ({
-    stop_id: rs.stop_id,
-    stop_name: rs.stop_name,
-    latitude: rs.latitude,
-    longitude: rs.longitude,
-    zone: rs.zone,
-    sequence_order: rs.sequence_order,
-    travel_time_from_start: rs.travel_time_from_start,
-    departure_time: minutesToTimeString(baseMinutes + Number(rs.travel_time_from_start || 0))
+function buildScheduleWithSides(scheduleId) {
+  const schedule = findScheduleById(scheduleId);
+  if (!schedule) return null;
+  const sides = getScheduleSides(scheduleId).map(side => ({
+    ...side,
+    stop_counts: getScheduleSideStopCounts(side.id)
   }));
+  return { ...schedule, sides };
 }
 
-function buildScheduleFromRoute(routeId, serviceDayId) {
-  const conn = db.connection;
-  const route = findRouteById(routeId);
-  if (!route) return null;
-
-  const trips = conn.prepare(`
-    SELECT * FROM schedule_trips
-    WHERE route_id = ? AND service_day_id = ?
-    ORDER BY departure_time
-  `).all(routeId, serviceDayId);
-
-  const stopTimes = trips.map(trip => ({
-    trip_id: trip.id,
-    departure_time: trip.departure_time,
-    stops: computeStopTimes(routeId, trip.departure_time)
-  }));
-
-  return {
-    route_id: routeId,
-    route_name: route.name,
-    line_id: route.line_id,
-    direction: route.direction,
-    is_extended: route.is_extended,
-    service_day_id: serviceDayId,
-    trips: stopTimes
-  };
-}
-
-function buildFullSchedule(routeId) {
-  const conn = db.connection;
-  const route = findRouteById(routeId);
-  if (!route) return null;
-
-  const serviceDays = conn.prepare('SELECT id, day_type FROM service_days').all();
-  const result = {
-    route_id: routeId,
-    route_name: route.name,
-    line_id: route.line_id,
-    direction: route.direction,
-    is_extended: route.is_extended,
-    services: {}
-  };
-
-  for (const sd of serviceDays) {
-    result.services[sd.day_type.toLowerCase()] = buildScheduleFromRoute(routeId, sd.id);
-  }
-
-  return result;
-}
-
-function normalizeLinePayload(body) {
-  const number = requiredString(body.number, 'number');
-  const type = requiredString(body.type, 'type');
-  if (!['bus', 'tram', 'trolley', 'train', 'metro'].includes(type)) {
-    throw new Error(`Nieprawidłowy typ linii: ${type}. Dozwolone: bus, tram, trolley, train, metro`);
-  }
-  return {
-    id: optionalString(body.id, '') || generateId(),
-    number,
-    type,
-    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
-  };
-}
-
-function normalizeRoutePayload(body) {
-  const lineId = requiredString(body.line_id, 'line_id');
-  if (!findLineById(lineId)) {
-    throw new Error(`Nie znaleziono linii o id: ${lineId}`);
-  }
+function normalizeSchedulePayload(body, existing) {
   const name = requiredString(body.name, 'name');
-  const direction = requiredString(body.direction, 'direction');
-  if (!['FROM_START', 'TO_START'].includes(direction)) {
-    throw new Error(`Nieprawidłowy kierunek: ${direction}. Dozwolone: FROM_START, TO_START`);
-  }
-  const isExtended = body.is_extended === true || body.is_extended === 'true' || body.is_extended === 1;
   return {
-    id: optionalString(body.id, '') || generateId(),
-    line_id: lineId,
     name,
-    direction,
-    is_extended: isExtended,
-    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
+    line_id: optionalString(firstDefined(body.line_id, body.lineId), existing ? existing.line_id || '' : ''),
+    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : (existing ? existing.metadata : {})
   };
 }
 
-function normalizeRouteStopsPayload(routeId, body) {
-  const stops = body.stops || body.route_stops || [];
+function normalizeScheduleStopsPayload(sideId, dayType, body) {
+  const stops = body.stops;
   if (!Array.isArray(stops)) {
     throw new Error('stops musi być tablicą');
   }
@@ -360,51 +211,18 @@ function normalizeRouteStopsPayload(routeId, body) {
     if (!findStopById(stopId)) {
       throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
     }
-    const travelTime = toIntWithFallback(firstDefined(item.travel_time_from_start, item.travelTimeFromStart), 0);
-    if (travelTime < 0) {
-      throw new Error(`travel_time_from_start nie może być ujemne dla przystanku ${stopId}`);
-    }
+    const time = normalizeTimeHHMM(firstDefined(item.time, item.departure_time, item.arrival_time));
     result.push({
       id: optionalString(item.id, '') || generateId(),
-      route_id: routeId,
+      side_id: sideId,
+      day_type: dayType,
       stop_id: stopId,
       sequence_order: i + 1,
-      travel_time_from_start: Math.round(travelTime),
+      time,
       metadata: item.metadata && typeof item.metadata === 'object' ? item.metadata : {}
     });
   }
   return result;
-}
-
-function normalizeScheduleTripPayload(body) {
-  const routeId = requiredString(body.route_id, 'route_id');
-  if (!findRouteById(routeId)) {
-    throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
-  }
-
-  let serviceDayId = optionalString(body.service_day_id, '');
-  if (!serviceDayId && body.day_type) {
-    serviceDayId = getServiceDayIdByType(body.day_type) || '';
-  }
-  serviceDayId = requiredString(serviceDayId, 'service_day_id');
-
-  const sd = db.connection.prepare('SELECT id FROM service_days WHERE id = ?').get(serviceDayId);
-  if (!sd) {
-    throw new Error(`Nie znaleziono dnia serwisowego o id: ${serviceDayId}`);
-  }
-
-  const departureTime = requiredString(body.departure_time, 'departure_time');
-  if (!validateTime(departureTime)) {
-    throw new Error(`Nieprawidłowy format czasu: ${departureTime}. Oczekiwano HH:MM lub HH:MM:SS`);
-  }
-
-  return {
-    id: optionalString(body.id, '') || generateId(),
-    route_id: routeId,
-    service_day_id: serviceDayId,
-    departure_time: departureTime.length === 5 ? `${departureTime}:00` : departureTime,
-    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {}
-  };
 }
 
 async function handleApiIp(req, res) {
@@ -599,137 +417,30 @@ async function handleDeleteStop(req, res, stopId) {
   sendJson(res, 200, { ok: true, message: 'Stop deleted', deletedCount: info.changes });
 }
 
-async function handleCreateLine(req, res) {
+async function handleCreateSchedule(req, res) {
   const body = await readJsonBody(req);
-  const line = normalizeLinePayload(body);
-
-  db.connection.prepare(`
-    INSERT INTO lines(id, number, type, metadata)
-    VALUES(@id, @number, @type, @metadata)
-    ON CONFLICT(id) DO UPDATE SET
-      number = excluded.number,
-      type = excluded.type,
-      metadata = excluded.metadata
-  `).run({
-    ...line,
-    metadata: jsonStringify(line.metadata)
-  });
-
-  sendJson(res, 201, {
-    ok: true,
-    message: 'Line created',
-    line: findLineById(line.id)
-  });
-}
-
-async function handleGetLines(req, res, query) {
-  const clauses = [];
-  const params = {};
-
-  const id = optionalString(firstParam(query.id), '');
-  const number = optionalString(firstParam(query.number), '');
-  const type = optionalString(firstParam(query.type), '');
-
-  if (id) {
-    clauses.push('id = @id');
-    params.id = id;
-  }
-  if (number) {
-    clauses.push('number LIKE @number');
-    params.number = `%${number}%`;
-  }
-  if (type) {
-    clauses.push('type = @type');
-    params.type = type;
-  }
-
-  const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db.connection.prepare(`SELECT * FROM lines ${whereSql} ORDER BY number COLLATE NOCASE, id`).all(params);
-  const lines = rows.map(lineFromRow);
-
-  sendJson(res, 200, {
-    ok: true,
-    count: lines.length,
-    lines
-  });
-}
-
-async function handleGetLineById(req, res, lineId) {
-  const line = findLineById(lineId);
-  if (!line) throw new Error(`Nie znaleziono linii o id: ${lineId}`);
-
-  const routes = db.connection.prepare(`
-    SELECT * FROM routes WHERE line_id = ? ORDER BY direction, is_extended DESC, name
-  `).all(lineId).map(routeFromRow);
-
-  sendJson(res, 200, { ok: true, line: { ...line, routes } });
-}
-
-async function handleUpdateLine(req, res, lineId) {
-  const existing = findLineById(lineId);
-  if (!existing) throw new Error(`Nie znaleziono linii o id: ${lineId}`);
-
-  const body = await readJsonBody(req);
-  const line = normalizeLinePayload({ ...body, id: lineId });
-  line.metadata.updated_at = new Date().toISOString();
-
-  db.connection.prepare(`
-    UPDATE lines
-    SET number = @number,
-        type = @type,
-        metadata = @metadata
-    WHERE id = @id
-  `).run({
-    ...line,
-    metadata: jsonStringify(line.metadata)
-  });
-
-  sendJson(res, 200, {
-    ok: true,
-    message: 'Line updated',
-    line: findLineById(lineId)
-  });
-}
-
-async function handleDeleteLine(req, res, lineId) {
-  const info = db.connection.prepare('DELETE FROM lines WHERE id = ?').run(lineId);
-  if (info.changes === 0) throw new Error(`Nie znaleziono linii o id: ${lineId}`);
-  sendJson(res, 200, { ok: true, message: 'Line deleted (kaskadowo usunięto trasy, przystanki tras i kursy)', deletedCount: info.changes });
-}
-
-async function handleCreateRoute(req, res) {
-  const body = await readJsonBody(req);
-  const route = normalizeRoutePayload(body);
+  const data = normalizeSchedulePayload(body);
+  const id = optionalString(body.id, '') || generateId();
+  const now = new Date().toISOString();
 
   const tx = db.connection.transaction(() => {
     db.connection.prepare(`
-      INSERT INTO routes(id, line_id, name, direction, is_extended, metadata)
-      VALUES(@id, @line_id, @name, @direction, @is_extended, @metadata)
-      ON CONFLICT(id) DO UPDATE SET
-        line_id = excluded.line_id,
-        name = excluded.name,
-        direction = excluded.direction,
-        is_extended = excluded.is_extended,
-        metadata = excluded.metadata
+      INSERT INTO schedules(id, name, line_id, metadata, active, updated_at)
+      VALUES(@id, @name, @line_id, @metadata, 1, @updated_at)
     `).run({
-      ...route,
-      is_extended: route.is_extended ? 1 : 0,
-      metadata: jsonStringify(route.metadata)
+      id,
+      name: data.name,
+      line_id: data.line_id || null,
+      metadata: jsonStringify(data.metadata),
+      updated_at: now
     });
 
-    const stops = Array.isArray(body.stops) || Array.isArray(body.route_stops)
-      ? normalizeRouteStopsPayload(route.id, body)
-      : null;
-
-    if (stops) {
-      db.connection.prepare('DELETE FROM route_stops WHERE route_id = ?').run(route.id);
-      const insert = db.connection.prepare(`
-        INSERT INTO route_stops(id, route_id, stop_id, sequence_order, travel_time_from_start, metadata)
-        VALUES(@id, @route_id, @stop_id, @sequence_order, @travel_time_from_start, @metadata)
-      `);
-      for (const st of stops) {
-        insert.run({ ...st, metadata: jsonStringify(st.metadata) });
-      }
+    const insertSide = db.connection.prepare(`
+      INSERT INTO schedule_sides(id, schedule_id, direction, metadata)
+      VALUES(?, ?, ?, '{}')
+    `);
+    for (const direction of SCHEDULE_DIRECTIONS) {
+      insertSide.run(generateId(), id, direction);
     }
   });
 
@@ -737,127 +448,114 @@ async function handleCreateRoute(req, res) {
 
   sendJson(res, 201, {
     ok: true,
-    message: 'Route created',
-    route: findRouteById(route.id),
-    stops: getRouteStopsWithDetails(route.id)
+    message: 'Rozkład utworzony (z dwoma stronami: tam i powrót)',
+    schedule: buildScheduleWithSides(id)
   });
 }
 
-async function handleGetRoutes(req, res, query) {
+async function handleGetSchedules(req, res, query) {
   const clauses = [];
   const params = {};
 
   const id = optionalString(firstParam(query.id), '');
   const lineId = optionalString(firstParam(query.line_id), '');
-  const direction = optionalString(firstParam(query.direction), '');
-  const isExtended = optionalString(firstParam(query.is_extended), '');
+  const q = optionalString(firstParam(query.q) || firstParam(query.search), '');
 
   if (id) {
-    clauses.push('r.id = @id');
+    clauses.push('id = @id');
     params.id = id;
   }
   if (lineId) {
-    clauses.push('r.line_id = @line_id');
+    clauses.push('line_id = @line_id');
     params.line_id = lineId;
   }
-  if (direction) {
-    clauses.push('r.direction = @direction');
-    params.direction = direction;
-  }
-  if (isExtended === 'true' || isExtended === '1') {
-    clauses.push('r.is_extended = 1');
-  } else if (isExtended === 'false' || isExtended === '0') {
-    clauses.push('r.is_extended = 0');
+  if (q) {
+    clauses.push('name LIKE @q');
+    params.q = `%${q}%`;
   }
 
   const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db.connection.prepare(`
-    SELECT r.*, l.number AS line_number, l.type AS line_type,
-           (SELECT COUNT(*) FROM route_stops rs WHERE rs.route_id = r.id) AS stop_count
-    FROM routes r
-    LEFT JOIN lines l ON l.id = r.line_id
-    ${whereSql}
-    ORDER BY r.line_id, r.direction, r.is_extended DESC, r.name COLLATE NOCASE, r.id
-  `).all(params);
-
-  const routes = rows.map(row => ({
-    ...routeFromRow(row),
-    line_number: row.line_number,
-    line_type: row.line_type,
-    stop_count: Number(row.stop_count || 0)
-  }));
+  const rows = db.connection.prepare(`SELECT * FROM schedules ${whereSql} ORDER BY name COLLATE NOCASE, id`).all(params);
+  const schedules = rows.map(row => buildScheduleWithSides(row.id));
 
   sendJson(res, 200, {
     ok: true,
-    count: routes.length,
-    routes
+    count: schedules.length,
+    schedules
   });
 }
 
-async function handleGetRouteById(req, res, routeId) {
-  const route = findRouteById(routeId);
-  if (!route) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
-
-  const line = findLineById(route.line_id);
-
-  sendJson(res, 200, {
-    ok: true,
-    route: {
-      ...route,
-      line_number: line ? line.number : null,
-      line_type: line ? line.type : null,
-      stops: getRouteStopsWithDetails(routeId)
-    }
-  });
+async function handleGetScheduleById(req, res, scheduleId) {
+  const schedule = buildScheduleWithSides(scheduleId);
+  if (!schedule) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  sendJson(res, 200, { ok: true, schedule });
 }
 
-async function handleUpdateRoute(req, res, routeId) {
-  const existing = findRouteById(routeId);
-  if (!existing) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
+async function handleUpdateSchedule(req, res, scheduleId) {
+  const existing = findScheduleById(scheduleId);
+  if (!existing) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
 
   const body = await readJsonBody(req);
-  const route = normalizeRoutePayload({ ...body, id: routeId });
-  route.metadata.updated_at = new Date().toISOString();
+  const data = normalizeSchedulePayload(body, existing);
 
   db.connection.prepare(`
-    UPDATE routes
-    SET line_id = @line_id,
-        name = @name,
-        direction = @direction,
-        is_extended = @is_extended,
-        metadata = @metadata
+    UPDATE schedules
+    SET name = @name, line_id = @line_id, metadata = @metadata, updated_at = @updated_at
     WHERE id = @id
   `).run({
-    ...route,
-    is_extended: route.is_extended ? 1 : 0,
-    metadata: jsonStringify(route.metadata)
+    id: scheduleId,
+    name: data.name,
+    line_id: data.line_id || null,
+    metadata: jsonStringify(data.metadata),
+    updated_at: new Date().toISOString()
   });
 
   sendJson(res, 200, {
     ok: true,
-    message: 'Route updated',
-    route: findRouteById(routeId)
+    message: 'Rozkład zaktualizowany',
+    schedule: buildScheduleWithSides(scheduleId)
   });
 }
 
-async function handleDeleteRoute(req, res, routeId) {
-  const info = db.connection.prepare('DELETE FROM routes WHERE id = ?').run(routeId);
-  if (info.changes === 0) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
-  sendJson(res, 200, { ok: true, message: 'Route deleted (kaskadowo usunięto przystanki trasy i kursy)', deletedCount: info.changes });
+async function handleDeleteSchedule(req, res, scheduleId) {
+  const info = db.connection.prepare('DELETE FROM schedules WHERE id = ?').run(scheduleId);
+  if (info.changes === 0) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  sendJson(res, 200, { ok: true, message: 'Rozkład usunięty (kaskadowo usunięto strony i godziny przystanków)', deletedCount: info.changes });
 }
 
-async function handleSetRouteStops(req, res, routeId) {
-  const route = findRouteById(routeId);
-  if (!route) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
+async function handleGetScheduleSideStops(req, res, scheduleId, sideId, query) {
+  const side = findScheduleSideById(sideId);
+  if (!side || side.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
+
+  const dayType = optionalString(firstParam(query.day_type), 'WEEKDAY').toUpperCase();
+  if (!DAY_TYPES_UPPER.includes(dayType)) throw new Error(`Nieprawidłowy typ dnia: ${dayType}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
+
+  const stops = getScheduleStopsWithDetails(sideId, dayType);
+
+  sendJson(res, 200, {
+    ok: true,
+    side_id: sideId,
+    day_type: dayType,
+    count: stops.length,
+    stops
+  });
+}
+
+async function handleSetScheduleSideStops(req, res, scheduleId, sideId, query) {
+  const side = findScheduleSideById(sideId);
+  if (!side || side.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
 
   const body = await readJsonBody(req);
-  const stops = normalizeRouteStopsPayload(routeId, body);
+  const dayType = optionalString(firstDefined(firstParam(query.day_type), body.day_type), 'WEEKDAY').toUpperCase();
+  if (!DAY_TYPES_UPPER.includes(dayType)) throw new Error(`Nieprawidłowy typ dnia: ${dayType}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
+
+  const stops = normalizeScheduleStopsPayload(sideId, dayType, body);
 
   const tx = db.connection.transaction(() => {
-    db.connection.prepare('DELETE FROM route_stops WHERE route_id = ?').run(routeId);
+    db.connection.prepare('DELETE FROM schedule_stops WHERE side_id = ? AND day_type = ?').run(sideId, dayType);
     const insert = db.connection.prepare(`
-      INSERT INTO route_stops(id, route_id, stop_id, sequence_order, travel_time_from_start, metadata)
-      VALUES(@id, @route_id, @stop_id, @sequence_order, @travel_time_from_start, @metadata)
+      INSERT INTO schedule_stops(id, side_id, day_type, stop_id, sequence_order, time, metadata)
+      VALUES(@id, @side_id, @day_type, @stop_id, @sequence_order, @time, @metadata)
     `);
     for (const st of stops) {
       insert.run({ ...st, metadata: jsonStringify(st.metadata) });
@@ -868,336 +566,69 @@ async function handleSetRouteStops(req, res, routeId) {
 
   sendJson(res, 200, {
     ok: true,
-    message: `Zapisano ${stops.length} przystanków dla trasy (poprzednie przypisania nadpisane)`,
-    stops: getRouteStopsWithDetails(routeId)
+    message: `Zapisano ${stops.length} przystanków (${dayType})`,
+    side_id: sideId,
+    day_type: dayType,
+    stops: getScheduleStopsWithDetails(sideId, dayType)
   });
 }
 
-async function handleGetRouteStops(req, res, routeId) {
-  const route = findRouteById(routeId);
-  if (!route) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
-
-  const stops = getRouteStopsWithDetails(routeId);
-
-  sendJson(res, 200, {
-    ok: true,
-    route_id: routeId,
-    count: stops.length,
-    stops
-  });
-}
-
-async function handleCreateScheduleTrip(req, res) {
-  const body = await readJsonBody(req);
-
-  if (Array.isArray(body.trips)) {
-    const created = [];
-    const tx = db.connection.transaction(() => {
-      const insert = db.connection.prepare(`
-        INSERT INTO schedule_trips(id, route_id, service_day_id, departure_time, metadata)
-        VALUES(@id, @route_id, @service_day_id, @departure_time, @metadata)
-        ON CONFLICT(id) DO UPDATE SET
-          route_id = excluded.route_id,
-          service_day_id = excluded.service_day_id,
-          departure_time = excluded.departure_time,
-          metadata = excluded.metadata
-      `);
-      for (const rawTrip of body.trips) {
-        const trip = normalizeScheduleTripPayload({
-          route_id: firstDefined(rawTrip.route_id, body.route_id),
-          service_day_id: firstDefined(rawTrip.service_day_id, body.service_day_id),
-          day_type: firstDefined(rawTrip.day_type, body.day_type),
-          departure_time: rawTrip.departure_time,
-          id: rawTrip.id,
-          metadata: rawTrip.metadata
-        });
-        insert.run({ ...trip, metadata: jsonStringify(trip.metadata) });
-        created.push(trip.id);
-      }
-    });
-    tx();
-
-    sendJson(res, 201, {
-      ok: true,
-      message: `Utworzono/zaktualizowano ${created.length} kursów`,
-      trips: created.map(findScheduleTripById)
-    });
-    return;
-  }
-
-  const trip = normalizeScheduleTripPayload(body);
-
-  db.connection.prepare(`
-    INSERT INTO schedule_trips(id, route_id, service_day_id, departure_time, metadata)
-    VALUES(@id, @route_id, @service_day_id, @departure_time, @metadata)
-    ON CONFLICT(id) DO UPDATE SET
-      route_id = excluded.route_id,
-      service_day_id = excluded.service_day_id,
-      departure_time = excluded.departure_time,
-      metadata = excluded.metadata
-  `).run({
-    ...trip,
-    metadata: jsonStringify(trip.metadata)
-  });
-
-  sendJson(res, 201, {
-    ok: true,
-    message: 'Trip created',
-    trip: findScheduleTripById(trip.id),
-    computed_stops: computeStopTimes(trip.route_id, trip.departure_time)
-  });
-}
-
-async function handleGetScheduleTrips(req, res, query) {
-  const clauses = [];
-  const params = {};
-
-  const id = optionalString(firstParam(query.id), '');
-  const routeId = optionalString(firstParam(query.route_id), '');
-  const serviceDayId = optionalString(firstParam(query.service_day_id), '');
-  const dayType = optionalString(firstParam(query.day_type), '');
-  const lineId = optionalString(firstParam(query.line_id), '');
-
-  if (id) {
-    clauses.push('st.id = @id');
-    params.id = id;
-  }
-  if (routeId) {
-    clauses.push('st.route_id = @route_id');
-    params.route_id = routeId;
-  }
-  if (serviceDayId) {
-    clauses.push('st.service_day_id = @service_day_id');
-    params.service_day_id = serviceDayId;
-  } else if (dayType) {
-    const sdId = getServiceDayIdByType(dayType);
-    if (sdId) {
-      clauses.push('st.service_day_id = @service_day_id');
-      params.service_day_id = sdId;
-    }
-  }
-  if (lineId) {
-    clauses.push('r.line_id = @line_id');
-    params.line_id = lineId;
-  }
-
-  const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db.connection.prepare(`
-    SELECT st.*, r.name AS route_name, r.direction, r.is_extended, r.line_id AS route_line_id,
-           l.number AS line_number, l.type AS line_type,
-           sd.day_type AS service_day_type
-    FROM schedule_trips st
-    JOIN routes r ON r.id = st.route_id
-    JOIN lines l ON l.id = r.line_id
-    JOIN service_days sd ON sd.id = st.service_day_id
-    ${whereSql}
-    ORDER BY st.departure_time, st.id
-  `).all(params);
-
-  const trips = rows.map(row => ({
-    ...scheduleTripFromRow(row),
-    route_name: row.route_name,
-    line_id: row.route_line_id,
-    direction: row.direction,
-    is_extended: Boolean(row.is_extended),
-    line_number: row.line_number,
-    line_type: row.line_type,
-    service_day_type: row.service_day_type
-  }));
-
-  sendJson(res, 200, {
-    ok: true,
-    count: trips.length,
-    trips
-  });
-}
-
-async function handleGetScheduleTripById(req, res, tripId) {
-  const trip = findScheduleTripById(tripId);
-  if (!trip) throw new Error(`Nie znaleziono kursu o id: ${tripId}`);
-
-  const route = findRouteById(trip.route_id);
-  const sd = db.connection.prepare('SELECT day_type FROM service_days WHERE id = ?').get(trip.service_day_id);
-
-  sendJson(res, 200, {
-    ok: true,
-    trip: {
-      ...trip,
-      route_name: route ? route.name : null,
-      line_id: route ? route.line_id : null,
-      direction: route ? route.direction : null,
-      is_extended: route ? route.is_extended : null,
-      service_day_type: sd ? sd.day_type : null,
-      computed_stops: computeStopTimes(trip.route_id, trip.departure_time)
-    }
-  });
-}
-
-async function handleUpdateScheduleTrip(req, res, tripId) {
-  const existing = findScheduleTripById(tripId);
-  if (!existing) throw new Error(`Nie znaleziono kursu o id: ${tripId}`);
+async function handleCopyScheduleSideStops(req, res, scheduleId, sideId) {
+  const targetSide = findScheduleSideById(sideId);
+  if (!targetSide || targetSide.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
 
   const body = await readJsonBody(req);
-  const trip = normalizeScheduleTripPayload({ ...body, id: tripId });
-  trip.metadata.updated_at = new Date().toISOString();
+  const targetDayType = optionalString(body.day_type, 'WEEKDAY').toUpperCase();
+  if (!DAY_TYPES_UPPER.includes(targetDayType)) throw new Error(`Nieprawidłowy typ dnia docelowego: ${targetDayType}`);
 
-  db.connection.prepare(`
-    UPDATE schedule_trips
-    SET route_id = @route_id,
-        service_day_id = @service_day_id,
-        departure_time = @departure_time,
-        metadata = @metadata
-    WHERE id = @id
-  `).run({
-    ...trip,
-    metadata: jsonStringify(trip.metadata)
-  });
+  const sourceSideId = optionalString(body.source_side_id, '') || sideId;
+  const sourceSide = findScheduleSideById(sourceSideId);
+  if (!sourceSide || sourceSide.schedule_id !== scheduleId) throw new Error(`Nie znaleziono źródłowej strony rozkładu o id: ${sourceSideId}`);
 
-  sendJson(res, 200, {
-    ok: true,
-    message: 'Trip updated',
-    trip: findScheduleTripById(tripId)
-  });
-}
+  const sourceDayType = optionalString(body.source_day_type, targetDayType).toUpperCase();
+  if (!DAY_TYPES_UPPER.includes(sourceDayType)) throw new Error(`Nieprawidłowy typ dnia źródłowego: ${sourceDayType}`);
 
-async function handleDeleteScheduleTrip(req, res, tripId) {
-  const info = db.connection.prepare('DELETE FROM schedule_trips WHERE id = ?').run(tripId);
-  if (info.changes === 0) throw new Error(`Nie znaleziono kursu o id: ${tripId}`);
-  sendJson(res, 200, { ok: true, message: 'Trip deleted', deletedCount: info.changes });
-}
-
-async function handleGetScheduleByRoute(req, res, routeId) {
-  const route = findRouteById(routeId);
-  if (!route) throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
-
-  const schedule = buildFullSchedule(routeId);
-  sendJson(res, 200, { ok: true, schedule });
-}
-
-async function handleGetScheduleByLineAndDirection(req, res, query) {
-  const lineId = requiredString(firstParam(query.line_id), 'line_id');
-  const direction = optionalString(firstParam(query.direction), 'FROM_START');
-  if (!['FROM_START', 'TO_START'].includes(direction)) {
-    throw new Error(`Nieprawidłowy kierunek: ${direction}`);
-  }
-  const dayType = optionalString(firstParam(query.day_type), 'weekday');
-  const serviceDayId = getServiceDayIdByType(dayType);
-  if (!serviceDayId) {
-    throw new Error(`Nieprawidłowy typ dnia: ${dayType}`);
+  if (sourceSideId === sideId && sourceDayType === targetDayType) {
+    throw new Error('Źródło i cel kopiowania nie mogą być takie same');
   }
 
-  const route = db.connection.prepare(`
-    SELECT id FROM routes
-    WHERE line_id = ? AND direction = ?
-    ORDER BY is_extended DESC, name
-    LIMIT 1
-  `).get(lineId, direction);
+  const reverse = body.reverse === true || body.reverse === 'true';
 
-  if (!route) {
-    throw new Error(`Nie znaleziono trasy dla linii ${lineId} w kierunku ${direction}`);
-  }
-
-  sendJson(res, 200, {
-    ok: true,
-    route_id: route.id,
-    service_day_id: serviceDayId,
-    schedule: buildScheduleFromRoute(route.id, serviceDayId)
-  });
-}
-
-async function handleCopyDirection(req, res, routeId) {
-  const body = await readJsonBody(req);
-
-  let sourceRouteId = optionalString(body.source_route_id, '') || routeId;
-  let targetRouteId = optionalString(body.target_route_id, '');
-
-  if (!targetRouteId) {
-    const targetLineId = optionalString(body.target_line_id, '');
-    const targetDirection = optionalString(body.target_direction, '');
-    if (targetLineId && targetDirection) {
-      if (!['FROM_START', 'TO_START'].includes(targetDirection)) {
-        throw new Error('target_direction musi być FROM_START lub TO_START');
-      }
-      const found = db.connection.prepare(`
-        SELECT id FROM routes WHERE line_id = ? AND direction = ?
-        ORDER BY is_extended DESC, name LIMIT 1
-      `).get(targetLineId, targetDirection);
-      if (!found) {
-        throw new Error(`Nie znaleziono trasy docelowej dla linii ${targetLineId} w kierunku ${targetDirection}`);
-      }
-      targetRouteId = found.id;
-    }
-  }
-
-  const sourceRoute = findRouteById(sourceRouteId);
-  if (!sourceRoute) throw new Error(`Nie znaleziono trasy źródłowej o id: ${sourceRouteId}`);
-
-  const targetRoute = findRouteById(targetRouteId);
-  if (!targetRoute) throw new Error('Nie znaleziono trasy docelowej (podaj target_route_id lub target_line_id + target_direction)');
-  if (targetRoute.id === sourceRoute.id) throw new Error('Trasa źródłowa i docelowa nie mogą być takie same');
-
-  const reverse = body.reverse === undefined
-    ? true
-    : (body.reverse === true || body.reverse === 'true');
-
-  const sourceStops = db.connection.prepare(`
-    SELECT stop_id, travel_time_from_start, metadata
-    FROM route_stops
-    WHERE route_id = ?
+  let sourceStops = db.connection.prepare(`
+    SELECT stop_id, time, metadata
+    FROM schedule_stops
+    WHERE side_id = ? AND day_type = ?
     ORDER BY sequence_order
-  `).all(sourceRoute.id);
+  `).all(sourceSideId, sourceDayType);
 
   if (sourceStops.length === 0) {
-    throw new Error('Źródłowa trasa nie ma zdefiniowanych przystanków');
+    throw new Error('Strona źródłowa nie ma zdefiniowanych przystanków dla wskazanego typu dnia');
   }
 
-  let stopsToCopy = sourceStops.map(s => ({ ...s }));
-  if (reverse) {
-    stopsToCopy = stopsToCopy.slice().reverse();
-    let maxTime = 0;
-    for (const s of stopsToCopy) {
-      const t = Number(s.travel_time_from_start || 0);
-      if (t > maxTime) maxTime = t;
-    }
-    for (const s of stopsToCopy) {
-      s.travel_time_from_start = maxTime - Number(s.travel_time_from_start || 0);
-    }
-  }
+  if (reverse) sourceStops = sourceStops.slice().reverse();
 
   const tx = db.connection.transaction(() => {
-    db.connection.prepare('DELETE FROM route_stops WHERE route_id = ?').run(targetRoute.id);
+    db.connection.prepare('DELETE FROM schedule_stops WHERE side_id = ? AND day_type = ?').run(sideId, targetDayType);
     const insert = db.connection.prepare(`
-      INSERT INTO route_stops(id, route_id, stop_id, sequence_order, travel_time_from_start, metadata)
-      VALUES(?, ?, ?, ?, ?, ?)
+      INSERT INTO schedule_stops(id, side_id, day_type, stop_id, sequence_order, time, metadata)
+      VALUES(?, ?, ?, ?, ?, ?, ?)
     `);
-    for (let i = 0; i < stopsToCopy.length; i++) {
-      const s = stopsToCopy[i];
-      insert.run(
-        generateId(),
-        targetRoute.id,
-        s.stop_id,
-        i + 1,
-        Math.round(Number(s.travel_time_from_start || 0)),
-        s.metadata || '{}'
-      );
-    }
+    sourceStops.forEach((s, i) => {
+      insert.run(generateId(), sideId, targetDayType, s.stop_id, i + 1, s.time, s.metadata || '{}');
+    });
   });
 
   tx();
 
   sendJson(res, 200, {
     ok: true,
-    message: `Skopiowano przystanki z trasy ${sourceRoute.id} do ${targetRoute.id}${reverse ? ' (kolejność i czasy odwrócone)' : ''}`,
-    source_route_id: sourceRoute.id,
-    target_route_id: targetRoute.id,
-    reversed: reverse,
-    stops: getRouteStopsWithDetails(targetRoute.id)
+    message: `Skopiowano ${sourceStops.length} przystanków${reverse ? ' (kolejność odwrócona)' : ''}. Zweryfikuj godziny przed zapisaniem.`,
+    stops: getScheduleStopsWithDetails(sideId, targetDayType)
   });
 }
 
 async function handleServiceDays(req, res) {
-  const rows = db.connection.prepare('SELECT id, day_type, metadata FROM service_days ORDER BY day_type').all();
-  const days = rows.map(serviceDayFromRow);
+  const days = DAY_TYPES_UPPER.map(dt => ({ id: dt, day_type: dt }));
 
   sendJson(res, 200, {
     ok: true,
@@ -1244,49 +675,68 @@ async function handleDeleteHoliday(req, res, date) {
 
 async function handleUpdateVehicle(req, res, pcName) {
   const body = await readJsonBody(req);
-  const routeId = optionalString(firstDefined(body.route_id, body.schedule_id), '');
+  const scheduleId = optionalString(firstDefined(body.schedule_id, body.route_id), '');
 
   const vehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
   if (!vehicle) {
     throw new Error(`Nie znaleziono pojazdu o pcName: ${pcName}`);
   }
 
-  let route = null;
-  if (routeId) {
-    route = findRouteById(routeId);
-    if (!route) {
-      throw new Error(`Nie znaleziono trasy o id: ${routeId}`);
+  let schedule = null;
+  if (scheduleId) {
+    schedule = findScheduleById(scheduleId);
+    if (!schedule) {
+      throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
     }
   }
 
-  const existingMetadata = jsonParse(vehicle.metadata, {});
-  existingMetadata.route_id = routeId || null;
-  existingMetadata.schedule_id = routeId || null;
-  if (route) {
-    existingMetadata.line_id = route.line_id;
-    existingMetadata.direction = route.direction;
-    existingMetadata.is_extended = route.is_extended;
-  }
-  existingMetadata.updated_at = new Date().toISOString();
+  const tx = db.connection.transaction(() => {
+    // Odepnij pojazd od jakiegokolwiek innego rozkładu, do którego był wcześniej przypisany
+    // (silnik śledzenia na żywo szuka rozkładu właśnie po pcName/pcId w tabeli schedules).
+    db.connection.prepare(`
+      UPDATE schedules SET pcName = NULL, pcId = NULL WHERE pcName = ? AND id != ?
+    `).run(pcName, scheduleId || '');
 
-  db.connection.prepare(`
-    UPDATE vehicles
-    SET metadata = @metadata
-    WHERE pcName = @pcName
-  `).run({
-    pcName,
-    metadata: jsonStringify(existingMetadata)
+    if (schedule) {
+      db.connection.prepare(`
+        UPDATE schedules SET pcName = ?, pcId = ?, updated_at = ? WHERE id = ?
+      `).run(pcName, vehicle.pcId || '', new Date().toISOString(), scheduleId);
+    }
+
+    const existingMetadata = jsonParse(vehicle.metadata, {});
+    existingMetadata.schedule_id = scheduleId || null;
+    if (schedule) {
+      existingMetadata.line_id = schedule.line_id;
+      existingMetadata.schedule_name = schedule.name;
+    } else {
+      delete existingMetadata.line_id;
+      delete existingMetadata.schedule_name;
+    }
+    existingMetadata.updated_at = new Date().toISOString();
+
+    db.connection.prepare(`
+      UPDATE vehicles
+      SET metadata = @metadata
+      WHERE pcName = @pcName
+    `).run({
+      pcName,
+      metadata: jsonStringify(existingMetadata)
+    });
   });
+
+  tx();
+
+  const updatedVehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
+  const updatedMetadata = jsonParse(updatedVehicle.metadata, {});
 
   sendJson(res, 200, {
     ok: true,
-    message: 'Vehicle route/schedule updated',
+    message: 'Przypisanie rozkładu do pojazdu zaktualizowane',
     vehicle: {
-      pcName: vehicle.pcName,
-      pcId: vehicle.pcId || '',
-      route_id: existingMetadata.route_id,
-      schedule_id: existingMetadata.schedule_id,
-      metadata: existingMetadata
+      pcName: updatedVehicle.pcName,
+      pcId: updatedVehicle.pcId || '',
+      schedule_id: updatedMetadata.schedule_id,
+      metadata: updatedMetadata
     }
   });
 }
@@ -1314,12 +764,9 @@ async function handleVehicles(req, res) {
       last_latitude: row.last_lat,
       last_longitude: row.last_lng,
       has_schedule: Boolean(metadata.has_schedule),
-      route_id: metadata.route_id || null,
       schedule_id: metadata.schedule_id || null,
+      schedule_name: metadata.schedule_name || null,
       line_id: metadata.line_id || row.status_line_id || null,
-      line_number: metadata.line_number || null,
-      direction: metadata.direction || null,
-      is_extended: metadata.is_extended === undefined ? null : Boolean(metadata.is_extended),
       brigade: metadata.brigade || '',
       status: row.status || null,
       punctuality_status: row.punctuality_status || null,
@@ -1776,12 +1223,9 @@ async function handleRoot(req, res) {
       dataSink: 'POST /api/data',
       isarsoftLatest: 'GET /api/isarsoft/latest',
       stops: 'GET /stops, POST /stops, GET /stops/:id, PUT /stops/:id, DELETE /stops/:id',
-      lines: 'GET /lines, POST /lines, GET /lines/:id, PUT /lines/:id, DELETE /lines/:id',
-      routes: 'GET /routes, POST /routes, GET /routes/:id, PUT /routes/:id, DELETE /routes/:id',
-      routeStops: 'GET /routes/:id/stops, PUT /routes/:id/stops',
-      copyDirection: 'POST /routes/:id/copy-direction',
-      scheduleTrips: 'GET /trips/schedule, POST /trips/schedule, GET /trips/schedule/:id, PUT /trips/schedule/:id, DELETE /trips/schedule/:id',
-      schedule: 'GET /schedules/route?route_id=..., GET /schedules/by-line?line_id=&direction=&day_type=',
+      schedules: 'GET /schedules, POST /schedules, GET /schedules/:id, PUT /schedules/:id, DELETE /schedules/:id (każdy rozkład ma 2 strony: FROM_START i TO_START)',
+      scheduleSideStops: 'GET /schedules/:id/sides/:sideId/stops?day_type=WEEKDAY|WEEKEND|HOLIDAY, PUT /schedules/:id/sides/:sideId/stops?day_type=... (body: {stops:[{stop_id, time:"HH:MM"}]})',
+      copyScheduleSideStops: 'POST /schedules/:id/sides/:sideId/copy (body: {source_side_id?, source_day_type?, day_type, reverse?})',
       serviceDays: 'GET /service-days',
       holidays: 'GET /holidays, POST /holidays, DELETE /holidays/:date',
       vehicles: 'GET /vehicles, PUT /vehicles/:pcName',
@@ -1834,80 +1278,41 @@ async function routeRequest(req, res) {
       throw new Error('Metoda nieobsługiwana dla /stops/:id');
     }
 
-    if (pathname === '/lines') {
-      if (req.method === 'POST') return await handleCreateLine(req, res);
-      if (req.method === 'GET') return await handleGetLines(req, res, query);
-      throw new Error('Metoda nieobsługiwana dla /lines');
+    if (pathname === '/schedules') {
+      if (req.method === 'POST') return await handleCreateSchedule(req, res);
+      if (req.method === 'GET') return await handleGetSchedules(req, res, query);
+      throw new Error('Metoda nieobsługiwana dla /schedules');
     }
 
-    if (pathname.startsWith('/lines/')) {
-      const lineId = decodeURIComponent(pathname.substring('/lines/'.length));
-      if (!lineId) throw new Error('Brak ID linii');
-      if (req.method === 'GET') return await handleGetLineById(req, res, lineId);
-      if (req.method === 'PUT') return await handleUpdateLine(req, res, lineId);
-      if (req.method === 'DELETE') return await handleDeleteLine(req, res, lineId);
-      throw new Error('Metoda nieobsługiwana dla /lines/:id');
+    if (pathname.startsWith('/schedules/') && pathname.includes('/sides/') && pathname.endsWith('/copy')) {
+      const rest = pathname.substring('/schedules/'.length, pathname.length - '/copy'.length);
+      const [scheduleId, , sideId] = rest.split('/').map(decodeURIComponent);
+      if (!scheduleId || !sideId) throw new Error('Brak ID rozkładu lub strony');
+      if (req.method === 'POST') return await handleCopyScheduleSideStops(req, res, scheduleId, sideId);
+      throw new Error('Metoda nieobsługiwana dla /schedules/:id/sides/:sideId/copy');
     }
 
-    if (pathname === '/routes') {
-      if (req.method === 'POST') return await handleCreateRoute(req, res);
-      if (req.method === 'GET') return await handleGetRoutes(req, res, query);
-      throw new Error('Metoda nieobsługiwana dla /routes');
+    if (pathname.startsWith('/schedules/') && pathname.includes('/sides/') && pathname.endsWith('/stops')) {
+      const rest = pathname.substring('/schedules/'.length, pathname.length - '/stops'.length);
+      const [scheduleId, , sideId] = rest.split('/').map(decodeURIComponent);
+      if (!scheduleId || !sideId) throw new Error('Brak ID rozkładu lub strony');
+      if (req.method === 'GET') return await handleGetScheduleSideStops(req, res, scheduleId, sideId, query);
+      if (req.method === 'PUT') return await handleSetScheduleSideStops(req, res, scheduleId, sideId, query);
+      throw new Error('Metoda nieobsługiwana dla /schedules/:id/sides/:sideId/stops');
     }
 
-    if (pathname.startsWith('/routes/') && pathname.endsWith('/copy-direction')) {
-      const routeId = decodeURIComponent(pathname.substring('/routes/'.length, pathname.length - '/copy-direction'.length));
-      if (!routeId) throw new Error('Brak ID trasy');
-      if (req.method === 'POST') return await handleCopyDirection(req, res, routeId);
-      throw new Error('Metoda nieobsługiwana dla /routes/:id/copy-direction');
-    }
-
-    if (pathname.startsWith('/routes/') && pathname.endsWith('/stops')) {
-      const routeId = decodeURIComponent(pathname.substring('/routes/'.length, pathname.length - '/stops'.length));
-      if (!routeId) throw new Error('Brak ID trasy');
-      if (req.method === 'PUT') return await handleSetRouteStops(req, res, routeId);
-      if (req.method === 'GET') return await handleGetRouteStops(req, res, routeId);
-      throw new Error('Metoda nieobsługiwana dla /routes/:id/stops');
-    }
-
-    if (pathname.startsWith('/routes/')) {
-      const routeId = decodeURIComponent(pathname.substring('/routes/'.length));
-      if (!routeId) throw new Error('Brak ID trasy');
-      if (req.method === 'GET') return await handleGetRouteById(req, res, routeId);
-      if (req.method === 'PUT') return await handleUpdateRoute(req, res, routeId);
-      if (req.method === 'DELETE') return await handleDeleteRoute(req, res, routeId);
-      throw new Error('Metoda nieobsługiwana dla /routes/:id');
+    if (pathname.startsWith('/schedules/')) {
+      const scheduleId = decodeURIComponent(pathname.substring('/schedules/'.length));
+      if (!scheduleId) throw new Error('Brak ID rozkładu');
+      if (req.method === 'GET') return await handleGetScheduleById(req, res, scheduleId);
+      if (req.method === 'PUT') return await handleUpdateSchedule(req, res, scheduleId);
+      if (req.method === 'DELETE') return await handleDeleteSchedule(req, res, scheduleId);
+      throw new Error('Metoda nieobsługiwana dla /schedules/:id');
     }
 
     if (pathname === '/service-days') {
       if (req.method === 'GET') return await handleServiceDays(req, res);
       throw new Error('Metoda nieobsługiwana dla /service-days');
-    }
-
-    if (pathname === '/trips/schedule') {
-      if (req.method === 'POST') return await handleCreateScheduleTrip(req, res);
-      if (req.method === 'GET') return await handleGetScheduleTrips(req, res, query);
-      throw new Error('Metoda nieobsługiwana dla /trips/schedule');
-    }
-
-    if (pathname.startsWith('/trips/schedule/')) {
-      const tripId = decodeURIComponent(pathname.substring('/trips/schedule/'.length));
-      if (!tripId) throw new Error('Brak ID kursu');
-      if (req.method === 'GET') return await handleGetScheduleTripById(req, res, tripId);
-      if (req.method === 'PUT') return await handleUpdateScheduleTrip(req, res, tripId);
-      if (req.method === 'DELETE') return await handleDeleteScheduleTrip(req, res, tripId);
-      throw new Error('Metoda nieobsługiwana dla /trips/schedule/:id');
-    }
-
-    if (pathname === '/schedules/route' || pathname === '/schedules/by-route') {
-      const routeId = requiredString(firstParam(query.route_id) || firstParam(query.id), 'route_id');
-      if (req.method === 'GET') return await handleGetScheduleByRoute(req, res, routeId);
-      throw new Error('Metoda nieobsługiwana dla /schedules/route');
-    }
-
-    if (pathname === '/schedules/by-line') {
-      if (req.method === 'GET') return await handleGetScheduleByLineAndDirection(req, res, query);
-      throw new Error('Metoda nieobsługiwana dla /schedules/by-line');
     }
 
     if (pathname === '/holidays') {
@@ -1987,7 +1392,5 @@ async function routeRequest(req, res) {
 
 module.exports = {
   routeRequest,
-  initScheduleSchema,
-  buildFullSchedule,
-  computeStopTimes
+  initScheduleSchema
 };

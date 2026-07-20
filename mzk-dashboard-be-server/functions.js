@@ -13,7 +13,6 @@ const sqlite = require('./sqlite');
 const {
   db,
   dbState,
-  DAY_TYPES,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
   FRAME_HISTORY_LIMIT_IN_DB,
@@ -352,154 +351,65 @@ function stopPublicView(stop, distanceMeters, plannedTime) {
   };
 }
 
-function normalizeScheduleSequence(sequence, dayType) {
-  if (!Array.isArray(sequence)) {
-    throw new Error(`Sekwencja przystanków dla ${dayType} musi być tablicą`);
-  }
+const DAY_TYPE_TO_SERVICE_DAY = { weekday: 'WEEKDAY', weekend: 'WEEKEND', holiday: 'HOLIDAY' };
 
-  const result = [];
+function buildScheduleForTracking(scheduleRow, dayType) {
+  const meta = jsonParse(scheduleRow.metadata, {});
+  const dayTypeKey = String(dayType || '').toLowerCase();
+  const serviceDayType = DAY_TYPE_TO_SERVICE_DAY[dayTypeKey];
 
-  for (let index = 0; index < sequence.length; index += 1) {
-    const entry = sequence[index];
-    const stopId = requiredString(firstDefined(entry.stop_id, entry.id), `${dayType}[${index}].stop_id`);
-    const stop = findStopById(stopId);
+  const sides = db.connection.prepare('SELECT id FROM schedule_sides WHERE schedule_id = ?').all(scheduleRow.id);
+  let stopsSequence = [];
 
-    if (!stop) {
-      throw new Error(`Nie znaleziono przystanku stop_id=${stopId} dla ${dayType}[${index}]`);
-    }
+  if (sides.length && serviceDayType) {
+    const placeholders = sides.map(() => '?').join(',');
+    const rows = db.connection.prepare(`
+      SELECT ss.stop_id, ss.time, ss.sequence_order, s.name AS stop_name,
+             s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
+      FROM schedule_stops ss
+      JOIN stops s ON s.id = ss.stop_id
+      WHERE ss.side_id IN (${placeholders}) AND ss.day_type = ?
+      ORDER BY ss.side_id, ss.sequence_order
+    `).all(...sides.map(s => s.id), serviceDayType);
 
-    result.push({
-      stop_id: getStopId(stop),
-      planned_time: normalizeTimeToHHMMSS(entry.planned_time),
-      sequence_index: index,
-      stop_name: stop.name,
-      stop_number: stop.number || '',
-      latitude: stop.latitude,
-      longitude: stop.longitude,
-      admin_zone: stop.admin_zone || stop.zone || 'nieokreślona',
-      zone: stop.zone || stop.admin_zone || 'nieokreślona',
-      zone_type: stop.zone_type || 'nieokreślony'
+    stopsSequence = rows.map(row => {
+      const stopMetadata = jsonParse(row.stop_metadata, {});
+      return {
+        stop_id: row.stop_id,
+        planned_time: row.time,
+        sequence_index: row.sequence_order,
+        stop_name: row.stop_name,
+        stop_number: stopMetadata.number || '',
+        latitude: row.latitude,
+        longitude: row.longitude,
+        admin_zone: row.zone || stopMetadata.admin_zone || 'nieokreślona',
+        zone: row.zone || 'nieokreślona',
+        zone_type: stopMetadata.zone_type || 'nieokreślony'
+      };
     });
   }
 
-  return result;
-}
-
-function normalizeSchedulePayload(input, forcedScheduleId) {
-  const pcName = requiredString(
-    firstDefined(input.pcName, input.pc_name, input.vehicle_pc_name, input.vehicle_id, input.bus, input.bus_id),
-    'pcName'
-  );
-
-  const lineId = requiredString(
-    firstDefined(input.line_id, input.lineId, input.line, input.line_number),
-    'line_id'
-  );
-
-  const dayTypeInput = input.day_types || input.dayTypes || input.schedules || {};
-  const now = new Date().toISOString();
-
-  const dayTypes = {};
-
-  for (const dayType of DAY_TYPES) {
-    const rawDay = dayTypeInput[dayType];
-    let rawSequence;
-
-    if (Array.isArray(rawDay)) {
-      rawSequence = rawDay;
-    } else if (rawDay && typeof rawDay === 'object') {
-      rawSequence = rawDay.stops_sequence || rawDay.stopsSequence || rawDay.stops || [];
-    } else if (Array.isArray(input.stops_sequence) && DAY_TYPES.length === 3) {
-      rawSequence = input.stops_sequence;
-    } else {
-      rawSequence = [];
-    }
-
-    dayTypes[dayType] = {
-      day_type: dayType,
-      stops_sequence: normalizeScheduleSequence(rawSequence, dayType)
-    };
-  }
-
-  const scheduleId = forcedScheduleId || normalizeUuid(input.schedule_id || input.id);
-  const metadata = {
-    schedule_id: scheduleId,
-    pcName,
-    pcId: optionalString(firstDefined(input.pcId, input.pc_id), ''),
-    vehicle_id: pcName,
-    line_number: optionalString(firstDefined(input.line_number, input.lineNumber, input.line), lineId),
-    brigade: optionalString(input.brigade, ''),
-    description: optionalString(input.description, ''),
-    expected_cameras: toFiniteNumber(firstDefined(input.expected_cameras, input.expectedCameras, input.camera_count, input.cameraCount)),
-    active: input.active !== false,
-    created_at: input.created_at || now,
-    updated_at: now
-  };
-
   return {
-    schedule_id: scheduleId,
-    pcName,
-    pcId: metadata.pcId,
-    line_id: lineId,
-    route_name: optionalString(input.route_name, ''),
-    day_types: dayTypes,
-    metadata
-  };
-}
-
-function findScheduleRowsByBaseId(scheduleId) {
-  return db.connection.prepare(`
-    SELECT *
-    FROM schedules
-    WHERE id = ? OR id LIKE ?
-    ORDER BY CASE day_type
-      WHEN 'weekday' THEN 1
-      WHEN 'weekend' THEN 2
-      WHEN 'holiday' THEN 3
-      ELSE 4
-    END
-  `).all(scheduleId, `${scheduleId}:%`);
-}
-
-function scheduleFromRows(rows) {
-  if (!rows || rows.length === 0) return null;
-
-  const first = rows[0];
-  const meta = jsonParse(first.metadata, {});
-  const result = {
-    schedule_id: meta.schedule_id || String(first.id).split(':')[0],
-    id: meta.schedule_id || String(first.id).split(':')[0],
-    pcName: meta.pcName || first.pcName || '',
-    pcId: meta.pcId || first.pcId || '',
-    vehicle_id: meta.vehicle_id || meta.pcName || first.pcName || '',
-    line_id: first.line_id,
-    line_number: meta.line_number || first.line_id,
+    schedule_id: scheduleRow.id,
+    id: scheduleRow.id,
+    pcName: scheduleRow.pcName || '',
+    pcId: scheduleRow.pcId || '',
+    vehicle_id: scheduleRow.pcName || '',
+    line_id: scheduleRow.line_id || null,
+    line_number: scheduleRow.line_id || null,
     brigade: meta.brigade || '',
-    route_name: first.route_name || '',
+    route_name: scheduleRow.name,
     description: meta.description || '',
     expected_cameras: meta.expected_cameras === undefined ? null : meta.expected_cameras,
-    active: first.active !== 0,
-    created_at: meta.created_at || null,
-    updated_at: meta.updated_at || first.updated_at || null,
-    day_types: {}
+    active: scheduleRow.active !== 0,
+    updated_at: scheduleRow.updated_at,
+    day_types: {
+      [dayTypeKey]: {
+        day_type: dayTypeKey,
+        stops_sequence: stopsSequence
+      }
+    }
   };
-
-  for (const dayType of DAY_TYPES) {
-    result.day_types[dayType] = {
-      day_type: dayType,
-      stops_sequence: []
-    };
-  }
-
-  for (const row of rows) {
-    const dayType = row.day_type || 'weekday';
-    result.day_types[dayType] = {
-      day_type: dayType,
-      stops_sequence: jsonParse(row.sequence_json, [])
-    };
-  }
-
-  return result;
 }
 
 function findActiveScheduleForVehicle(pcName, pcId, dayType) {
@@ -509,20 +419,18 @@ function findActiveScheduleForVehicle(pcName, pcId, dayType) {
   const row = db.connection.prepare(`
     SELECT *
     FROM schedules
-    WHERE day_type = ?
-      AND active = 1
+    WHERE active = 1
       AND (
         (? <> '' AND pcName = ?)
         OR (? <> '' AND pcId = ?)
       )
     ORDER BY updated_at DESC, id DESC
     LIMIT 1
-  `).get(dayType, pcNameValue, pcNameValue, pcIdValue, pcIdValue);
+  `).get(pcNameValue, pcNameValue, pcIdValue, pcIdValue);
 
   if (!row) return null;
 
-  const baseId = jsonParse(row.metadata, {}).schedule_id || String(row.id).split(':')[0];
-  return scheduleFromRows(findScheduleRowsByBaseId(baseId));
+  return buildScheduleForTracking(row, dayType);
 }
 
 function getScheduleSequence(schedule, dayType) {
@@ -1395,10 +1303,6 @@ module.exports = {
   findStopById,
   normalizeStop,
   stopPublicView,
-  normalizeScheduleSequence,
-  normalizeSchedulePayload,
-  findScheduleRowsByBaseId,
-  scheduleFromRows,
   findActiveScheduleForVehicle,
   getScheduleSequence,
   enrichSequenceWithStops,

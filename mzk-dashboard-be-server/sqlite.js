@@ -141,10 +141,8 @@ function initSchema(conn) {
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
+      name TEXT,
       line_id TEXT,
-      route_name TEXT,
-      day_type TEXT,
-      sequence_json TEXT,
       metadata TEXT,
       pcName TEXT,
       pcId TEXT,
@@ -240,9 +238,9 @@ function initSchema(conn) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
-    CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON schedules(pcName, pcId, day_type, active, updated_at);
-    CREATE INDEX IF NOT EXISTS idx_schedules_line ON schedules(line_id, day_type);
-    CREATE INDEX IF NOT EXISTS idx_schedules_name ON schedules(route_name);
+    CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON schedules(pcName, pcId, active, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_schedules_line ON schedules(line_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_name ON schedules(name);
     CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
     CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
     CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
