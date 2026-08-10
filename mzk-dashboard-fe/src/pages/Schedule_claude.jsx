@@ -131,6 +131,8 @@ const Schedule = () => {
   const [savingTrip, setSavingTrip] = useState(false);
 
   // ---------- POJAZDY / DYSPOZYTURA ----------
+  // Lista `vehicles` pochodzi wyłącznie z BackendContext (rejestracja automatyczna
+  // po odebraniu ramki IsarsoftData) — nigdy nie jest tworzona ręcznie tutaj.
   const [assignPcName, setAssignPcName] = useState('');
   const [assignDate, setAssignDate] = useState('');
   const [assignDayTypeFilter, setAssignDayTypeFilter] = useState('WEEKDAY');
@@ -225,10 +227,7 @@ const Schedule = () => {
   }, [schedules]);
 
   const tripsForAssignment = useMemo(
-    () =>
-      allTrips
-        .filter((t) => t.day_type === assignDayTypeFilter)
-        .sort((a, b) => a.departure_time.localeCompare(b.departure_time)),
+    () => allTrips.filter((t) => t.day_type === assignDayTypeFilter).sort((a, b) => a.departure_time.localeCompare(b.departure_time)),
     [allTrips, assignDayTypeFilter]
   );
 
@@ -335,19 +334,9 @@ const Schedule = () => {
 
   const handleSaveSideName = async () => {
     if (!selectedSchedule || !selectedSide) return;
-
-    // Sprawdź, czy metoda istnieje w api – jeśli nie, wyświetl czytelny komunikat.
-    if (typeof api.updateScheduleSide !== 'function') {
-      window.alert(
-        'Brak metody updateScheduleSide w BackendContext. ' +
-        'Dodaj endpoint PATCH /api/schedules/:scheduleId/sides/:sideId w backendzie.'
-      );
-      return;
-    }
-
     setSavingSideName(true);
     try {
-      await updateScheduleSide(selectedSchedule.id, selectedSide.id, {
+      await api.updateScheduleSide(selectedSchedule.id, selectedSide.id, {
         name: sideNameDraft.trim() || null,
       });
       await loadSchedules();
@@ -842,8 +831,7 @@ const Schedule = () => {
                   <div className={styles.previewHeader}>
                     <span className={styles.previewTitle}>
                       <ListChecks size={16} />
-                      Kursy: {DIRECTION_LABELS[selectedSide.direction]} ·{' '}
-                      {DAY_TYPES.find((d) => d.key === tripDayType)?.label}
+                      Kursy: {DIRECTION_LABELS[selectedSide.direction]} · {DAY_TYPES.find((d) => d.key === tripDayType)?.label}
                     </span>
                   </div>
                   {tripsForSelectedSide.length === 0 ? (
@@ -1030,8 +1018,7 @@ const Schedule = () => {
                   <label className={styles.label}>Pojazd (pcName)</label>
                   {vehicles.length === 0 ? (
                     <div className={styles.emptyState}>
-                      Brak zarejestrowanych pojazdów w systemie. Pojazdy pojawią się automatycznie po wysłaniu pierwszej
-                      ramki danych (IsarsoftData).
+                      Brak zarejestrowanych pojazdów w systemie. Pojazdy pojawią się automatycznie po wysłaniu pierwszej ramki danych (IsarsoftData).
                     </div>
                   ) : (
                     <div className={styles.selectWrapper}>
@@ -1053,12 +1040,7 @@ const Schedule = () => {
                 </div>
                 <div>
                   <label className={styles.label}>Data (opcjonalnie)</label>
-                  <input
-                    type="date"
-                    className={styles.input}
-                    value={assignDate}
-                    onChange={(e) => setAssignDate(e.target.value)}
-                  />
+                  <input type="date" className={styles.input} value={assignDate} onChange={(e) => setAssignDate(e.target.value)} />
                 </div>
               </div>
 
@@ -1079,9 +1061,7 @@ const Schedule = () => {
               </div>
 
               {tripsForAssignment.length === 0 ? (
-                <div className={styles.emptyState}>
-                  Brak kursów dla wybranego typu dnia. Utwórz je w zakładce „Linie i kursy”.
-                </div>
+                <div className={styles.emptyState}>Brak kursów dla wybranego typu dnia. Utwórz je w zakładce „Linie i kursy”.</div>
               ) : (
                 <div className={styles.stopList} style={{ maxHeight: '20rem', overflowY: 'auto' }}>
                   {tripsForAssignment.map((trip) => {
@@ -1100,9 +1080,7 @@ const Schedule = () => {
                         />
                         <span className={styles.colorDot} style={{ backgroundColor: trip.schedule_color || '#3B82F6' }} />
                         <div className={styles.tripRowMain}>
-                          <span className={styles.tripRowTitle}>
-                            {trip.departure_time} — {tripLabel(trip)}
-                          </span>
+                          <span className={styles.tripRowTitle}>{trip.departure_time} — {tripLabel(trip)}</span>
                           <span className={styles.tripRowSub}>
                             {(trip.stops || []).map((s) => s.stop_name).join(' → ')}
                           </span>
@@ -1144,8 +1122,7 @@ const Schedule = () => {
                 </div>
               ) : !preview || (preview.trips || []).length === 0 ? (
                 <div className={styles.timelineEmpty}>
-                  Brak przypisanych kursów dla tego pojazdu (dzień: {assignDate || todayKey()}). Przypisz kursy powyżej i
-                  kliknij „Podgląd trasy pojazdu”.
+                  Brak przypisanych kursów dla tego pojazdu (dzień: {assignDate || todayKey()}). Przypisz kursy powyżej i kliknij „Podgląd trasy pojazdu”.
                 </div>
               ) : (
                 <div className={styles.timeline}>
@@ -1166,9 +1143,7 @@ const Schedule = () => {
                                 {trip.schedule_name}
                                 {trip.schedule_code ? ` (${trip.schedule_code})` : ''}
                               </span>
-                              <span className={styles.tripRowBadge}>
-                                {DIRECTION_LABELS[trip.side_direction] || trip.side_direction}
-                              </span>
+                              <span className={styles.tripRowBadge}>{DIRECTION_LABELS[trip.side_direction] || trip.side_direction}</span>
                               {trip.block_id && <span className={styles.tripRowBadge}>{trip.block_id}</span>}
                             </div>
                             <div className={styles.timelineTripStops}>
@@ -1196,9 +1171,7 @@ const Schedule = () => {
               <div className={styles.cardHeader}>
                 <div>
                   <h2 className={styles.cardTitle}>Pojazdy</h2>
-                  <p className={styles.cardDescription}>
-                    Pojazdy widoczne w systemie (zgłoszone przez pokładowy komputer).
-                  </p>
+                  <p className={styles.cardDescription}>Pojazdy widoczne w systemie (zgłoszone przez pokładowy komputer).</p>
                 </div>
               </div>
               {vehiclesLoading ? (

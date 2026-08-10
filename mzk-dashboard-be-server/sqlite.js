@@ -139,17 +139,6 @@ function initSchema(conn) {
       metadata TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS schedules (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      line_id TEXT,
-      metadata TEXT,
-      pcName TEXT,
-      pcId TEXT,
-      active INTEGER DEFAULT 1,
-      updated_at TEXT
-    );
-
     CREATE TABLE IF NOT EXISTS vehicles (
       pcName TEXT PRIMARY KEY,
       pcId TEXT,
@@ -158,6 +147,62 @@ function initSchema(conn) {
       first_seen TEXT,
       last_seen TEXT,
       metadata TEXT
+    );
+
+    -- 1. Główna linia/rozkład (np. Linia 10)
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      code TEXT,
+      color TEXT DEFAULT '#3B82F6',
+      isActive INTEGER DEFAULT 1,
+      metadata TEXT DEFAULT '{}'
+    );
+
+    -- 2. Kierunki/Warianty linii (np. "Do: Pętla Zachód", "Do: Dworzec")
+    CREATE TABLE IF NOT EXISTS schedule_sides (
+      id TEXT PRIMARY KEY,
+      schedule_id TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('FROM_START', 'TO_START')),
+      name TEXT,
+      metadata TEXT DEFAULT '{}',
+      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
+      UNIQUE (schedule_id, direction)
+    );
+
+    -- 3. Pojedyncze Kursy (Trips) w ciągu dnia dla danego kierunku
+    CREATE TABLE IF NOT EXISTS schedule_trips (
+      id TEXT PRIMARY KEY,
+      schedule_id TEXT NOT NULL,
+      side_id TEXT NOT NULL,
+      day_type TEXT NOT NULL CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
+      departure_time TEXT NOT NULL,
+      block_id TEXT,
+      metadata TEXT DEFAULT '{}',
+      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
+      FOREIGN KEY (side_id) REFERENCES schedule_sides(id) ON DELETE CASCADE
+    );
+
+    -- 4. Sekwencja przystanków dla KONKRETNEGO KURSU (Trip)
+    CREATE TABLE IF NOT EXISTS schedule_stops (
+      id TEXT PRIMARY KEY,
+      trip_id TEXT NOT NULL,
+      stop_id TEXT NOT NULL,
+      sequence_order INTEGER NOT NULL,
+      time TEXT NOT NULL,
+      metadata TEXT DEFAULT '{}',
+      FOREIGN KEY (trip_id) REFERENCES schedule_trips(id) ON DELETE CASCADE,
+      FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE CASCADE
+    );
+
+    -- 5. Przypisania pojazdów do kursów
+    CREATE TABLE IF NOT EXISTS vehicle_trips (
+      id TEXT PRIMARY KEY,
+      pcName TEXT NOT NULL,
+      trip_id TEXT NOT NULL,
+      date TEXT,
+      FOREIGN KEY (pcName) REFERENCES vehicles(pcName) ON DELETE CASCADE,
+      FOREIGN KEY (trip_id) REFERENCES schedule_trips(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS current_status (
@@ -238,9 +283,16 @@ function initSchema(conn) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
-    CREATE INDEX IF NOT EXISTS idx_schedules_lookup ON schedules(pcName, pcId, active, updated_at);
-    CREATE INDEX IF NOT EXISTS idx_schedules_line ON schedules(line_id);
     CREATE INDEX IF NOT EXISTS idx_schedules_name ON schedules(name);
+    CREATE INDEX IF NOT EXISTS idx_schedules_code ON schedules(code);
+    CREATE INDEX IF NOT EXISTS idx_schedule_sides_schedule_id ON schedule_sides(schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_schedule_trips_side_day ON schedule_trips(side_id, day_type);
+    CREATE INDEX IF NOT EXISTS idx_schedule_trips_schedule ON schedule_trips(schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_schedule_trips_departure ON schedule_trips(departure_time);
+    CREATE INDEX IF NOT EXISTS idx_schedule_stops_trip ON schedule_stops(trip_id, sequence_order);
+    CREATE INDEX IF NOT EXISTS idx_schedule_stops_stop ON schedule_stops(stop_id);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_trips_pcname ON vehicle_trips(pcName, date);
+    CREATE INDEX IF NOT EXISTS idx_vehicle_trips_trip ON vehicle_trips(trip_id, date);
     CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
     CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
     CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
@@ -251,11 +303,6 @@ function initSchema(conn) {
     CREATE INDEX IF NOT EXISTS idx_trips_id ON trips(id);
     CREATE INDEX IF NOT EXISTS idx_trips_quality ON trips(camera_error_detected);
   `);
-
-  ensureColumn(conn, 'schedules', 'pcName', 'TEXT');
-  ensureColumn(conn, 'schedules', 'pcId', 'TEXT');
-  ensureColumn(conn, 'schedules', 'active', 'INTEGER DEFAULT 1');
-  ensureColumn(conn, 'schedules', 'updated_at', 'TEXT');
 
   ensureColumn(conn, 'current_status', 'status', 'TEXT');
   ensureColumn(conn, 'current_status', 'pcId', 'TEXT');

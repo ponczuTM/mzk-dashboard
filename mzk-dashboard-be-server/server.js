@@ -17,7 +17,7 @@ ensureDatabaseReady();
 
 
 // Dopiero teraz endpoints.js może używać db.connection
-const { routeRequest, initScheduleSchema } = require('./endpoints');
+const { routeRequest } = require('./endpoints');
 
 let server = null;
 

@@ -84,6 +84,7 @@ function createApi(baseUrl) {
   const get = (path, query) => request('GET', path, { query });
   const post = (path, body) => request('POST', path, { body });
   const put = (path, body) => request('PUT', path, { body });
+  const patch = (path, body) => request('PATCH', path, { body });
   const del = (path, query) => request('DELETE', path, { query });
 
   return {
@@ -103,33 +104,28 @@ function createApi(baseUrl) {
       put(`/stops/${encodeURIComponent(id)}`, payload),
     deleteStop: (id) => del(`/stops/${encodeURIComponent(id)}`),
 
-    // --- ROZKŁADY (schedules) ---
-    // Jeden rozkład = jedna nazwa + dwie strony jazdy (FROM_START / TO_START),
-    // tworzone automatycznie przy POST /schedules. Dla każdej strony i typu dnia
-    // (WEEKDAY/WEEKEND/HOLIDAY) zapisana jest uporządkowana lista przystanków
-    // z bezwzględną godziną HH:MM.
-    getSchedules: (query) => get('/schedules', query),
-    getSchedule: (id) => get(`/schedules/${encodeURIComponent(id)}`),
-    createSchedule: (payload) => post('/schedules', payload),
+    // --- LINIE (schedules) ---
+    // Linia (Schedule) -> Wariant Kierunku (ScheduleSide, FROM_START/TO_START,
+    // tworzone automatycznie przy POST) -> Kurs o konkretnej godzinie
+    // (ScheduleTrip) -> Sekwencja przystanków z godzinami (ScheduleStop).
+    getSchedules: (query) => get('/api/schedules', query),
+    getSchedule: (id) => get(`/api/schedules/${encodeURIComponent(id)}`),
+    createSchedule: (payload) => post('/api/schedules', payload),
     updateSchedule: (id, payload) =>
-      put(`/schedules/${encodeURIComponent(id)}`, payload),
-    deleteSchedule: (id) => del(`/schedules/${encodeURIComponent(id)}`),
+      put(`/api/schedules/${encodeURIComponent(id)}`, payload),
+    deleteSchedule: (id) => del(`/api/schedules/${encodeURIComponent(id)}`),
 
-    getScheduleSideStops: (scheduleId, sideId, dayType) =>
-      get(
-        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/stops`,
-        { day_type: dayType }
-      ),
-    setScheduleSideStops: (scheduleId, sideId, dayType, stops) =>
-      put(
-        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/stops`,
-        { day_type: dayType, stops }
-      ),
-    copyScheduleSideStops: (scheduleId, sideId, payload) =>
-      post(
-        `/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}/copy`,
+    // Nazwa docelowa/opis wariantu kierunku (np. "Do: Pętla Zachód")
+    updateScheduleSide: (scheduleId, sideId, payload) =>
+      patch(
+        `/api/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}`,
         payload
       ),
+
+    // --- KURSY (schedule_trips) ---
+    createTrip: (scheduleId, tripData) =>
+      post(`/api/schedules/${encodeURIComponent(scheduleId)}/trips`, tripData),
+    deleteTrip: (tripId) => del(`/api/trips/${encodeURIComponent(tripId)}`),
 
     // --- Typy dni ---
     getServiceDays: () => get('/service-days'),
@@ -142,8 +138,16 @@ function createApi(baseUrl) {
 
     // --- Pojazdy ---
     getVehicles: () => get('/vehicles'),
-    updateVehicle: (pcName, payload) =>
-      put(`/vehicles/${encodeURIComponent(pcName)}`, payload),
+
+    // --- Dyspozytura / przypisania pojazdów do kursów ---
+    assignVehicleTrips: (pcName, tripIds, date) =>
+      post('/api/vehicles/assign-trips', {
+        pcName,
+        trip_ids: tripIds,
+        date: date || null,
+      }),
+    getVehicleSchedule: (pcName, query) =>
+      get(`/api/vehicles/${encodeURIComponent(pcName)}/schedule`, query),
 
     // --- Zdarzenia trackingowe / raporty ---
     getTrips: (query) => get('/trips', query),
@@ -169,20 +173,161 @@ function createApi(baseUrl) {
 
 export const BackendProvider = ({ children, baseUrl }) => {
   const [serverUrl, setServerUrl] = useState(baseUrl || DEFAULT_BASE_URL);
-
   const api = useMemo(() => createApi(serverUrl), [serverUrl]);
 
   const updateServerUrl = useCallback((url) => {
     setServerUrl(url || DEFAULT_BASE_URL);
   }, []);
 
+  // ---------- LINIE / KURSY / PRZYPISANIA POJAZDÓW ----------
+  const [schedules, setSchedules] = useState([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(false);
+  const [trips, setTrips] = useState([]);
+  const [vehicleAssignments, setVehicleAssignments] = useState({});
+
+  // ---------- POJAZDY ----------
+  // Pojazdy (pcName) rejestrują się automatycznie w bazie po odebraniu ramki
+  // IsarsoftData — nigdy nie są tworzone ręcznie przez użytkownika.
+  const [vehicles, setVehicles] = useState([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(false);
+
+  const fetchVehicles = useCallback(async () => {
+    setVehiclesLoading(true);
+    try {
+      const data = await api.getVehicles();
+      const next = data.vehicles || [];
+      setVehicles(next);
+      return next;
+    } finally {
+      setVehiclesLoading(false);
+    }
+  }, [api]);
+
+  const fetchSchedules = useCallback(
+    async (query) => {
+      setSchedulesLoading(true);
+      try {
+        const data = await api.getSchedules(query);
+        const next = data.schedules || [];
+        setSchedules(next);
+        return next;
+      } finally {
+        setSchedulesLoading(false);
+      }
+    },
+    [api]
+  );
+
+  const createSchedule = useCallback(
+    async (data) => {
+      const result = await api.createSchedule(data);
+      await fetchSchedules();
+      return result.schedule;
+    },
+    [api, fetchSchedules]
+  );
+
+  const deleteSchedule = useCallback(
+    async (id) => {
+      const result = await api.deleteSchedule(id);
+      setSchedules((prev) => prev.filter((s) => s.id !== id));
+      return result;
+    },
+    [api]
+  );
+
+  // ---------- NOWA METODA: aktualizacja nazwy wariantu kierunku ----------
+  const updateScheduleSide = useCallback(
+    async (scheduleId, sideId, payload) => {
+      const result = await api.updateScheduleSide(scheduleId, sideId, payload);
+      // Po pomyślnej aktualizacji odświeżamy całą listę linii,
+      // aby zobaczyć zmiany w interfejsie.
+      await fetchSchedules();
+      return result;
+    },
+    [api, fetchSchedules]
+  );
+
+  const createTrip = useCallback(
+    async (scheduleId, tripData) => {
+      const result = await api.createTrip(scheduleId, tripData);
+      setTrips((prev) => [...prev, result.trip]);
+      await fetchSchedules();
+      return result.trip;
+    },
+    [api, fetchSchedules]
+  );
+
+  const deleteTrip = useCallback(
+    async (tripId) => {
+      const result = await api.deleteTrip(tripId);
+      setTrips((prev) => prev.filter((t) => t.id !== tripId));
+      await fetchSchedules();
+      return result;
+    },
+    [api, fetchSchedules]
+  );
+
+  const assignVehicleToTrips = useCallback(
+    async (pcName, tripIds, date) => {
+      const result = await api.assignVehicleTrips(pcName, tripIds, date);
+      return result;
+    },
+    [api]
+  );
+
+  const fetchVehicleSchedule = useCallback(
+    async (pcName, query) => {
+      const result = await api.getVehicleSchedule(pcName, query);
+      setVehicleAssignments((prev) => ({ ...prev, [pcName]: result }));
+      return result;
+    },
+    [api]
+  );
+
   const value = useMemo(
     () => ({
       api,
       serverUrl,
       setServerUrl: updateServerUrl,
+
+      schedules,
+      schedulesLoading,
+      trips,
+      vehicleAssignments,
+      vehicles,
+      vehiclesLoading,
+
+      fetchSchedules,
+      createSchedule,
+      deleteSchedule,
+      updateScheduleSide,   // ← nowa metoda kontekstowa
+      createTrip,
+      deleteTrip,
+      assignVehicleToTrips,
+      fetchVehicleSchedule,
+      fetchVehicles,
     }),
-    [api, serverUrl, updateServerUrl]
+    [
+      api,
+      serverUrl,
+      updateServerUrl,
+      schedules,
+      schedulesLoading,
+      trips,
+      vehicleAssignments,
+      vehicles,
+      vehiclesLoading,
+      fetchSchedules,
+      createSchedule,
+      deleteSchedule,
+      updateScheduleSide,
+      createTrip,
+      deleteTrip,
+      assignVehicleToTrips,
+      fetchVehicleSchedule,
+      fetchVehicles,
+    ]
   );
 
   return (

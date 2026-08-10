@@ -11,7 +11,8 @@ const {
   dbState,
   DB_FILE,
   PORT,
-  pruneHistory
+  pruneHistory,
+  formatDateKey
 } = sqlite;
 
 const {
@@ -33,7 +34,9 @@ const {
   tripFromRow,
   reportResponse,
   analyzeVehiclePayload,
-  logReceivedDataConsole
+  logReceivedDataConsole,
+  determineDayType,
+  timeToSeconds
 } = funcs;
 
 function generateId() {
@@ -61,64 +64,19 @@ function firstParam(value) {
 const DAY_TYPES_UPPER = ['WEEKDAY', 'WEEKEND', 'HOLIDAY'];
 const SCHEDULE_DIRECTIONS = ['FROM_START', 'TO_START'];
 
-function initScheduleSchema() {
-  const conn = db.connection;
-
-  if (!conn) {
-    throw new Error('Nie można zainicjalizować schematu: db.connection jest null.');
-  }
-
-  // Sprzątamy tabele z poprzedniego modelu (linia -> trasa -> przystanki z minutami dojazdu),
-  // zastąpionego przez schedules -> schedule_sides -> schedule_stops (godziny bezwzględne HH:MM).
-  conn.exec(`
-    DROP TABLE IF EXISTS schedule_trips;
-    DROP TABLE IF EXISTS route_stops;
-    DROP TABLE IF EXISTS routes;
-    DROP TABLE IF EXISTS service_days;
-    DROP TABLE IF EXISTS lines;
-  `);
-
-  conn.exec(`
-    CREATE TABLE IF NOT EXISTS schedule_sides (
-      id TEXT PRIMARY KEY,
-      schedule_id TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('FROM_START', 'TO_START')),
-      metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
-      UNIQUE (schedule_id, direction)
-    );
-
-    CREATE TABLE IF NOT EXISTS schedule_stops (
-      id TEXT PRIMARY KEY,
-      side_id TEXT NOT NULL,
-      day_type TEXT NOT NULL CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
-      stop_id TEXT NOT NULL,
-      sequence_order INTEGER NOT NULL,
-      time TEXT NOT NULL,
-      metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (side_id) REFERENCES schedule_sides(id) ON DELETE CASCADE,
-      FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_schedule_sides_schedule_id ON schedule_sides(schedule_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_stops_side_day ON schedule_stops(side_id, day_type);
-    CREATE INDEX IF NOT EXISTS idx_schedule_stops_stop_id ON schedule_stops(stop_id);
-  `);
-}
-
-initScheduleSchema();
+// --------------------- ROZKŁADY: Linia -> Wariant Kierunku -> Kurs -> Przystanki ---------------------
 
 function scheduleFromRow(row) {
   if (!row) return null;
+  const isActive = row.isActive !== 0;
   return {
     id: row.id,
     name: row.name,
-    line_id: row.line_id || null,
-    metadata: jsonParse(row.metadata, {}),
-    pcName: row.pcName || null,
-    pcId: row.pcId || null,
-    active: row.active !== 0,
-    updated_at: row.updated_at
+    code: row.code || null,
+    color: row.color || '#3B82F6',
+    isActive,
+    active: isActive, // alias zgodności wstecznej dla starszych widoków (np. Dashboard)
+    metadata: jsonParse(row.metadata, {})
   };
 }
 
@@ -128,6 +86,20 @@ function scheduleSideFromRow(row) {
     id: row.id,
     schedule_id: row.schedule_id,
     direction: row.direction,
+    name: row.name || null,
+    metadata: jsonParse(row.metadata, {})
+  };
+}
+
+function scheduleTripFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    schedule_id: row.schedule_id,
+    side_id: row.side_id,
+    day_type: row.day_type,
+    departure_time: row.departure_time,
+    block_id: row.block_id || null,
     metadata: jsonParse(row.metadata, {})
   };
 }
@@ -136,12 +108,15 @@ function scheduleStopFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
-    side_id: row.side_id,
-    day_type: row.day_type,
+    trip_id: row.trip_id,
     stop_id: row.stop_id,
     sequence_order: row.sequence_order,
     time: row.time,
-    metadata: jsonParse(row.metadata, {})
+    metadata: jsonParse(row.metadata, {}),
+    stop_name: row.stop_name,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    zone: row.zone
   };
 }
 
@@ -153,76 +128,113 @@ function findScheduleSideById(id) {
   return scheduleSideFromRow(db.connection.prepare('SELECT * FROM schedule_sides WHERE id = ?').get(id));
 }
 
-function getScheduleSides(scheduleId) {
-  return db.connection.prepare('SELECT * FROM schedule_sides WHERE schedule_id = ? ORDER BY direction').all(scheduleId).map(scheduleSideFromRow);
+function findScheduleTripById(id) {
+  return scheduleTripFromRow(db.connection.prepare('SELECT * FROM schedule_trips WHERE id = ?').get(id));
 }
 
-function getScheduleSideStopCounts(sideId) {
-  const rows = db.connection.prepare('SELECT day_type, COUNT(*) AS count FROM schedule_stops WHERE side_id = ? GROUP BY day_type').all(sideId);
-  const result = { WEEKDAY: 0, WEEKEND: 0, HOLIDAY: 0 };
-  for (const row of rows) result[row.day_type] = Number(row.count || 0);
-  return result;
-}
-
-function getScheduleStopsWithDetails(sideId, dayType) {
+function getTripStops(tripId) {
   return db.connection.prepare(`
     SELECT ss.*, s.name AS stop_name, s.latitude, s.longitude, s.zone
     FROM schedule_stops ss
     JOIN stops s ON s.id = ss.stop_id
-    WHERE ss.side_id = ? AND ss.day_type = ?
+    WHERE ss.trip_id = ?
     ORDER BY ss.sequence_order
-  `).all(sideId, dayType).map(row => ({
-    ...scheduleStopFromRow(row),
-    stop_name: row.stop_name,
-    latitude: row.latitude,
-    longitude: row.longitude,
-    zone: row.zone
-  }));
+  `).all(tripId).map(scheduleStopFromRow);
 }
 
-function buildScheduleWithSides(scheduleId) {
-  const schedule = findScheduleById(scheduleId);
-  if (!schedule) return null;
-  const sides = getScheduleSides(scheduleId).map(side => ({
-    ...side,
-    stop_counts: getScheduleSideStopCounts(side.id)
-  }));
-  return { ...schedule, sides };
+// Buduje pełne drzewo Linia -> Warianty -> Kursy -> Przystanki dla wskazanych rozkładów
+// (albo wszystkich, gdy scheduleIds === null), w stałej liczbie zapytań niezależnie od N.
+function buildScheduleTrees(scheduleIds) {
+  const conn = db.connection;
+
+  const scheduleRows = scheduleIds
+    ? (scheduleIds.length ? conn.prepare(`SELECT * FROM schedules WHERE id IN (${scheduleIds.map(() => '?').join(',')}) ORDER BY name COLLATE NOCASE`).all(...scheduleIds) : [])
+    : conn.prepare('SELECT * FROM schedules ORDER BY name COLLATE NOCASE').all();
+
+  if (scheduleRows.length === 0) return [];
+
+  const ids = scheduleRows.map(r => r.id);
+  const idPlaceholders = ids.map(() => '?').join(',');
+
+  const sideRows = conn.prepare(`SELECT * FROM schedule_sides WHERE schedule_id IN (${idPlaceholders}) ORDER BY direction`).all(...ids);
+  const tripRows = conn.prepare(`SELECT * FROM schedule_trips WHERE schedule_id IN (${idPlaceholders}) ORDER BY day_type, departure_time`).all(...ids);
+
+  const tripIds = tripRows.map(t => t.id);
+  const stopRows = tripIds.length
+    ? conn.prepare(`
+        SELECT ss.*, s.name AS stop_name, s.latitude, s.longitude, s.zone
+        FROM schedule_stops ss
+        JOIN stops s ON s.id = ss.stop_id
+        WHERE ss.trip_id IN (${tripIds.map(() => '?').join(',')})
+        ORDER BY ss.trip_id, ss.sequence_order
+      `).all(...tripIds)
+    : [];
+
+  const stopsByTrip = new Map();
+  for (const row of stopRows) {
+    if (!stopsByTrip.has(row.trip_id)) stopsByTrip.set(row.trip_id, []);
+    stopsByTrip.get(row.trip_id).push(scheduleStopFromRow(row));
+  }
+
+  const tripsBySide = new Map();
+  for (const row of tripRows) {
+    const trip = scheduleTripFromRow(row);
+    trip.stops = stopsByTrip.get(trip.id) || [];
+    if (!tripsBySide.has(trip.side_id)) tripsBySide.set(trip.side_id, []);
+    tripsBySide.get(trip.side_id).push(trip);
+  }
+
+  const sidesBySchedule = new Map();
+  for (const row of sideRows) {
+    const side = scheduleSideFromRow(row);
+    side.trips = tripsBySide.get(side.id) || [];
+    if (!sidesBySchedule.has(side.schedule_id)) sidesBySchedule.set(side.schedule_id, []);
+    sidesBySchedule.get(side.schedule_id).push(side);
+  }
+
+  return scheduleRows.map(row => {
+    const schedule = scheduleFromRow(row);
+    schedule.sides = sidesBySchedule.get(schedule.id) || [];
+    return schedule;
+  });
+}
+
+function buildScheduleTree(scheduleId) {
+  const [schedule] = buildScheduleTrees([scheduleId]);
+  return schedule || null;
 }
 
 function normalizeSchedulePayload(body, existing) {
   const name = requiredString(body.name, 'name');
   return {
     name,
-    line_id: optionalString(firstDefined(body.line_id, body.lineId), existing ? existing.line_id || '' : ''),
+    code: optionalString(body.code, existing ? existing.code || '' : '') || null,
+    color: optionalString(body.color, existing ? existing.color : '#3B82F6') || '#3B82F6',
+    isActive: body.isActive !== undefined ? Boolean(body.isActive) : (body.active !== undefined ? Boolean(body.active) : (existing ? existing.isActive : true)),
     metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : (existing ? existing.metadata : {})
   };
 }
 
-function normalizeScheduleStopsPayload(sideId, dayType, body) {
-  const stops = body.stops;
-  if (!Array.isArray(stops)) {
-    throw new Error('stops musi być tablicą');
+function normalizeTripStopsPayload(tripId, stops) {
+  if (!Array.isArray(stops) || stops.length === 0) {
+    throw new Error('stops musi być niepustą tablicą');
   }
-  const result = [];
-  for (let i = 0; i < stops.length; i++) {
-    const item = stops[i] || {};
-    const stopId = requiredString(firstDefined(item.stop_id, item.id), `stops[${i}].stop_id`);
+  return stops.map((item, i) => {
+    const entry = item || {};
+    const stopId = requiredString(firstDefined(entry.stop_id, entry.id), `stops[${i}].stop_id`);
     if (!findStopById(stopId)) {
       throw new Error(`Nie znaleziono przystanku o id: ${stopId}`);
     }
-    const time = normalizeTimeHHMM(firstDefined(item.time, item.departure_time, item.arrival_time));
-    result.push({
-      id: optionalString(item.id, '') || generateId(),
-      side_id: sideId,
-      day_type: dayType,
+    const time = normalizeTimeHHMM(requiredString(firstDefined(entry.time, entry.arrival_time), `stops[${i}].time`));
+    return {
+      id: generateId(),
+      trip_id: tripId,
       stop_id: stopId,
       sequence_order: i + 1,
       time,
-      metadata: item.metadata && typeof item.metadata === 'object' ? item.metadata : {}
-    });
-  }
-  return result;
+      metadata: entry.metadata && typeof entry.metadata === 'object' ? entry.metadata : {}
+    };
+  });
 }
 
 async function handleApiIp(req, res) {
@@ -421,23 +433,23 @@ async function handleCreateSchedule(req, res) {
   const body = await readJsonBody(req);
   const data = normalizeSchedulePayload(body);
   const id = optionalString(body.id, '') || generateId();
-  const now = new Date().toISOString();
 
   const tx = db.connection.transaction(() => {
     db.connection.prepare(`
-      INSERT INTO schedules(id, name, line_id, metadata, active, updated_at)
-      VALUES(@id, @name, @line_id, @metadata, 1, @updated_at)
+      INSERT INTO schedules(id, name, code, color, isActive, metadata)
+      VALUES(@id, @name, @code, @color, @isActive, @metadata)
     `).run({
       id,
       name: data.name,
-      line_id: data.line_id || null,
-      metadata: jsonStringify(data.metadata),
-      updated_at: now
+      code: data.code,
+      color: data.color,
+      isActive: data.isActive ? 1 : 0,
+      metadata: jsonStringify(data.metadata)
     });
 
     const insertSide = db.connection.prepare(`
-      INSERT INTO schedule_sides(id, schedule_id, direction, metadata)
-      VALUES(?, ?, ?, '{}')
+      INSERT INTO schedule_sides(id, schedule_id, direction, name, metadata)
+      VALUES(?, ?, ?, NULL, '{}')
     `);
     for (const direction of SCHEDULE_DIRECTIONS) {
       insertSide.run(generateId(), id, direction);
@@ -448,8 +460,8 @@ async function handleCreateSchedule(req, res) {
 
   sendJson(res, 201, {
     ok: true,
-    message: 'Rozkład utworzony (z dwoma stronami: tam i powrót)',
-    schedule: buildScheduleWithSides(id)
+    message: 'Linia utworzona (z dwoma wariantami kierunku: FROM_START i TO_START)',
+    schedule: buildScheduleTree(id)
   });
 }
 
@@ -458,25 +470,25 @@ async function handleGetSchedules(req, res, query) {
   const params = {};
 
   const id = optionalString(firstParam(query.id), '');
-  const lineId = optionalString(firstParam(query.line_id), '');
   const q = optionalString(firstParam(query.q) || firstParam(query.search), '');
+  const activeParam = firstDefined(firstParam(query.active), firstParam(query.isActive));
 
   if (id) {
     clauses.push('id = @id');
     params.id = id;
   }
-  if (lineId) {
-    clauses.push('line_id = @line_id');
-    params.line_id = lineId;
-  }
   if (q) {
     clauses.push('name LIKE @q');
     params.q = `%${q}%`;
   }
+  if (activeParam !== undefined) {
+    clauses.push('isActive = @isActive');
+    params.isActive = (activeParam === 'true' || activeParam === '1') ? 1 : 0;
+  }
 
   const whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const rows = db.connection.prepare(`SELECT * FROM schedules ${whereSql} ORDER BY name COLLATE NOCASE, id`).all(params);
-  const schedules = rows.map(row => buildScheduleWithSides(row.id));
+  const idRows = db.connection.prepare(`SELECT id FROM schedules ${whereSql} ORDER BY name COLLATE NOCASE`).all(params);
+  const schedules = buildScheduleTrees(idRows.map(row => row.id));
 
   sendJson(res, 200, {
     ok: true,
@@ -486,144 +498,284 @@ async function handleGetSchedules(req, res, query) {
 }
 
 async function handleGetScheduleById(req, res, scheduleId) {
-  const schedule = buildScheduleWithSides(scheduleId);
-  if (!schedule) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  const schedule = buildScheduleTree(scheduleId);
+  if (!schedule) throw new Error(`Nie znaleziono linii o id: ${scheduleId}`);
   sendJson(res, 200, { ok: true, schedule });
 }
 
 async function handleUpdateSchedule(req, res, scheduleId) {
   const existing = findScheduleById(scheduleId);
-  if (!existing) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
+  if (!existing) throw new Error(`Nie znaleziono linii o id: ${scheduleId}`);
 
   const body = await readJsonBody(req);
   const data = normalizeSchedulePayload(body, existing);
 
   db.connection.prepare(`
     UPDATE schedules
-    SET name = @name, line_id = @line_id, metadata = @metadata, updated_at = @updated_at
+    SET name = @name, code = @code, color = @color, isActive = @isActive, metadata = @metadata
     WHERE id = @id
   `).run({
     id: scheduleId,
     name: data.name,
-    line_id: data.line_id || null,
-    metadata: jsonStringify(data.metadata),
-    updated_at: new Date().toISOString()
+    code: data.code,
+    color: data.color,
+    isActive: data.isActive ? 1 : 0,
+    metadata: jsonStringify(data.metadata)
   });
 
   sendJson(res, 200, {
     ok: true,
-    message: 'Rozkład zaktualizowany',
-    schedule: buildScheduleWithSides(scheduleId)
+    message: 'Linia zaktualizowana',
+    schedule: buildScheduleTree(scheduleId)
   });
 }
 
 async function handleDeleteSchedule(req, res, scheduleId) {
   const info = db.connection.prepare('DELETE FROM schedules WHERE id = ?').run(scheduleId);
-  if (info.changes === 0) throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
-  sendJson(res, 200, { ok: true, message: 'Rozkład usunięty (kaskadowo usunięto strony i godziny przystanków)', deletedCount: info.changes });
-}
-
-async function handleGetScheduleSideStops(req, res, scheduleId, sideId, query) {
-  const side = findScheduleSideById(sideId);
-  if (!side || side.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
-
-  const dayType = optionalString(firstParam(query.day_type), 'WEEKDAY').toUpperCase();
-  if (!DAY_TYPES_UPPER.includes(dayType)) throw new Error(`Nieprawidłowy typ dnia: ${dayType}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
-
-  const stops = getScheduleStopsWithDetails(sideId, dayType);
-
+  if (info.changes === 0) throw new Error(`Nie znaleziono linii o id: ${scheduleId}`);
   sendJson(res, 200, {
     ok: true,
-    side_id: sideId,
-    day_type: dayType,
-    count: stops.length,
-    stops
+    message: 'Linia usunięta (kaskadowo usunięto warianty kierunku, kursy, przystanki kursów i przypisania pojazdów)',
+    deletedCount: info.changes
   });
 }
 
-async function handleSetScheduleSideStops(req, res, scheduleId, sideId, query) {
+async function handleUpdateScheduleSide(req, res, scheduleId, sideId) {
   const side = findScheduleSideById(sideId);
-  if (!side || side.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
+  if (!side || side.schedule_id !== scheduleId) throw new Error(`Nie znaleziono wariantu kierunku o id: ${sideId}`);
 
   const body = await readJsonBody(req);
-  const dayType = optionalString(firstDefined(firstParam(query.day_type), body.day_type), 'WEEKDAY').toUpperCase();
-  if (!DAY_TYPES_UPPER.includes(dayType)) throw new Error(`Nieprawidłowy typ dnia: ${dayType}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
+  const name = body.name !== undefined ? (optionalString(body.name, '') || null) : side.name;
+  const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : side.metadata;
 
-  const stops = normalizeScheduleStopsPayload(sideId, dayType, body);
+  db.connection.prepare(`
+    UPDATE schedule_sides SET name = @name, metadata = @metadata WHERE id = @id
+  `).run({ id: sideId, name, metadata: jsonStringify(metadata) });
+
+  sendJson(res, 200, {
+    ok: true,
+    message: 'Wariant kierunku zaktualizowany',
+    side: scheduleSideFromRow(db.connection.prepare('SELECT * FROM schedule_sides WHERE id = ?').get(sideId))
+  });
+}
+
+async function handleCreateTrip(req, res, scheduleId) {
+  const schedule = findScheduleById(scheduleId);
+  if (!schedule) throw new Error(`Nie znaleziono linii o id: ${scheduleId}`);
+
+  const body = await readJsonBody(req);
+  const sideId = requiredString(body.side_id, 'side_id');
+  const side = findScheduleSideById(sideId);
+  if (!side || side.schedule_id !== scheduleId) {
+    throw new Error(`Wariant kierunku o id: ${sideId} nie należy do linii ${scheduleId}`);
+  }
+
+  const dayType = requiredString(body.day_type, 'day_type').toUpperCase();
+  if (!DAY_TYPES_UPPER.includes(dayType)) {
+    throw new Error(`Nieprawidłowy typ dnia: ${dayType}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
+  }
+
+  const departureTime = normalizeTimeHHMM(requiredString(body.departure_time, 'departure_time'));
+  const blockId = optionalString(firstDefined(body.block_id, body.brigade), '') || null;
+  const metadata = body.metadata && typeof body.metadata === 'object' ? body.metadata : {};
+
+  const tripId = optionalString(body.id, '') || generateId();
+  const stops = normalizeTripStopsPayload(tripId, body.stops);
 
   const tx = db.connection.transaction(() => {
-    db.connection.prepare('DELETE FROM schedule_stops WHERE side_id = ? AND day_type = ?').run(sideId, dayType);
-    const insert = db.connection.prepare(`
-      INSERT INTO schedule_stops(id, side_id, day_type, stop_id, sequence_order, time, metadata)
-      VALUES(@id, @side_id, @day_type, @stop_id, @sequence_order, @time, @metadata)
+    db.connection.prepare(`
+      INSERT INTO schedule_trips(id, schedule_id, side_id, day_type, departure_time, block_id, metadata)
+      VALUES(@id, @schedule_id, @side_id, @day_type, @departure_time, @block_id, @metadata)
+    `).run({
+      id: tripId,
+      schedule_id: scheduleId,
+      side_id: sideId,
+      day_type: dayType,
+      departure_time: departureTime,
+      block_id: blockId,
+      metadata: jsonStringify(metadata)
+    });
+
+    const insertStop = db.connection.prepare(`
+      INSERT INTO schedule_stops(id, trip_id, stop_id, sequence_order, time, metadata)
+      VALUES(@id, @trip_id, @stop_id, @sequence_order, @time, @metadata)
     `);
-    for (const st of stops) {
-      insert.run({ ...st, metadata: jsonStringify(st.metadata) });
+    for (const stop of stops) {
+      insertStop.run({ ...stop, metadata: jsonStringify(stop.metadata) });
     }
   });
 
   tx();
 
-  sendJson(res, 200, {
+  const trip = findScheduleTripById(tripId);
+  trip.stops = getTripStops(tripId);
+
+  sendJson(res, 201, {
     ok: true,
-    message: `Zapisano ${stops.length} przystanków (${dayType})`,
-    side_id: sideId,
-    day_type: dayType,
-    stops: getScheduleStopsWithDetails(sideId, dayType)
+    message: `Kurs utworzony z ${stops.length} przystankami`,
+    trip
   });
 }
 
-async function handleCopyScheduleSideStops(req, res, scheduleId, sideId) {
-  const targetSide = findScheduleSideById(sideId);
-  if (!targetSide || targetSide.schedule_id !== scheduleId) throw new Error(`Nie znaleziono strony rozkładu o id: ${sideId}`);
+async function handleDeleteTrip(req, res, tripId) {
+  const info = db.connection.prepare('DELETE FROM schedule_trips WHERE id = ?').run(tripId);
+  if (info.changes === 0) throw new Error(`Nie znaleziono kursu o id: ${tripId}`);
+  sendJson(res, 200, {
+    ok: true,
+    message: 'Kurs usunięty (kaskadowo usunięto jego przystanki i przypisania pojazdów)',
+    deletedCount: info.changes
+  });
+}
 
+async function handleAssignVehicleTrips(req, res) {
   const body = await readJsonBody(req);
-  const targetDayType = optionalString(body.day_type, 'WEEKDAY').toUpperCase();
-  if (!DAY_TYPES_UPPER.includes(targetDayType)) throw new Error(`Nieprawidłowy typ dnia docelowego: ${targetDayType}`);
+  const pcName = requiredString(body.pcName, 'pcName');
+  const tripIds = Array.isArray(body.trip_ids) ? body.trip_ids : null;
 
-  const sourceSideId = optionalString(body.source_side_id, '') || sideId;
-  const sourceSide = findScheduleSideById(sourceSideId);
-  if (!sourceSide || sourceSide.schedule_id !== scheduleId) throw new Error(`Nie znaleziono źródłowej strony rozkładu o id: ${sourceSideId}`);
-
-  const sourceDayType = optionalString(body.source_day_type, targetDayType).toUpperCase();
-  if (!DAY_TYPES_UPPER.includes(sourceDayType)) throw new Error(`Nieprawidłowy typ dnia źródłowego: ${sourceDayType}`);
-
-  if (sourceSideId === sideId && sourceDayType === targetDayType) {
-    throw new Error('Źródło i cel kopiowania nie mogą być takie same');
+  if (!tripIds || tripIds.length === 0) {
+    throw new Error('trip_ids musi być niepustą tablicą identyfikatorów kursów');
   }
 
-  const reverse = body.reverse === true || body.reverse === 'true';
-
-  let sourceStops = db.connection.prepare(`
-    SELECT stop_id, time, metadata
-    FROM schedule_stops
-    WHERE side_id = ? AND day_type = ?
-    ORDER BY sequence_order
-  `).all(sourceSideId, sourceDayType);
-
-  if (sourceStops.length === 0) {
-    throw new Error('Strona źródłowa nie ma zdefiniowanych przystanków dla wskazanego typu dnia');
+  const date = optionalString(body.date, '') || null;
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error('Pole date musi mieć format YYYY-MM-DD albo być puste (przypisanie stałe/szablonowe)');
   }
 
-  if (reverse) sourceStops = sourceStops.slice().reverse();
+  const normalizedTripIds = tripIds.map((id, i) => requiredString(id, `trip_ids[${i}]`));
+
+  for (const tripId of normalizedTripIds) {
+    if (!findScheduleTripById(tripId)) throw new Error(`Nie znaleziono kursu o id: ${tripId}`);
+  }
+
+  const now = new Date().toISOString();
 
   const tx = db.connection.transaction(() => {
-    db.connection.prepare('DELETE FROM schedule_stops WHERE side_id = ? AND day_type = ?').run(sideId, targetDayType);
-    const insert = db.connection.prepare(`
-      INSERT INTO schedule_stops(id, side_id, day_type, stop_id, sequence_order, time, metadata)
-      VALUES(?, ?, ?, ?, ?, ?, ?)
+    db.connection.prepare(`
+      INSERT INTO vehicles(pcName, first_seen, last_seen, metadata)
+      VALUES(@pcName, @now, @now, '{}')
+      ON CONFLICT(pcName) DO NOTHING
+    `).run({ pcName, now });
+
+    const deleteExisting = db.connection.prepare(`
+      DELETE FROM vehicle_trips WHERE trip_id = ? AND ((date IS NULL AND ? IS NULL) OR date = ?)
     `);
-    sourceStops.forEach((s, i) => {
-      insert.run(generateId(), sideId, targetDayType, s.stop_id, i + 1, s.time, s.metadata || '{}');
-    });
+    const insert = db.connection.prepare(`
+      INSERT INTO vehicle_trips(id, pcName, trip_id, date) VALUES(?, ?, ?, ?)
+    `);
+
+    for (const tripId of normalizedTripIds) {
+      deleteExisting.run(tripId, date, date);
+      insert.run(generateId(), pcName, tripId, date);
+    }
   });
 
   tx();
 
+  const assignments = db.connection.prepare(`
+    SELECT id, pcName, trip_id, date FROM vehicle_trips
+    WHERE pcName = ? AND trip_id IN (${normalizedTripIds.map(() => '?').join(',')})
+  `).all(pcName, ...normalizedTripIds);
+
   sendJson(res, 200, {
     ok: true,
-    message: `Skopiowano ${sourceStops.length} przystanków${reverse ? ' (kolejność odwrócona)' : ''}. Zweryfikuj godziny przed zapisaniem.`,
-    stops: getScheduleStopsWithDetails(sideId, targetDayType)
+    message: `Przypisano ${normalizedTripIds.length} kurs(ów) do pojazdu ${pcName}${date ? ` na dzień ${date}` : ' (przypisanie stałe/szablonowe)'}`,
+    pcName,
+    date,
+    assignments
+  });
+}
+
+async function handleGetVehicleSchedule(req, res, pcName, query) {
+  const vehicle = db.connection.prepare('SELECT pcName FROM vehicles WHERE pcName = ?').get(pcName);
+  if (!vehicle) throw new Error(`Nie znaleziono pojazdu o pcName: ${pcName}`);
+
+  const dateParam = optionalString(firstParam(query.date), '');
+  const dayTypeParam = optionalString(firstParam(query.day_type), '').toUpperCase();
+
+  let dateKey;
+  let dayType;
+
+  if (dateParam) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateParam)) throw new Error('Pole date musi mieć format YYYY-MM-DD');
+    const [y, m, d] = dateParam.split('-').map(Number);
+    dateKey = dateParam;
+    dayType = determineDayType(new Date(y, m - 1, d)).toUpperCase();
+  } else {
+    const now = new Date();
+    dateKey = formatDateKey(now);
+    dayType = determineDayType(now).toUpperCase();
+  }
+
+  if (dayTypeParam) {
+    if (!DAY_TYPES_UPPER.includes(dayTypeParam)) throw new Error(`Nieprawidłowy typ dnia: ${dayTypeParam}. Dozwolone: ${DAY_TYPES_UPPER.join(', ')}`);
+    dayType = dayTypeParam;
+  }
+
+  const assignmentRows = db.connection.prepare(`
+    SELECT trip_id, date FROM vehicle_trips WHERE pcName = ? AND (date IS NULL OR date = ?)
+  `).all(pcName, dateKey);
+
+  const tripByPreference = new Map();
+  for (const row of assignmentRows) {
+    const existing = tripByPreference.get(row.trip_id);
+    if (!existing || (row.date && !existing.date)) tripByPreference.set(row.trip_id, row);
+  }
+
+  const tripIds = [...tripByPreference.keys()];
+  let trips = [];
+
+  if (tripIds.length) {
+    const placeholders = tripIds.map(() => '?').join(',');
+    const tripRows = db.connection.prepare(`
+      SELECT st.*, sch.name AS schedule_name, sch.code AS schedule_code, sch.color AS schedule_color,
+             side.direction AS side_direction, side.name AS side_name
+      FROM schedule_trips st
+      JOIN schedules sch ON sch.id = st.schedule_id
+      JOIN schedule_sides side ON side.id = st.side_id
+      WHERE st.id IN (${placeholders}) AND st.day_type = ?
+    `).all(...tripIds, dayType);
+
+    trips = tripRows
+      .map(row => ({
+        ...scheduleTripFromRow(row),
+        schedule_name: row.schedule_name,
+        schedule_code: row.schedule_code,
+        schedule_color: row.schedule_color,
+        side_direction: row.side_direction,
+        side_name: row.side_name,
+        stops: getTripStops(row.id)
+      }))
+      .sort((a, b) => String(a.departure_time).localeCompare(String(b.departure_time)));
+  }
+
+  const legs = [];
+  for (let i = 0; i < trips.length - 1; i++) {
+    const current = trips[i];
+    const next = trips[i + 1];
+    const lastStop = current.stops[current.stops.length - 1];
+    const firstStop = next.stops[0];
+    if (!lastStop || !firstStop) continue;
+
+    const pauseSeconds = timeToSeconds(firstStop.time) - timeToSeconds(lastStop.time);
+    legs.push({
+      from_trip_id: current.id,
+      to_trip_id: next.id,
+      arrival_stop_id: lastStop.stop_id,
+      arrival_time: lastStop.time,
+      departure_stop_id: firstStop.stop_id,
+      departure_time: firstStop.time,
+      pause_minutes: Math.round(pauseSeconds / 60)
+    });
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    pcName,
+    date: dateKey,
+    day_type: dayType,
+    trip_count: trips.length,
+    trips,
+    legs
   });
 }
 
@@ -671,74 +823,6 @@ async function handleDeleteHoliday(req, res, date) {
   const info = db.connection.prepare('DELETE FROM holidays WHERE date = ?').run(date);
   if (info.changes === 0) throw new Error(`Nie znaleziono święta o dacie: ${date}`);
   sendJson(res, 200, { ok: true, message: 'Holiday deleted', deletedCount: info.changes });
-}
-
-async function handleUpdateVehicle(req, res, pcName) {
-  const body = await readJsonBody(req);
-  const scheduleId = optionalString(firstDefined(body.schedule_id, body.route_id), '');
-
-  const vehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
-  if (!vehicle) {
-    throw new Error(`Nie znaleziono pojazdu o pcName: ${pcName}`);
-  }
-
-  let schedule = null;
-  if (scheduleId) {
-    schedule = findScheduleById(scheduleId);
-    if (!schedule) {
-      throw new Error(`Nie znaleziono rozkładu o id: ${scheduleId}`);
-    }
-  }
-
-  const tx = db.connection.transaction(() => {
-    // Odepnij pojazd od jakiegokolwiek innego rozkładu, do którego był wcześniej przypisany
-    // (silnik śledzenia na żywo szuka rozkładu właśnie po pcName/pcId w tabeli schedules).
-    db.connection.prepare(`
-      UPDATE schedules SET pcName = NULL, pcId = NULL WHERE pcName = ? AND id != ?
-    `).run(pcName, scheduleId || '');
-
-    if (schedule) {
-      db.connection.prepare(`
-        UPDATE schedules SET pcName = ?, pcId = ?, updated_at = ? WHERE id = ?
-      `).run(pcName, vehicle.pcId || '', new Date().toISOString(), scheduleId);
-    }
-
-    const existingMetadata = jsonParse(vehicle.metadata, {});
-    existingMetadata.schedule_id = scheduleId || null;
-    if (schedule) {
-      existingMetadata.line_id = schedule.line_id;
-      existingMetadata.schedule_name = schedule.name;
-    } else {
-      delete existingMetadata.line_id;
-      delete existingMetadata.schedule_name;
-    }
-    existingMetadata.updated_at = new Date().toISOString();
-
-    db.connection.prepare(`
-      UPDATE vehicles
-      SET metadata = @metadata
-      WHERE pcName = @pcName
-    `).run({
-      pcName,
-      metadata: jsonStringify(existingMetadata)
-    });
-  });
-
-  tx();
-
-  const updatedVehicle = db.connection.prepare('SELECT * FROM vehicles WHERE pcName = ?').get(pcName);
-  const updatedMetadata = jsonParse(updatedVehicle.metadata, {});
-
-  sendJson(res, 200, {
-    ok: true,
-    message: 'Przypisanie rozkładu do pojazdu zaktualizowane',
-    vehicle: {
-      pcName: updatedVehicle.pcName,
-      pcId: updatedVehicle.pcId || '',
-      schedule_id: updatedMetadata.schedule_id,
-      metadata: updatedMetadata
-    }
-  });
 }
 
 async function handleVehicles(req, res) {
@@ -1223,12 +1307,13 @@ async function handleRoot(req, res) {
       dataSink: 'POST /api/data',
       isarsoftLatest: 'GET /api/isarsoft/latest',
       stops: 'GET /stops, POST /stops, GET /stops/:id, PUT /stops/:id, DELETE /stops/:id',
-      schedules: 'GET /schedules, POST /schedules, GET /schedules/:id, PUT /schedules/:id, DELETE /schedules/:id (każdy rozkład ma 2 strony: FROM_START i TO_START)',
-      scheduleSideStops: 'GET /schedules/:id/sides/:sideId/stops?day_type=WEEKDAY|WEEKEND|HOLIDAY, PUT /schedules/:id/sides/:sideId/stops?day_type=... (body: {stops:[{stop_id, time:"HH:MM"}]})',
-      copyScheduleSideStops: 'POST /schedules/:id/sides/:sideId/copy (body: {source_side_id?, source_day_type?, day_type, reverse?})',
+      schedules: 'GET /api/schedules, POST /api/schedules, GET /api/schedules/:id, PUT /api/schedules/:id, DELETE /api/schedules/:id (Linia, z 2 wariantami kierunku: FROM_START i TO_START)',
+      scheduleSides: 'PUT|PATCH /api/schedules/:id/sides/:sideId (body: {name?, metadata?}) — nazwa docelowa wariantu kierunku',
+      scheduleTrips: 'POST /api/schedules/:id/trips (body: {side_id, day_type, departure_time, block_id?, stops:[{stop_id, time:"HH:MM"}]}), DELETE /api/trips/:tripId',
+      vehicleAssignments: 'POST /api/vehicles/assign-trips (body: {pcName, trip_ids:[...], date?:"YYYY-MM-DD"}), GET /api/vehicles/:pcName/schedule?date=YYYY-MM-DD',
       serviceDays: 'GET /service-days',
       holidays: 'GET /holidays, POST /holidays, DELETE /holidays/:date',
-      vehicles: 'GET /vehicles, PUT /vehicles/:pcName',
+      vehicles: 'GET /vehicles, GET /api/vehicles (lista unikalnych pcName zarejestrowanych przez IsarsoftData)',
       trackingTrips: 'GET /trips, DELETE /trips',
       reports: 'GET /reports/trip/current, /reports/stop-usage, /reports/on-demand-stops, /reports/line-performance, /reports/admin-zone',
       settings: 'GET /settings'
@@ -1278,36 +1363,59 @@ async function routeRequest(req, res) {
       throw new Error('Metoda nieobsługiwana dla /stops/:id');
     }
 
-    if (pathname === '/schedules') {
+    if (pathname === '/api/schedules') {
       if (req.method === 'POST') return await handleCreateSchedule(req, res);
       if (req.method === 'GET') return await handleGetSchedules(req, res, query);
-      throw new Error('Metoda nieobsługiwana dla /schedules');
+      throw new Error('Metoda nieobsługiwana dla /api/schedules');
     }
 
-    if (pathname.startsWith('/schedules/') && pathname.includes('/sides/') && pathname.endsWith('/copy')) {
-      const rest = pathname.substring('/schedules/'.length, pathname.length - '/copy'.length);
+    if (pathname.startsWith('/api/schedules/') && pathname.endsWith('/trips')) {
+      const rest = pathname.substring('/api/schedules/'.length, pathname.length - '/trips'.length);
+      const scheduleId = decodeURIComponent(rest);
+      if (!scheduleId) throw new Error('Brak ID linii');
+      if (req.method === 'POST') return await handleCreateTrip(req, res, scheduleId);
+      throw new Error('Metoda nieobsługiwana dla /api/schedules/:id/trips');
+    }
+
+    if (pathname.startsWith('/api/schedules/') && pathname.includes('/sides/')) {
+      const rest = pathname.substring('/api/schedules/'.length);
       const [scheduleId, , sideId] = rest.split('/').map(decodeURIComponent);
-      if (!scheduleId || !sideId) throw new Error('Brak ID rozkładu lub strony');
-      if (req.method === 'POST') return await handleCopyScheduleSideStops(req, res, scheduleId, sideId);
-      throw new Error('Metoda nieobsługiwana dla /schedules/:id/sides/:sideId/copy');
+      if (!scheduleId || !sideId) throw new Error('Brak ID linii lub wariantu kierunku');
+      if (req.method === 'PUT' || req.method === 'PATCH') return await handleUpdateScheduleSide(req, res, scheduleId, sideId);
+      throw new Error('Metoda nieobsługiwana dla /api/schedules/:id/sides/:sideId');
     }
 
-    if (pathname.startsWith('/schedules/') && pathname.includes('/sides/') && pathname.endsWith('/stops')) {
-      const rest = pathname.substring('/schedules/'.length, pathname.length - '/stops'.length);
-      const [scheduleId, , sideId] = rest.split('/').map(decodeURIComponent);
-      if (!scheduleId || !sideId) throw new Error('Brak ID rozkładu lub strony');
-      if (req.method === 'GET') return await handleGetScheduleSideStops(req, res, scheduleId, sideId, query);
-      if (req.method === 'PUT') return await handleSetScheduleSideStops(req, res, scheduleId, sideId, query);
-      throw new Error('Metoda nieobsługiwana dla /schedules/:id/sides/:sideId/stops');
-    }
-
-    if (pathname.startsWith('/schedules/')) {
-      const scheduleId = decodeURIComponent(pathname.substring('/schedules/'.length));
-      if (!scheduleId) throw new Error('Brak ID rozkładu');
+    if (pathname.startsWith('/api/schedules/')) {
+      const scheduleId = decodeURIComponent(pathname.substring('/api/schedules/'.length));
+      if (!scheduleId) throw new Error('Brak ID linii');
       if (req.method === 'GET') return await handleGetScheduleById(req, res, scheduleId);
       if (req.method === 'PUT') return await handleUpdateSchedule(req, res, scheduleId);
       if (req.method === 'DELETE') return await handleDeleteSchedule(req, res, scheduleId);
-      throw new Error('Metoda nieobsługiwana dla /schedules/:id');
+      throw new Error('Metoda nieobsługiwana dla /api/schedules/:id');
+    }
+
+    if (pathname.startsWith('/api/trips/')) {
+      const tripId = decodeURIComponent(pathname.substring('/api/trips/'.length));
+      if (!tripId) throw new Error('Brak ID kursu');
+      if (req.method === 'DELETE') return await handleDeleteTrip(req, res, tripId);
+      throw new Error('Metoda nieobsługiwana dla /api/trips/:tripId');
+    }
+
+    if (pathname === '/api/vehicles') {
+      if (req.method === 'GET') return await handleVehicles(req, res);
+      throw new Error('Metoda nieobsługiwana dla /api/vehicles');
+    }
+
+    if (pathname === '/api/vehicles/assign-trips') {
+      if (req.method === 'POST') return await handleAssignVehicleTrips(req, res);
+      throw new Error('Metoda nieobsługiwana dla /api/vehicles/assign-trips');
+    }
+
+    if (pathname.startsWith('/api/vehicles/') && pathname.endsWith('/schedule')) {
+      const pcName = decodeURIComponent(pathname.substring('/api/vehicles/'.length, pathname.length - '/schedule'.length));
+      if (!pcName) throw new Error('Brak nazwy pojazdu');
+      if (req.method === 'GET') return await handleGetVehicleSchedule(req, res, pcName, query);
+      throw new Error('Metoda nieobsługiwana dla /api/vehicles/:pcName/schedule');
     }
 
     if (pathname === '/service-days') {
@@ -1331,13 +1439,6 @@ async function routeRequest(req, res) {
     if (pathname === '/vehicles') {
       if (req.method === 'GET') return await handleVehicles(req, res);
       throw new Error('Metoda nieobsługiwana dla /vehicles');
-    }
-
-    if (pathname.startsWith('/vehicles/')) {
-      const pcName = decodeURIComponent(pathname.substring('/vehicles/'.length));
-      if (!pcName) throw new Error('Brak nazwy pojazdu');
-      if (req.method === 'PUT') return await handleUpdateVehicle(req, res, pcName);
-      throw new Error('Metoda nieobsługiwana dla /vehicles/:pcName');
     }
 
     if (pathname === '/trips') {
@@ -1391,6 +1492,5 @@ async function routeRequest(req, res) {
 }
 
 module.exports = {
-  routeRequest,
-  initScheduleSchema
+  routeRequest
 };

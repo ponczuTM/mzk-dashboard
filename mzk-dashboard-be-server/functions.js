@@ -353,28 +353,68 @@ function stopPublicView(stop, distanceMeters, plannedTime) {
 
 const DAY_TYPE_TO_SERVICE_DAY = { weekday: 'WEEKDAY', weekend: 'WEEKEND', holiday: 'HOLIDAY' };
 
-function buildScheduleForTracking(scheduleRow, dayType) {
-  const meta = jsonParse(scheduleRow.metadata, {});
-  const dayTypeKey = String(dayType || '').toLowerCase();
-  const serviceDayType = DAY_TYPE_TO_SERVICE_DAY[dayTypeKey];
+// Zwraca spłaszczoną, chronologicznie posortowaną sekwencję przystanków ze
+// wszystkich Kursów (schedule_trips) przypisanych pojazdowi na dany dzień
+// (przypisania stałe z date=NULL oraz przypisania jednorazowe na daną datę;
+// jeśli oba istnieją dla tego samego kursu, wygrywa przypisanie na daną datę).
+function buildVehicleDaySequence(pcName, dayType, dateKey) {
+  const pcNameValue = String(pcName || '').trim();
+  const serviceDayType = DAY_TYPE_TO_SERVICE_DAY[String(dayType || '').toLowerCase()];
+  if (!pcNameValue || !serviceDayType) return [];
 
-  const sides = db.connection.prepare('SELECT id FROM schedule_sides WHERE schedule_id = ?').all(scheduleRow.id);
-  let stopsSequence = [];
+  const conn = db.connection;
 
-  if (sides.length && serviceDayType) {
-    const placeholders = sides.map(() => '?').join(',');
-    const rows = db.connection.prepare(`
-      SELECT ss.stop_id, ss.time, ss.sequence_order, s.name AS stop_name,
-             s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
-      FROM schedule_stops ss
-      JOIN stops s ON s.id = ss.stop_id
-      WHERE ss.side_id IN (${placeholders}) AND ss.day_type = ?
-      ORDER BY ss.side_id, ss.sequence_order
-    `).all(...sides.map(s => s.id), serviceDayType);
+  const assignmentRows = conn.prepare(`
+    SELECT trip_id, date FROM vehicle_trips WHERE pcName = ? AND (date IS NULL OR date = ?)
+  `).all(pcNameValue, dateKey);
 
-    stopsSequence = rows.map(row => {
+  if (assignmentRows.length === 0) return [];
+
+  const tripIdSet = new Map();
+  for (const row of assignmentRows) {
+    const existing = tripIdSet.get(row.trip_id);
+    if (!existing || (row.date && !existing.date)) tripIdSet.set(row.trip_id, row);
+  }
+
+  const tripIds = [...tripIdSet.keys()];
+  const tripPlaceholders = tripIds.map(() => '?').join(',');
+
+  const tripRows = conn.prepare(`
+    SELECT st.id, st.schedule_id, st.side_id, st.departure_time, st.block_id,
+           side.direction AS side_direction,
+           sch.name AS line_name, sch.code AS line_code
+    FROM schedule_trips st
+    JOIN schedule_sides side ON side.id = st.side_id
+    JOIN schedules sch ON sch.id = st.schedule_id
+    WHERE st.id IN (${tripPlaceholders}) AND st.day_type = ?
+  `).all(...tripIds, serviceDayType);
+
+  if (tripRows.length === 0) return [];
+
+  const stopPlaceholders = tripRows.map(() => '?').join(',');
+  const stopRows = conn.prepare(`
+    SELECT ss.trip_id, ss.stop_id, ss.time, ss.sequence_order,
+           s.name AS stop_name, s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
+    FROM schedule_stops ss
+    JOIN stops s ON s.id = ss.stop_id
+    WHERE ss.trip_id IN (${stopPlaceholders})
+    ORDER BY ss.trip_id, ss.sequence_order
+  `).all(...tripRows.map(t => t.id));
+
+  const stopsByTrip = new Map();
+  for (const row of stopRows) {
+    if (!stopsByTrip.has(row.trip_id)) stopsByTrip.set(row.trip_id, []);
+    stopsByTrip.get(row.trip_id).push(row);
+  }
+
+  const sortedTrips = tripRows.slice().sort((a, b) => String(a.departure_time || '').localeCompare(String(b.departure_time || '')));
+
+  const sequence = [];
+  for (const trip of sortedTrips) {
+    const stopsForTrip = stopsByTrip.get(trip.id) || [];
+    for (const row of stopsForTrip) {
       const stopMetadata = jsonParse(row.stop_metadata, {});
-      return {
+      sequence.push({
         stop_id: row.stop_id,
         planned_time: row.time,
         sequence_index: row.sequence_order,
@@ -384,59 +424,38 @@ function buildScheduleForTracking(scheduleRow, dayType) {
         longitude: row.longitude,
         admin_zone: row.zone || stopMetadata.admin_zone || 'nieokreślona',
         zone: row.zone || 'nieokreślona',
-        zone_type: stopMetadata.zone_type || 'nieokreślony'
-      };
-    });
+        zone_type: stopMetadata.zone_type || 'nieokreślony',
+        trip_id: trip.id,
+        side_id: trip.side_id,
+        side_direction: trip.side_direction,
+        block_id: trip.block_id || '',
+        line_id: trip.schedule_id,
+        line_number: trip.line_code || trip.line_name
+      });
+    }
   }
 
+  return sequence;
+}
+
+// Zastępuje dawne "findActiveScheduleForVehicle" — zamiast jednego sztywno
+// przypisanego rozkładu, pojazd może dziś wykonywać wiele Kursów (różnych linii).
+// Dopasowanie do konkretnego przystanku/linii następuje dopiero po znalezieniu
+// najbliższego przystanku w sekwencji (patrz analyzeVehiclePayload).
+function findVehicleAssignmentForDay(pcName, dayType, dateKey) {
+  const sequence = buildVehicleDaySequence(pcName, dayType, dateKey);
+  if (sequence.length === 0) return null;
+
   return {
-    schedule_id: scheduleRow.id,
-    id: scheduleRow.id,
-    pcName: scheduleRow.pcName || '',
-    pcId: scheduleRow.pcId || '',
-    vehicle_id: scheduleRow.pcName || '',
-    line_id: scheduleRow.line_id || null,
-    line_number: scheduleRow.line_id || null,
-    brigade: meta.brigade || '',
-    route_name: scheduleRow.name,
-    description: meta.description || '',
-    expected_cameras: meta.expected_cameras === undefined ? null : meta.expected_cameras,
-    active: scheduleRow.active !== 0,
-    updated_at: scheduleRow.updated_at,
-    day_types: {
-      [dayTypeKey]: {
-        day_type: dayTypeKey,
-        stops_sequence: stopsSequence
-      }
-    }
+    pcName: String(pcName || '').trim(),
+    day_type: dayType,
+    sequence
   };
 }
 
-function findActiveScheduleForVehicle(pcName, pcId, dayType) {
-  const pcNameValue = String(pcName || '').trim();
-  const pcIdValue = String(pcId || '').trim();
-
-  const row = db.connection.prepare(`
-    SELECT *
-    FROM schedules
-    WHERE active = 1
-      AND (
-        (? <> '' AND pcName = ?)
-        OR (? <> '' AND pcId = ?)
-      )
-    ORDER BY updated_at DESC, id DESC
-    LIMIT 1
-  `).get(pcNameValue, pcNameValue, pcIdValue, pcIdValue);
-
-  if (!row) return null;
-
-  return buildScheduleForTracking(row, dayType);
-}
-
-function getScheduleSequence(schedule, dayType) {
-  if (!schedule || !schedule.day_types || !schedule.day_types[dayType]) return [];
-  const sequence = schedule.day_types[dayType].stops_sequence;
-  return Array.isArray(sequence) ? sequence : [];
+function getScheduleSequence(assignment) {
+  if (!assignment || !Array.isArray(assignment.sequence)) return [];
+  return assignment.sequence;
 }
 
 function enrichSequenceWithStops(sequence) {
@@ -819,7 +838,7 @@ function upsertCurrentStatus(status, payload) {
   });
 }
 
-function appendTripEventIfNeeded(status, schedule, date, appendTripEvent) {
+function appendTripEventIfNeeded(status, date, appendTripEvent) {
   if (!appendTripEvent) return;
 
   const conn = db.connection;
@@ -856,7 +875,7 @@ function appendTripEventIfNeeded(status, schedule, date, appendTripEvent) {
     )
   `).run({
     pcName: status.pcName,
-    line_id: schedule ? schedule.line_id : null,
+    line_id: status.line_id || null,
     stop_id: stop ? stop.stop_id : null,
     timestamp: status.timestamp,
     day_type: status.day_type,
@@ -869,10 +888,10 @@ function appendTripEventIfNeeded(status, schedule, date, appendTripEvent) {
     distance_to_stop: stop && Number.isFinite(stop.distance_meters) ? stop.distance_meters : null,
     is_at_stop: status.current_stop ? 1 : 0,
     pcId: status.pcId || '',
-    line_number: schedule ? schedule.line_number : null,
-    brigade: schedule ? schedule.brigade : null,
-    schedule_id: schedule ? schedule.schedule_id : null,
-    trip_id: buildTripId(schedule, status.pcName, date),
+    line_number: status.line_number || null,
+    brigade: status.brigade || null,
+    schedule_id: status.current_trip_id || null,
+    trip_id: status.current_trip_id || buildTripId(null, status.pcName, date),
     received_at: status.received_at,
     analyzed_at: status.updated_at,
     latitude: Number.isFinite(status.latitude) ? status.latitude : null,
@@ -896,10 +915,12 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
   const coordinates = extractCoordinates(payload);
   const stats = extractPassengerStats(payload);
   const dayType = determineDayType(now);
-  const schedule = findActiveScheduleForVehicle(pcName, pcId, dayType);
+  const dateKey = formatDateKey(now);
+  const assignment = findVehicleAssignmentForDay(pcName, dayType, dateKey);
   const currentSeconds = secondsSinceMidnight(now);
+  const quality = extractCameraQuality(payload, null);
 
-  upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, Boolean(schedule));
+  upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, Boolean(assignment));
 
   const baseStatus = {
     pcName,
@@ -910,22 +931,21 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
     raw_frame_id: metadata.rawFrameId || null,
     latitude: coordinates.latitude,
     longitude: coordinates.longitude,
-    schedule_defined: Boolean(schedule),
-    line_id: schedule ? schedule.line_id : null,
-    line_number: schedule ? schedule.line_number : null,
-    brigade: schedule ? schedule.brigade : null,
-    day_type: schedule ? dayType : null,
+    schedule_defined: Boolean(assignment),
+    line_id: null,
+    line_number: null,
+    brigade: null,
+    current_trip_id: null,
+    day_type: assignment ? dayType : null,
     geofence_radius_meters: GEOFENCE_RADIUS_METERS,
     punctuality_tolerance_seconds: PUNCTUALITY_TOLERANCE_SECONDS,
     passengers: stats
   };
 
-  if (!schedule) {
-    const quality = extractCameraQuality(payload, null);
-  
+  if (!assignment) {
     const status = {
       ...baseStatus,
-      status: 'brak rozkładu',
+      status: 'brak przypisanych kursów',
       punctuality_status: null,
       delay_seconds: null,
       delay_abs_seconds: null,
@@ -935,19 +955,17 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-  
+
     upsertCurrentStatus(status, payload);
-    appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+    appendTripEventIfNeeded(status, now, appendTripEvent);
     return status;
   }
 
-  const quality = extractCameraQuality(payload, schedule);
-  const sequence = enrichSequenceWithStops(getScheduleSequence(schedule, dayType));
+  const sequence = enrichSequenceWithStops(getScheduleSequence(assignment));
 
   if (!Number.isFinite(coordinates.latitude) || !Number.isFinite(coordinates.longitude)) {
     const status = {
       ...baseStatus,
-      schedule_id: schedule.schedule_id,
       status: 'brak pozycji GPS',
       punctuality_status: null,
       delay_seconds: null,
@@ -958,17 +976,16 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-  
+
     upsertCurrentStatus(status, payload);
-    appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+    appendTripEventIfNeeded(status, now, appendTripEvent);
     return status;
   }
 
   if (sequence.length === 0) {
     const status = {
       ...baseStatus,
-      schedule_id: schedule.schedule_id,
-      status: 'brak sekwencji dla typu dnia',
+      status: 'brak kursów dla typu dnia',
       punctuality_status: null,
       delay_seconds: null,
       delay_abs_seconds: null,
@@ -978,9 +995,9 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
       is_on_stop: false,
       data_quality: quality
     };
-  
+
     upsertCurrentStatus(status, payload);
-    appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+    appendTripEventIfNeeded(status, now, appendTripEvent);
     return status;
   }
 
@@ -997,7 +1014,10 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
 
   const status = {
     ...baseStatus,
-    schedule_id: schedule.schedule_id,
+    line_id: target ? target.entry.line_id : null,
+    line_number: target ? target.entry.line_number : null,
+    brigade: target ? target.entry.block_id : null,
+    current_trip_id: target ? target.entry.trip_id : null,
     status: punctualityStatus,
     punctuality_status: punctualityStatus,
     delay_seconds: diffSeconds,
@@ -1010,7 +1030,7 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
   };
 
   upsertCurrentStatus(status, payload);
-  appendTripEventIfNeeded(status, schedule, now, appendTripEvent);
+  appendTripEventIfNeeded(status, now, appendTripEvent);
 
   return status;
 }
@@ -1303,7 +1323,8 @@ module.exports = {
   findStopById,
   normalizeStop,
   stopPublicView,
-  findActiveScheduleForVehicle,
+  buildVehicleDaySequence,
+  findVehicleAssignmentForDay,
   getScheduleSequence,
   enrichSequenceWithStops,
   findNearestStopByDistance,
