@@ -893,3 +893,60 @@
   font-size: 0.75rem;
   color: #64748b;
 }
+
+.clickableRow {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.clickableRow:hover {
+  background-color: rgba(59, 130, 246, 0.05);
+}
+
+.expandedCell {
+  padding: 0 !important;
+  background-color: #f8fafc;
+}
+
+.expandedStops {
+  padding: 0.75rem 1rem;
+}
+
+.expandedStopsHeader {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #1e293b;
+  margin-bottom: 0.5rem;
+}
+
+.stopTimeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  padding: 0.25rem 0;
+}
+
+.stopTimelineItem {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  background: #fff;
+  padding: 0.2rem 0.75rem;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+}
+
+.stopTimelineTime {
+  font-weight: 600;
+  color: #0f172a;
+  min-width: 3.5rem;
+}
+
+.stopTimelineName {
+  color: #334155;
+}
+
+.stopTimelineOrder {
+  color: #94a3b8;
+  font-size: 0.7rem;
+}

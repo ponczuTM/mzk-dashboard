@@ -679,7 +679,7 @@ const Schedule = () => {
                     required
                   />
                 </div>
-                <div>
+                {/* <div>
                   <label className={styles.label}>Kod / numer (opcjonalnie)</label>
                   <input
                     className={styles.input}
@@ -687,7 +687,7 @@ const Schedule = () => {
                     onChange={(e) => setRouteForm((p) => ({ ...p, code: e.target.value }))}
                     placeholder="np. 100"
                   />
-                </div>
+                </div> */}
                 <div>
                   <label className={styles.label}>Kolor</label>
                   <input
@@ -920,9 +920,7 @@ const Schedule = () => {
                 </div>
                 <p className={styles.cardDescription}>
                   Format: <code>nazwa;szerokość;wysokość</code> (separator średnik, pierwszy
-                  wiersz nagłówka jest pomijany). Istniejące przystanki o tej samej nazwie
-                  zostaną zaktualizowane (współrzędne), nowe zostaną dodane, a przystanki
-                  spoza pliku pozostaną nietknięte.
+                  wiersz nagłówka jest pomijany)
                 </p>
 
                 <input
@@ -1219,7 +1217,7 @@ const Schedule = () => {
                       onChange={(e) => setNewTripStartTime(e.target.value)}
                     />
                   </div>
-                  <div>
+                  {/* <div>
                     <label className={styles.label}>Brygada / blok (opcjonalnie)</label>
                     <input
                       className={styles.input}
@@ -1227,7 +1225,7 @@ const Schedule = () => {
                       onChange={(e) => setNewTripBlockId(e.target.value)}
                       placeholder="np. B1"
                     />
-                  </div>
+                  </div> */}
                 </div>
                 <div className={styles.buttonGroup}>
                   <button
