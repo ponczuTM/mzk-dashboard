@@ -39,6 +39,8 @@ const Cameras = () => {
   const [isarsoftError, setIsarsoftError] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
 
+  const [refreshing, setRefreshing] = useState(false);
+
   const loadVehicles = useCallback(async () => {
     setLoadingVehicles(true);
     setVehiclesError(null);
@@ -113,16 +115,18 @@ const Cameras = () => {
     }
   }, [api]);
 
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([loadVehicles(), loadIsarsoft()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadVehicles, loadIsarsoft]);
+
   useEffect(() => {
     loadVehicles();
     loadIsarsoft();
-
-    const interval = setInterval(() => {
-      loadVehicles();
-      loadIsarsoft();
-    }, 10000);
-
-    return () => clearInterval(interval);
   }, [loadVehicles, loadIsarsoft]);
 
   const handleVehicleChange = (event) => {
@@ -186,7 +190,7 @@ const Cameras = () => {
             <h1 className={styles.title}>Kamery i status pojazdów</h1>
             <p className={styles.subtitle}>
               Podgląd danych pojazdów z backendu oraz pakietów Isarsoft
-              aktualizowanych cyklicznie co 10 sekund.
+              odświeżanych ręcznie przyciskiem.
             </p>
           </div>
 
@@ -201,13 +205,19 @@ const Cameras = () => {
               </div>
             </div>
 
-            <div className={styles.heroMetaItem}>
-              <Server className={styles.heroMetaIcon} />
-              <div>
-                <span className={styles.heroMetaLabel}>Pakiet live</span>
-                <strong className={styles.heroMetaValue}>Auto refresh 100 s</strong>
-              </div>
-            </div>
+            <button
+              type="button"
+              className={styles.refreshButton}
+              onClick={handleRefresh}
+              disabled={refreshing}
+            >
+              <RefreshCw
+                className={`${styles.refreshButtonIcon} ${
+                  refreshing ? styles.spin : ''
+                }`}
+              />
+              {refreshing ? 'Odświeżanie...' : 'Odśwież dane'}
+            </button>
           </div>
         </header>
 

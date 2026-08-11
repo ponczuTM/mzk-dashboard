@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useBackend } from '../context/BackendContext';
 import {
   CalendarClock,
@@ -21,6 +21,7 @@ import {
   CircleSlash,
   Coffee,
   ListChecks,
+  Upload,
 } from 'lucide-react';
 import styles from './Schedule.module.css';
 
@@ -37,8 +38,27 @@ const DIRECTION_LABELS = {
   TO_START: 'Powrót (do pętli początkowej)',
 };
 
+// Losowe ID przystanku: 8 znaków (małe litery + cyfry).
+// Użytkownik nie ma żadnego wpływu na ID.
+const generateStopId = () => {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  const cryptoObj = typeof window !== 'undefined' ? window.crypto : undefined;
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    const bytes = new Uint8Array(8);
+    cryptoObj.getRandomValues(bytes);
+    for (let i = 0; i < 8; i += 1) {
+      out += alphabet[bytes[i] % alphabet.length];
+    }
+  } else {
+    for (let i = 0; i < 8; i += 1) {
+      out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+  }
+  return out;
+};
+
 const createEmptyStopForm = () => ({
-  id: '',
   name: '',
   latitude: '',
   longitude: '',
@@ -67,6 +87,65 @@ const normalizeTimeHHMM = (time) => {
     return '';
   }
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
+
+// Parsuje liczbę akceptując zarówno kropkę, jak i przecinek dziesiętny.
+const parseCoord = (raw) => {
+  if (raw === null || raw === undefined) return NaN;
+  const cleaned = String(raw).trim().replace(',', '.');
+  if (cleaned === '') return NaN;
+  return parseFloat(cleaned);
+};
+
+// Parser CSV przystanków.
+// - separator: średnik (;) — zgodnie z przykładem użytkownika.
+// - pierwszy wiersz traktowany jest jako nagłówek, jeśli wygląda na nagłówek
+//   (tzn. jego kolumny współrzędnych nie są liczbami).
+// - kolejność kolumn: nazwa; szerokość; wysokość(=długość geogr.).
+// Zwraca { rows: [{ name, latitude, longitude }], errors: [string] }.
+const parseStopsCsv = (text) => {
+  const errors = [];
+  const rows = [];
+
+  // Usuń BOM, znormalizuj końce linii.
+  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const lines = clean.split('\n').filter((l) => l.trim() !== '');
+
+  if (lines.length === 0) {
+    return { rows, errors: ['Plik jest pusty.'] };
+  }
+
+  // Wykryj nagłówek: jeśli druga i trzecia kolumna pierwszego wiersza nie są liczbami.
+  const firstCols = lines[0].split(';');
+  const looksLikeHeader =
+    firstCols.length >= 3 &&
+    (Number.isNaN(parseCoord(firstCols[1])) || Number.isNaN(parseCoord(firstCols[2])));
+
+  const startIdx = looksLikeHeader ? 1 : 0;
+
+  for (let i = startIdx; i < lines.length; i += 1) {
+    const lineNo = i + 1;
+    const cols = lines[i].split(';');
+    if (cols.length < 3) {
+      errors.push(`Wiersz ${lineNo}: oczekiwano 3 kolumn (nazwa;szerokość;wysokość).`);
+      continue;
+    }
+    const name = cols[0].trim();
+    const latitude = parseCoord(cols[1]);
+    const longitude = parseCoord(cols[2]);
+
+    if (!name) {
+      errors.push(`Wiersz ${lineNo}: brak nazwy przystanku.`);
+      continue;
+    }
+    if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+      errors.push(`Wiersz ${lineNo} (${name}): współrzędne muszą być liczbami.`);
+      continue;
+    }
+    rows.push({ name, latitude, longitude });
+  }
+
+  return { rows, errors };
 };
 
 const formatSeen = (value) => {
@@ -112,6 +191,12 @@ const Schedule = () => {
   const [stopsLoading, setStopsLoading] = useState(false);
   const [stopForm, setStopForm] = useState(createEmptyStopForm());
   const [editingStop, setEditingStop] = useState(null);
+
+  // ---------- IMPORT CSV PRZYSTANKÓW ----------
+  const fileInputRef = useRef(null);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState({ done: 0, total: 0 });
+  const [importResult, setImportResult] = useState(null); // { created, updated, failed, errors: [] }
 
   // ---------- LINIE (schedules) ----------
   const [scheduleForm, setScheduleForm] = useState(createEmptyScheduleForm());
@@ -249,7 +334,6 @@ const Schedule = () => {
   const handleEditStop = (stop) => {
     setEditingStop(stop);
     setStopForm({
-      id: stop.id,
       name: stop.name,
       latitude: stop.latitude !== undefined ? String(stop.latitude) : '',
       longitude: stop.longitude !== undefined ? String(stop.longitude) : '',
@@ -270,19 +354,20 @@ const Schedule = () => {
   const handleSubmitStop = async (e) => {
     e.preventDefault();
     try {
-      const payload = {
-        id: stopForm.id.trim(),
+      const basePayload = {
         name: stopForm.name.trim(),
         latitude: parseFloat(stopForm.latitude),
         longitude: parseFloat(stopForm.longitude),
       };
-      if (Number.isNaN(payload.latitude) || Number.isNaN(payload.longitude)) {
+      if (Number.isNaN(basePayload.latitude) || Number.isNaN(basePayload.longitude)) {
         throw new Error('Współrzędne muszą być liczbami.');
       }
       if (editingStop) {
-        await api.updateStop(editingStop.id, payload);
+        // ID pozostaje niezmienne — bierzemy je z edytowanego rekordu.
+        await api.updateStop(editingStop.id, { id: editingStop.id, ...basePayload });
       } else {
-        await api.createStop(payload);
+        // ID losowane automatycznie — użytkownik nie ma na nie wpływu.
+        await api.createStop({ id: generateStopId(), ...basePayload });
       }
       resetStopForm();
       await loadStops();
@@ -293,6 +378,123 @@ const Schedule = () => {
 
   const updateStopField = (field, value) => {
     setStopForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  // =================== IMPORT CSV PRZYSTANKÓW ===================
+  const handleImportClick = () => {
+    if (importing) return;
+    setImportResult(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''; // pozwól wybrać ten sam plik ponownie
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportResult(null);
+    setError(null);
+
+    let text;
+    try {
+      text = await file.text();
+    } catch (err) {
+      window.alert(`Nie udało się odczytać pliku: ${err.message}`);
+      return;
+    }
+
+    const { rows, errors: parseErrors } = parseStopsCsv(text);
+
+    if (rows.length === 0) {
+      window.alert(
+        `Nie znaleziono poprawnych wierszy w pliku CSV.` +
+          (parseErrors.length ? `\n\nSzczegóły:\n${parseErrors.join('\n')}` : '')
+      );
+      return;
+    }
+
+    // Scal duplikaty nazw w samym CSV — ostatni wygrywa.
+    const dedupedMap = new Map();
+    for (const row of rows) {
+      dedupedMap.set(row.name.trim().toLowerCase(), row);
+    }
+    const deduped = [...dedupedMap.values()];
+
+    if (
+      !window.confirm(
+        `Znaleziono ${deduped.length} unikalnych przystanków w pliku.\n\n` +
+          `Istniejące (dopasowane po nazwie) zostaną zaktualizowane, ` +
+          `nowe zostaną dodane, a przystanki spoza pliku pozostaną nietknięte.\n\n` +
+          `Kontynuować import?`
+      )
+    ) {
+      return;
+    }
+
+    // Zbuduj mapę istniejących przystanków po znormalizowanej nazwie.
+    // Korzystamy z aktualnego stanu; dla pewności można by najpierw przeładować,
+    // ale stan `stops` jest odświeżany po każdym zapisie z UI.
+    let currentStops = stops;
+    try {
+      const fresh = await api.getStops();
+      currentStops = fresh.stops || [];
+      setStops(currentStops);
+    } catch {
+      // Jeśli odświeżenie się nie powiedzie, użyj aktualnego stanu w pamięci.
+    }
+
+    const existingByName = new Map();
+    for (const s of currentStops) {
+      if (s.name) existingByName.set(String(s.name).trim().toLowerCase(), s);
+    }
+
+    setImporting(true);
+    setImportProgress({ done: 0, total: deduped.length });
+
+    let created = 0;
+    let updated = 0;
+    let failed = 0;
+    const opErrors = [];
+
+    for (let i = 0; i < deduped.length; i += 1) {
+      const row = deduped[i];
+      const key = row.name.trim().toLowerCase();
+      const existing = existingByName.get(key);
+      const payload = {
+        name: row.name,
+        latitude: row.latitude,
+        longitude: row.longitude,
+      };
+
+      try {
+        if (existing) {
+          // Aktualizacja: zachowaj istniejące ID, zmień tylko współrzędne (i nazwę 1:1).
+          await api.updateStop(existing.id, { id: existing.id, ...payload });
+          updated += 1;
+        } else {
+          // Nowy przystanek: wygeneruj ID.
+          await api.createStop({ id: generateStopId(), ...payload });
+          created += 1;
+        }
+      } catch (err) {
+        failed += 1;
+        opErrors.push(`${row.name}: ${err.message || 'nieznany błąd'}`);
+      }
+
+      setImportProgress({ done: i + 1, total: deduped.length });
+    }
+
+    setImporting(false);
+    setImportResult({
+      created,
+      updated,
+      failed,
+      errors: [...parseErrors, ...opErrors],
+    });
+
+    await loadStops();
   };
 
   // =================== LINIE ===================
@@ -347,7 +549,7 @@ const Schedule = () => {
 
     setSavingSideName(true);
     try {
-      await updateScheduleSide(selectedSchedule.id, selectedSide.id, {
+      await api.updateScheduleSide(selectedSchedule.id, selectedSide.id, {
         name: sideNameDraft.trim() || null,
       });
       await loadSchedules();
@@ -891,19 +1093,19 @@ const Schedule = () => {
           <div className={styles.twoColumn}>
             <div className={styles.card}>
               <h2 className={styles.cardTitle}>{editingStop ? 'Edytuj przystanek' : 'Nowy przystanek'}</h2>
-              <p className={styles.cardDescription}>Unikalne ID, nazwa i współrzędne geograficzne.</p>
+              <p className={styles.cardDescription}>
+                {editingStop
+                  ? 'Zmień nazwę lub współrzędne. Identyfikator przystanku jest nadany automatycznie i nie podlega edycji.'
+                  : 'Podaj nazwę i współrzędne geograficzne. Identyfikator zostanie wygenerowany automatycznie.'}
+              </p>
               <form onSubmit={handleSubmitStop} className={styles.stopForm}>
                 <div className={styles.stopFormGrid}>
-                  <div>
-                    <label className={styles.label}>ID przystanku</label>
-                    <input
-                      className={styles.input}
-                      value={stopForm.id}
-                      onChange={(e) => updateStopField('id', e.target.value)}
-                      required
-                      disabled={!!editingStop}
-                    />
-                  </div>
+                  {editingStop && (
+                    <div>
+                      <label className={styles.label}>ID przystanku (nadane automatycznie)</label>
+                      <input className={styles.input} value={editingStop.id} readOnly disabled />
+                    </div>
+                  )}
                   <div>
                     <label className={styles.label}>Nazwa</label>
                     <input
@@ -947,6 +1149,97 @@ const Schedule = () => {
                   </button>
                 </div>
               </form>
+
+              {/* ---------- IMPORT CSV ---------- */}
+              <div className={styles.preview} style={{ marginTop: '1.5rem' }}>
+                <div className={styles.previewHeader}>
+                  <span className={styles.previewTitle}>
+                    <Upload size={16} />
+                    Import przystanków z CSV
+                  </span>
+                </div>
+                <p className={styles.cardDescription}>
+                  Format: <code>nazwa;szerokość;wysokość</code> (separator średnik, pierwszy
+                  wiersz nagłówka jest pomijany). Istniejące przystanki o tej samej nazwie
+                  zostaną zaktualizowane (współrzędne), nowe zostaną dodane, a przystanki
+                  spoza pliku pozostaną nietknięte.
+                </p>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  style={{ display: 'none' }}
+                  onChange={handleImportFile}
+                />
+
+                <div className={styles.buttonGroup}>
+                  <button
+                    type="button"
+                    className={styles.btnPrimary}
+                    onClick={handleImportClick}
+                    disabled={importing}
+                  >
+                    {importing ? (
+                      <>
+                        <LoaderCircle size={16} className={styles.spinner} />
+                        Importowanie… ({importProgress.done}/{importProgress.total})
+                      </>
+                    ) : (
+                      <>
+                        <Upload size={16} />
+                        Zaimportuj CSV z przystankami
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {importing && importProgress.total > 0 && (
+                  <div
+                    style={{
+                      marginTop: '0.75rem',
+                      height: 8,
+                      borderRadius: 4,
+                      background: 'rgba(0,0,0,0.08)',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: '100%',
+                        width: `${Math.round((importProgress.done / importProgress.total) * 100)}%`,
+                        background: '#3B82F6',
+                        transition: 'width 0.15s ease',
+                      }}
+                    />
+                  </div>
+                )}
+
+                {importResult && !importing && (
+                  <div className={styles.previewEmpty} style={{ marginTop: '0.75rem' }}>
+                    <div>
+                      Import zakończony: dodano <strong>{importResult.created}</strong>,
+                      zaktualizowano <strong>{importResult.updated}</strong>
+                      {importResult.failed > 0 && (
+                        <>
+                          , błędów <strong>{importResult.failed}</strong>
+                        </>
+                      )}
+                      .
+                    </div>
+                    {importResult.errors.length > 0 && (
+                      <ul style={{ marginTop: '0.5rem', paddingLeft: '1.25rem' }}>
+                        {importResult.errors.slice(0, 15).map((msg, i) => (
+                          <li key={i}>{msg}</li>
+                        ))}
+                        {importResult.errors.length > 15 && (
+                          <li>…oraz {importResult.errors.length - 15} więcej.</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className={styles.card}>
