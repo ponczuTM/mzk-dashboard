@@ -2,9 +2,6 @@
 
 const crypto = require('crypto');
 const os = require('os');
-const url = require('url');
-const fs = require('fs');
-const path = require('path');
 
 // Importujemy moduł bazy danych
 const sqlite = require('./sqlite');
@@ -15,16 +12,10 @@ const {
   dbState,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
-  FRAME_HISTORY_LIMIT_IN_DB,
-  SYNC_INTERVAL_MS,
-  DB_FILE,
-  DB_ROOT,
-  PORT,
-  haversineMeters,
-  pad2,
   formatDateKey,
   getPolishPublicHolidayKeys,
-  pruneHistory
+  haversineMeters,
+  pad2
 } = sqlite;
 
 // --------------------- FUNKCJE POMOCNICZE ---------------------
@@ -53,7 +44,7 @@ function getLocalIPs() {
         addresses.push({
           interface: name,
           address: addr.address,
-          url: `http://${addr.address}:${PORT}/api/data`
+          url: `http://${addr.address}:${sqlite.PORT}/api/data`
         });
       }
     }
@@ -64,7 +55,7 @@ function getLocalIPs() {
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET, PUT, DELETE');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET, PUT, PATCH, DELETE');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
@@ -126,6 +117,11 @@ function toFiniteNumber(value) {
   return null;
 }
 
+function toFiniteInt(value) {
+  const n = toFiniteNumber(value);
+  return n === null ? null : Math.trunc(n);
+}
+
 function requiredString(value, fieldName) {
   if (value === null || value === undefined) throw new Error(`Brak wymaganego pola: ${fieldName}`);
 
@@ -162,12 +158,26 @@ function secondsSinceMidnight(date) {
   return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
 }
 
+// --------------------- CZAS ---------------------
+function validateTimeHHMM(value) {
+  return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(String(value));
+}
+
+function normalizeTimeHHMM(value) {
+  const text = requiredString(value, 'time');
+  if (!validateTimeHHMM(text)) {
+    throw new Error(`Nieprawidłowy format godziny: ${text}. Oczekiwano HH:MM`);
+  }
+  const [h, m] = text.split(':');
+  return `${pad2(Number(h))}:${m}`;
+}
+
 function normalizeTimeToHHMMSS(value) {
   const text = requiredString(value, 'planned_time');
   const match = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
 
   if (!match) {
-    throw new Error(`Nieprawidłowy format planned_time: ${text}. Wymagany format HH:MM:SS albo HH:MM`);
+    throw new Error(`Nieprawidłowy format czasu: ${text}. Wymagany format HH:MM:SS albo HH:MM`);
   }
 
   const hours = Number(match[1]);
@@ -175,7 +185,7 @@ function normalizeTimeToHHMMSS(value) {
   const seconds = Number(match[3] || 0);
 
   if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59) {
-    throw new Error(`Nieprawidłowy zakres godziny planned_time: ${text}`);
+    throw new Error(`Nieprawidłowy zakres czasu: ${text}`);
   }
 
   return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
@@ -185,6 +195,14 @@ function timeToSeconds(value) {
   const normalized = normalizeTimeToHHMMSS(value);
   const [h, m, s] = normalized.split(':').map(Number);
   return h * 3600 + m * 60 + s;
+}
+
+// Zamienia liczbę sekund od północy z powrotem na "HH:MM" (obcina do doby).
+function secondsToHHMM(totalSeconds) {
+  let s = ((Math.round(totalSeconds) % 86400) + 86400) % 86400;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${pad2(h)}:${pad2(m)}`;
 }
 
 function signedTimeDiffSeconds(actualSeconds, plannedSeconds) {
@@ -353,10 +371,45 @@ function stopPublicView(stop, distanceMeters, plannedTime) {
 
 const DAY_TYPE_TO_SERVICE_DAY = { weekday: 'WEEKDAY', weekend: 'WEEKEND', holiday: 'HOLIDAY' };
 
-// Zwraca spłaszczoną, chronologicznie posortowaną sekwencję przystanków ze
-// wszystkich Kursów (schedule_trips) przypisanych pojazdowi na dany dzień
-// (przypisania stałe z date=NULL oraz przypisania jednorazowe na daną datę;
-// jeśli oba istnieją dla tego samego kursu, wygrywa przypisanie na daną datę).
+// --------------------- TRASY: budowanie sekwencji dnia pojazdu ---------------------
+
+// Zwraca uporządkowaną listę przystanków trasy wraz z skumulowanym offsetem
+// (w sekundach) liczonym od startu trasy. Pierwszy przystanek = offset 0.
+function getRouteStopsCumulative(routeId) {
+  const conn = db.connection;
+  const rows = conn.prepare(`
+    SELECT rs.stop_id, rs.sequence_order, rs.minutes_from_previous,
+           s.name AS stop_name, s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
+    FROM route_stops rs
+    JOIN stops s ON s.id = rs.stop_id
+    WHERE rs.route_id = ?
+    ORDER BY rs.sequence_order
+  `).all(routeId);
+
+  let cumulativeSeconds = 0;
+  return rows.map((row, index) => {
+    const minutes = index === 0 ? 0 : Number(row.minutes_from_previous || 0);
+    cumulativeSeconds += minutes * 60;
+    return {
+      stop_id: row.stop_id,
+      sequence_order: row.sequence_order,
+      minutes_from_previous: index === 0 ? 0 : Number(row.minutes_from_previous || 0),
+      offset_seconds: cumulativeSeconds,
+      stop_name: row.stop_name,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      zone: row.zone,
+      stop_metadata: row.stop_metadata
+    };
+  });
+}
+
+// Buduje spłaszczoną, chronologicznie posortowaną sekwencję przystanków ze
+// WSZYSTKICH kursów (trip_assignments) przypisanych pojazdowi na dany dzień.
+// Dla każdego kursu: planowany czas przystanku = start_time + skumulowany offset.
+// Przypisania stałe (date=NULL) oraz jednorazowe (date=YYYY-MM-DD) łączą się;
+// jeśli istnieje przypisanie na konkretną datę, ma pierwszeństwo dla tego
+// samego kursu (ta sama trasa + start + typ dnia).
 function buildVehicleDaySequence(pcName, dayType, dateKey) {
   const pcNameValue = String(pcName || '').trim();
   const serviceDayType = DAY_TYPE_TO_SERVICE_DAY[String(dayType || '').toLowerCase()];
@@ -365,83 +418,76 @@ function buildVehicleDaySequence(pcName, dayType, dateKey) {
   const conn = db.connection;
 
   const assignmentRows = conn.prepare(`
-    SELECT trip_id, date FROM vehicle_trips WHERE pcName = ? AND (date IS NULL OR date = ?)
-  `).all(pcNameValue, dateKey);
+    SELECT ta.id, ta.route_id, ta.start_time, ta.date, ta.block_id,
+           r.name AS line_name, r.code AS line_code
+    FROM trip_assignments ta
+    JOIN routes r ON r.id = ta.route_id
+    WHERE ta.pcName = ?
+      AND ta.day_type = ?
+      AND (ta.date IS NULL OR ta.date = ?)
+      AND r.isActive = 1
+  `).all(pcNameValue, serviceDayType, dateKey);
 
   if (assignmentRows.length === 0) return [];
 
-  const tripIdSet = new Map();
+  // Deduplikacja: klucz = trasa + start_time. Przypisanie na konkretną datę
+  // wygrywa z przypisaniem stałym (date=NULL).
+  const byKey = new Map();
   for (const row of assignmentRows) {
-    const existing = tripIdSet.get(row.trip_id);
-    if (!existing || (row.date && !existing.date)) tripIdSet.set(row.trip_id, row);
+    const key = `${row.route_id}||${row.start_time}`;
+    const existing = byKey.get(key);
+    if (!existing || (row.date && !existing.date)) byKey.set(key, row);
   }
 
-  const tripIds = [...tripIdSet.keys()];
-  const tripPlaceholders = tripIds.map(() => '?').join(',');
+  const assignments = [...byKey.values()];
 
-  const tripRows = conn.prepare(`
-    SELECT st.id, st.schedule_id, st.side_id, st.departure_time, st.block_id,
-           side.direction AS side_direction,
-           sch.name AS line_name, sch.code AS line_code
-    FROM schedule_trips st
-    JOIN schedule_sides side ON side.id = st.side_id
-    JOIN schedules sch ON sch.id = st.schedule_id
-    WHERE st.id IN (${tripPlaceholders}) AND st.day_type = ?
-  `).all(...tripIds, serviceDayType);
-
-  if (tripRows.length === 0) return [];
-
-  const stopPlaceholders = tripRows.map(() => '?').join(',');
-  const stopRows = conn.prepare(`
-    SELECT ss.trip_id, ss.stop_id, ss.time, ss.sequence_order,
-           s.name AS stop_name, s.latitude, s.longitude, s.zone, s.metadata AS stop_metadata
-    FROM schedule_stops ss
-    JOIN stops s ON s.id = ss.stop_id
-    WHERE ss.trip_id IN (${stopPlaceholders})
-    ORDER BY ss.trip_id, ss.sequence_order
-  `).all(...tripRows.map(t => t.id));
-
-  const stopsByTrip = new Map();
-  for (const row of stopRows) {
-    if (!stopsByTrip.has(row.trip_id)) stopsByTrip.set(row.trip_id, []);
-    stopsByTrip.get(row.trip_id).push(row);
-  }
-
-  const sortedTrips = tripRows.slice().sort((a, b) => String(a.departure_time || '').localeCompare(String(b.departure_time || '')));
+  // Cache: sekwencja przystanków per trasa (jedno zapytanie na unikalną trasę).
+  const routeCache = new Map();
+  const getRoute = routeId => {
+    if (!routeCache.has(routeId)) routeCache.set(routeId, getRouteStopsCumulative(routeId));
+    return routeCache.get(routeId);
+  };
 
   const sequence = [];
-  for (const trip of sortedTrips) {
-    const stopsForTrip = stopsByTrip.get(trip.id) || [];
-    for (const row of stopsForTrip) {
-      const stopMetadata = jsonParse(row.stop_metadata, {});
+
+  for (const assignment of assignments) {
+    const startSeconds = timeToSeconds(assignment.start_time);
+    const routeStops = getRoute(assignment.route_id);
+
+    for (const rs of routeStops) {
+      const plannedSeconds = startSeconds + rs.offset_seconds;
+      const stopMetadata = jsonParse(rs.stop_metadata, {});
       sequence.push({
-        stop_id: row.stop_id,
-        planned_time: row.time,
-        sequence_index: row.sequence_order,
-        stop_name: row.stop_name,
+        stop_id: rs.stop_id,
+        planned_time: secondsToHHMM(plannedSeconds),
+        planned_seconds: plannedSeconds,
+        sequence_index: rs.sequence_order,
+        minutes_from_previous: rs.minutes_from_previous,
+        stop_name: rs.stop_name,
         stop_number: stopMetadata.number || '',
-        latitude: row.latitude,
-        longitude: row.longitude,
-        admin_zone: row.zone || stopMetadata.admin_zone || 'nieokreślona',
-        zone: row.zone || 'nieokreślona',
+        latitude: rs.latitude,
+        longitude: rs.longitude,
+        admin_zone: rs.zone || stopMetadata.admin_zone || 'nieokreślona',
+        zone: rs.zone || 'nieokreślona',
         zone_type: stopMetadata.zone_type || 'nieokreślony',
-        trip_id: trip.id,
-        side_id: trip.side_id,
-        side_direction: trip.side_direction,
-        block_id: trip.block_id || '',
-        line_id: trip.schedule_id,
-        line_number: trip.line_code || trip.line_name
+        trip_id: assignment.id,
+        route_id: assignment.route_id,
+        start_time: assignment.start_time,
+        block_id: assignment.block_id || '',
+        line_id: assignment.route_id,
+        line_number: assignment.line_code || assignment.line_name
       });
     }
   }
 
+  // Sortujemy chronologicznie po planowanym czasie (sekundach od północy).
+  sequence.sort((a, b) => a.planned_seconds - b.planned_seconds);
+
   return sequence;
 }
 
-// Zastępuje dawne "findActiveScheduleForVehicle" — zamiast jednego sztywno
-// przypisanego rozkładu, pojazd może dziś wykonywać wiele Kursów (różnych linii).
-// Dopasowanie do konkretnego przystanku/linii następuje dopiero po znalezieniu
-// najbliższego przystanku w sekwencji (patrz analyzeVehiclePayload).
+// Zastępuje dawne przypisanie jednego rozkładu — pojazd może dziś wykonywać
+// wiele kursów (różnych tras) o różnych godzinach startu.
 function findVehicleAssignmentForDay(pcName, dayType, dateKey) {
   const sequence = buildVehicleDaySequence(pcName, dayType, dateKey);
   if (sequence.length === 0) return null;
@@ -468,7 +514,9 @@ function enrichSequenceWithStops(sequence) {
     result.push({
       ...entry,
       stop,
-      planned_seconds: timeToSeconds(entry.planned_time)
+      planned_seconds: Number.isFinite(entry.planned_seconds)
+        ? entry.planned_seconds
+        : timeToSeconds(entry.planned_time)
     });
   }
 
@@ -717,9 +765,9 @@ function extractCameraQuality(payload, schedule) {
   };
 }
 
-function buildTripId(schedule, pcName, date) {
+function buildTripId(routeId, pcName, date) {
   const dateKey = formatDateKey(date);
-  const line = schedule ? schedule.line_id : 'no_line';
+  const line = routeId || 'no_route';
   return `${sanitizeFileSegment(pcName)}_${sanitizeFileSegment(line)}_${dateKey}`;
 }
 
@@ -862,14 +910,14 @@ function appendTripEventIfNeeded(status, date, appendTripEvent) {
     INSERT INTO trips(
       pcName, line_id, stop_id, timestamp, day_type, passengers_in, passengers_out,
       passengers_onboard, delay_seconds, punctuality_status, camera_error_detected,
-      distance_to_stop, is_at_stop, pcId, line_number, brigade, schedule_id, trip_id,
+      distance_to_stop, is_at_stop, pcId, line_number, brigade, route_id, trip_id,
       received_at, analyzed_at, latitude, longitude, planned_time, delay_abs_seconds,
       passenger_events, camera_count, selected_area_avg, selected_area_count, metadata
     )
     VALUES(
       @pcName, @line_id, @stop_id, @timestamp, @day_type, @passengers_in, @passengers_out,
       @passengers_onboard, @delay_seconds, @punctuality_status, @camera_error_detected,
-      @distance_to_stop, @is_at_stop, @pcId, @line_number, @brigade, @schedule_id, @trip_id,
+      @distance_to_stop, @is_at_stop, @pcId, @line_number, @brigade, @route_id, @trip_id,
       @received_at, @analyzed_at, @latitude, @longitude, @planned_time, @delay_abs_seconds,
       @passenger_events, @camera_count, @selected_area_avg, @selected_area_count, @metadata
     )
@@ -890,8 +938,8 @@ function appendTripEventIfNeeded(status, date, appendTripEvent) {
     pcId: status.pcId || '',
     line_number: status.line_number || null,
     brigade: status.brigade || null,
-    schedule_id: status.current_trip_id || null,
-    trip_id: status.current_trip_id || buildTripId(null, status.pcName, date),
+    route_id: status.route_id || null,
+    trip_id: status.current_trip_id || buildTripId(status.route_id, status.pcName, date),
     received_at: status.received_at,
     analyzed_at: status.updated_at,
     latitude: Number.isFinite(status.latitude) ? status.latitude : null,
@@ -935,6 +983,7 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
     line_id: null,
     line_number: null,
     brigade: null,
+    route_id: null,
     current_trip_id: null,
     day_type: assignment ? dayType : null,
     geofence_radius_meters: GEOFENCE_RADIUS_METERS,
@@ -1017,6 +1066,7 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
     line_id: target ? target.entry.line_id : null,
     line_number: target ? target.entry.line_number : null,
     brigade: target ? target.entry.block_id : null,
+    route_id: target ? target.entry.route_id : null,
     current_trip_id: target ? target.entry.trip_id : null,
     status: punctualityStatus,
     punctuality_status: punctualityStatus,
@@ -1085,7 +1135,7 @@ function logStatusTick(status) {
   const lng = Number.isFinite(status.longitude) ? status.longitude.toFixed(6) : 'BRAK';
 
   if (!status.schedule_defined) {
-    console.log(`Zaktualizowano pozycję komputera pokładowego (${status.pcName}). Współrzędne: [${lat}, ${lng}]. Brak zdefiniowanego rozkładu jazdy.`);
+    console.log(`Zaktualizowano pozycję komputera pokładowego (${status.pcName}). Współrzędne: [${lat}, ${lng}]. Brak przypisanych kursów.`);
     return;
   }
 
@@ -1149,7 +1199,7 @@ function buildTripsWhere(query, alias = 't') {
   const params = {};
 
   const pcName = optionalString(query.pcName || query.pc_name, '');
-  const lineId = optionalString(query.line_id || query.lineId || query.line, '');
+  const lineId = optionalString(query.line_id || query.lineId || query.line || query.route_id || query.routeId, '');
   const dayType = optionalString(query.day_type || query.dayType, '');
   const stopId = optionalString(query.stop_id || query.stopId, '');
   const startDate = optionalString(query.start || query.from || query.date_from || query.dateFrom, '');
@@ -1263,7 +1313,7 @@ function tripFromRow(row) {
     line_id: row.line_id,
     line_number: row.line_number || row.line_id,
     brigade: row.brigade || '',
-    schedule_id: row.schedule_id,
+    route_id: row.route_id,
     day_type: row.day_type,
     timestamp: row.timestamp,
     received_at: row.received_at,
@@ -1306,13 +1356,17 @@ module.exports = {
   readJsonBody,
   isFiniteNumber,
   toFiniteNumber,
+  toFiniteInt,
   requiredString,
   optionalString,
   normalizeUuid,
   sanitizeFileSegment,
   secondsSinceMidnight,
+  validateTimeHHMM,
+  normalizeTimeHHMM,
   normalizeTimeToHHMMSS,
   timeToSeconds,
+  secondsToHHMM,
   signedTimeDiffSeconds,
   getPunctualityStatus,
   getByPath,
@@ -1323,6 +1377,7 @@ module.exports = {
   findStopById,
   normalizeStop,
   stopPublicView,
+  getRouteStopsCumulative,
   buildVehicleDaySequence,
   findVehicleAssignmentForDay,
   getScheduleSequence,

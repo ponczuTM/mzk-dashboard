@@ -14,7 +14,7 @@ const GEOFENCE_RADIUS_METERS = Number(process.env.ROOM_GEOFENCE_RADIUS_METERS ||
 const PUNCTUALITY_TOLERANCE_SECONDS = Number(process.env.ROOM_PUNCTUALITY_TOLERANCE_SECONDS || 60);
 const FRAME_HISTORY_LIMIT_IN_DB = Number(process.env.ROOM_FRAME_HISTORY_LIMIT_IN_DB || 50000);
 const DAY_TYPES = ['weekday', 'weekend', 'holiday'];
-const DIRECTIONS = ['outbound', 'inbound']; // dwa kierunki
+const DAY_TYPES_UPPER = ['WEEKDAY', 'WEEKEND', 'HOLIDAY'];
 
 // Obiekt przechowujący połączenie – będziemy modyfikować jego właściwość
 const db = { connection: null };
@@ -119,10 +119,10 @@ function ensureDatabaseReady() {
     // Funkcja może być już zarejestrowana po hot-reloadzie w niektórych środowiskach.
   }
 
-  // Przypisujemy połączenie do obiektu db
   db.connection = conn;
 
   initSchema(conn);
+  createIndexes(conn);
   seedDefaultSettings(conn);
 
   dbState.ready = true;
@@ -149,8 +149,11 @@ function initSchema(conn) {
       metadata TEXT
     );
 
-    -- 1. Główna linia/rozkład (np. Linia 10)
-    CREATE TABLE IF NOT EXISTS schedules (
+    -- 1. TRASA (Route): uporządkowana sekwencja przystanków z offsetami
+    --    czasu (w MINUTACH) liczonymi od poprzedniego przystanku.
+    --    Trasa NIE zna kierunku ani godziny startu — to czysty szablon
+    --    geometrii przejazdu. Kierunek wynika z KOLEJNOŚCI przystanków.
+    CREATE TABLE IF NOT EXISTS routes (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       code TEXT,
@@ -159,50 +162,35 @@ function initSchema(conn) {
       metadata TEXT DEFAULT '{}'
     );
 
-    -- 2. Kierunki/Warianty linii (np. "Do: Pętla Zachód", "Do: Dworzec")
-    CREATE TABLE IF NOT EXISTS schedule_sides (
+    -- 2. Przystanki trasy: sekwencja + offset minut OD POPRZEDNIEGO przystanku.
+    --    sequence_order = 1 (pierwszy) ma z definicji minutes_from_previous = 0.
+    CREATE TABLE IF NOT EXISTS route_stops (
       id TEXT PRIMARY KEY,
-      schedule_id TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('FROM_START', 'TO_START')),
-      name TEXT,
-      metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
-      UNIQUE (schedule_id, direction)
-    );
-
-    -- 3. Pojedyncze Kursy (Trips) w ciągu dnia dla danego kierunku
-    CREATE TABLE IF NOT EXISTS schedule_trips (
-      id TEXT PRIMARY KEY,
-      schedule_id TEXT NOT NULL,
-      side_id TEXT NOT NULL,
-      day_type TEXT NOT NULL CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
-      departure_time TEXT NOT NULL,
-      block_id TEXT,
-      metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE,
-      FOREIGN KEY (side_id) REFERENCES schedule_sides(id) ON DELETE CASCADE
-    );
-
-    -- 4. Sekwencja przystanków dla KONKRETNEGO KURSU (Trip)
-    CREATE TABLE IF NOT EXISTS schedule_stops (
-      id TEXT PRIMARY KEY,
-      trip_id TEXT NOT NULL,
+      route_id TEXT NOT NULL,
       stop_id TEXT NOT NULL,
       sequence_order INTEGER NOT NULL,
-      time TEXT NOT NULL,
+      minutes_from_previous INTEGER NOT NULL DEFAULT 0,
       metadata TEXT DEFAULT '{}',
-      FOREIGN KEY (trip_id) REFERENCES schedule_trips(id) ON DELETE CASCADE,
-      FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE CASCADE
+      FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE,
+      FOREIGN KEY (stop_id) REFERENCES stops(id) ON DELETE CASCADE,
+      UNIQUE (route_id, sequence_order)
     );
 
-    -- 5. Przypisania pojazdów do kursów
-    CREATE TABLE IF NOT EXISTS vehicle_trips (
+    -- 3. KURS (Trip): przypisanie TRASY + godziny startu + typu dnia
+    --    do KONKRETNEGO pojazdu (pcName). Opcjonalnie na konkretną datę.
+    --    Wiele pojazdów może dziś jechać tą samą trasą o różnych godzinach
+    --    — co wcześniej było niemożliwe.
+    CREATE TABLE IF NOT EXISTS trip_assignments (
       id TEXT PRIMARY KEY,
       pcName TEXT NOT NULL,
-      trip_id TEXT NOT NULL,
+      route_id TEXT NOT NULL,
+      day_type TEXT NOT NULL CHECK (day_type IN ('WEEKDAY', 'WEEKEND', 'HOLIDAY')),
+      start_time TEXT NOT NULL,
       date TEXT,
+      block_id TEXT,
+      metadata TEXT DEFAULT '{}',
       FOREIGN KEY (pcName) REFERENCES vehicles(pcName) ON DELETE CASCADE,
-      FOREIGN KEY (trip_id) REFERENCES schedule_trips(id) ON DELETE CASCADE
+      FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS current_status (
@@ -257,7 +245,7 @@ function initSchema(conn) {
       pcId TEXT,
       line_number TEXT,
       brigade TEXT,
-      schedule_id TEXT,
+      route_id TEXT,
       trip_id TEXT,
       received_at TEXT,
       analyzed_at TEXT,
@@ -282,27 +270,11 @@ function initSchema(conn) {
       value TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
-    CREATE INDEX IF NOT EXISTS idx_schedules_name ON schedules(name);
-    CREATE INDEX IF NOT EXISTS idx_schedules_code ON schedules(code);
-    CREATE INDEX IF NOT EXISTS idx_schedule_sides_schedule_id ON schedule_sides(schedule_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_trips_side_day ON schedule_trips(side_id, day_type);
-    CREATE INDEX IF NOT EXISTS idx_schedule_trips_schedule ON schedule_trips(schedule_id);
-    CREATE INDEX IF NOT EXISTS idx_schedule_trips_departure ON schedule_trips(departure_time);
-    CREATE INDEX IF NOT EXISTS idx_schedule_stops_trip ON schedule_stops(trip_id, sequence_order);
-    CREATE INDEX IF NOT EXISTS idx_schedule_stops_stop ON schedule_stops(stop_id);
-    CREATE INDEX IF NOT EXISTS idx_vehicle_trips_pcname ON vehicle_trips(pcName, date);
-    CREATE INDEX IF NOT EXISTS idx_vehicle_trips_trip ON vehicle_trips(trip_id, date);
-    CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
-    CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
-    CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
-    CREATE INDEX IF NOT EXISTS idx_raw_frames_id ON raw_frames(id);
-    CREATE INDEX IF NOT EXISTS idx_trips_filters ON trips(pcName, line_id, stop_id, day_type, received_at);
-    CREATE INDEX IF NOT EXISTS idx_trips_line_vehicle ON trips(line_id, pcName, received_at);
-    CREATE INDEX IF NOT EXISTS idx_trips_stop ON trips(stop_id, received_at);
-    CREATE INDEX IF NOT EXISTS idx_trips_id ON trips(id);
-    CREATE INDEX IF NOT EXISTS idx_trips_quality ON trips(camera_error_detected);
   `);
+  // UWAGA: indeksy tworzymy w osobnej funkcji (createIndexes), wywoływanej
+  // DOPIERO po migracji kolumn (ensureColumn). W przeciwnym razie na bazie z
+  // wcześniejszej wersji indeks na nieistniejącej jeszcze kolumnie (np.
+  // routes.code albo route_stops.sequence_order) rzuciłby "no such column".
 
   ensureColumn(conn, 'current_status', 'status', 'TEXT');
   ensureColumn(conn, 'current_status', 'pcId', 'TEXT');
@@ -317,7 +289,7 @@ function initSchema(conn) {
   ensureColumn(conn, 'trips', 'pcId', 'TEXT');
   ensureColumn(conn, 'trips', 'line_number', 'TEXT');
   ensureColumn(conn, 'trips', 'brigade', 'TEXT');
-  ensureColumn(conn, 'trips', 'schedule_id', 'TEXT');
+  ensureColumn(conn, 'trips', 'route_id', 'TEXT');
   ensureColumn(conn, 'trips', 'trip_id', 'TEXT');
   ensureColumn(conn, 'trips', 'received_at', 'TEXT');
   ensureColumn(conn, 'trips', 'analyzed_at', 'TEXT');
@@ -330,6 +302,63 @@ function initSchema(conn) {
   ensureColumn(conn, 'trips', 'selected_area_avg', 'REAL');
   ensureColumn(conn, 'trips', 'selected_area_count', 'INTEGER');
   ensureColumn(conn, 'trips', 'metadata', 'TEXT');
+
+  // --- Migracja nowego modelu tras/kursów ---
+  // CREATE TABLE IF NOT EXISTS pomija tworzenie, gdy tabela już istnieje
+  // (np. z wcześniejszej wersji o innej strukturze). Dla takich baz
+  // dokładamy brakujące kolumny, aby zapytania na route_stops /
+  // trip_assignments nie kończyły się błędem "no such column".
+  if (tableExists(conn, 'routes')) {
+    ensureColumn(conn, 'routes', 'code', 'TEXT');
+    ensureColumn(conn, 'routes', 'color', "TEXT DEFAULT '#3B82F6'");
+    ensureColumn(conn, 'routes', 'isActive', 'INTEGER DEFAULT 1');
+    ensureColumn(conn, 'routes', 'metadata', "TEXT DEFAULT '{}'");
+  }
+
+  if (tableExists(conn, 'route_stops')) {
+    ensureColumn(conn, 'route_stops', 'sequence_order', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(conn, 'route_stops', 'minutes_from_previous', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(conn, 'route_stops', 'metadata', "TEXT DEFAULT '{}'");
+  }
+
+  if (tableExists(conn, 'trip_assignments')) {
+    ensureColumn(conn, 'trip_assignments', 'route_id', 'TEXT');
+    ensureColumn(conn, 'trip_assignments', 'day_type', 'TEXT');
+    ensureColumn(conn, 'trip_assignments', 'start_time', 'TEXT');
+    ensureColumn(conn, 'trip_assignments', 'date', 'TEXT');
+    ensureColumn(conn, 'trip_assignments', 'block_id', 'TEXT');
+    ensureColumn(conn, 'trip_assignments', 'metadata', "TEXT DEFAULT '{}'");
+  }
+}
+
+function tableExists(conn, tableName) {
+  const row = conn
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+    .get(tableName);
+  return Boolean(row);
+}
+
+// Indeksy tworzone PO migracji kolumn — patrz komentarz w initSchema.
+function createIndexes(conn) {
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_stops_zone ON stops(zone);
+    CREATE INDEX IF NOT EXISTS idx_routes_name ON routes(name);
+    CREATE INDEX IF NOT EXISTS idx_routes_code ON routes(code);
+    CREATE INDEX IF NOT EXISTS idx_route_stops_route ON route_stops(route_id, sequence_order);
+    CREATE INDEX IF NOT EXISTS idx_route_stops_stop ON route_stops(stop_id);
+    CREATE INDEX IF NOT EXISTS idx_trip_assign_pcname ON trip_assignments(pcName, day_type, date);
+    CREATE INDEX IF NOT EXISTS idx_trip_assign_route ON trip_assignments(route_id, day_type);
+    CREATE INDEX IF NOT EXISTS idx_trip_assign_date ON trip_assignments(date);
+    CREATE INDEX IF NOT EXISTS idx_vehicles_last_seen ON vehicles(last_seen);
+    CREATE INDEX IF NOT EXISTS idx_current_status_updated ON current_status(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_raw_frames_pc_time ON raw_frames(pcName, received_at);
+    CREATE INDEX IF NOT EXISTS idx_raw_frames_id ON raw_frames(id);
+    CREATE INDEX IF NOT EXISTS idx_trips_filters ON trips(pcName, line_id, stop_id, day_type, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_line_vehicle ON trips(line_id, pcName, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_stop ON trips(stop_id, received_at);
+    CREATE INDEX IF NOT EXISTS idx_trips_id ON trips(id);
+    CREATE INDEX IF NOT EXISTS idx_trips_quality ON trips(camera_error_detected);
+  `);
 }
 
 function ensureColumn(conn, tableName, columnName, columnSql) {
@@ -393,7 +422,7 @@ module.exports = {
   pruneHistory,
   getPolishPublicHolidayKeys,
   DAY_TYPES,
-  DIRECTIONS,
+  DAY_TYPES_UPPER,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
   FRAME_HISTORY_LIMIT_IN_DB,

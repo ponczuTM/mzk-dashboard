@@ -104,28 +104,23 @@ function createApi(baseUrl) {
       put(`/stops/${encodeURIComponent(id)}`, payload),
     deleteStop: (id) => del(`/stops/${encodeURIComponent(id)}`),
 
-    // --- LINIE (schedules) ---
-    // Linia (Schedule) -> Wariant Kierunku (ScheduleSide, FROM_START/TO_START,
-    // tworzone automatycznie przy POST) -> Kurs o konkretnej godzinie
-    // (ScheduleTrip) -> Sekwencja przystanków z godzinami (ScheduleStop).
-    getSchedules: (query) => get('/api/schedules', query),
-    getSchedule: (id) => get(`/api/schedules/${encodeURIComponent(id)}`),
-    createSchedule: (payload) => post('/api/schedules', payload),
-    updateSchedule: (id, payload) =>
-      put(`/api/schedules/${encodeURIComponent(id)}`, payload),
-    deleteSchedule: (id) => del(`/api/schedules/${encodeURIComponent(id)}`),
-
-    // Nazwa docelowa/opis wariantu kierunku (np. "Do: Pętla Zachód")
-    updateScheduleSide: (scheduleId, sideId, payload) =>
-      patch(
-        `/api/schedules/${encodeURIComponent(scheduleId)}/sides/${encodeURIComponent(sideId)}`,
-        payload
-      ),
-
-    // --- KURSY (schedule_trips) ---
-    createTrip: (scheduleId, tripData) =>
-      post(`/api/schedules/${encodeURIComponent(scheduleId)}/trips`, tripData),
-    deleteTrip: (tripId) => del(`/api/trips/${encodeURIComponent(tripId)}`),
+    // --- TRASY (routes) ---
+    // Trasa (Route) = uporządkowana sekwencja przystanków. Kierunek wynika
+    // z KOLEJNOŚCI przystanków. Każdy przystanek (poza pierwszym) ma
+    // minutes_from_previous — czas jazdy od poprzedniego przystanku.
+    // Odpowiedź getRoutes/getRoute zawiera już wyliczone skumulowane offsety
+    // (pola offset_minutes na przystankach oraz total_minutes na trasie).
+    getRoutes: (query) => get('/api/routes', query),
+    getRoute: (id) => get(`/api/routes/${encodeURIComponent(id)}`),
+    // createRoute({ name, code?, color?, isActive?, stops:[{stop_id, minutes_from_previous}] })
+    createRoute: (payload) => post('/api/routes', payload),
+    // updateRoute — aktualizuje metadane; jeśli poda się stops, zastępuje sekwencję.
+    updateRoute: (id, payload) =>
+      put(`/api/routes/${encodeURIComponent(id)}`, payload),
+    deleteRoute: (id) => del(`/api/routes/${encodeURIComponent(id)}`),
+    // replaceRouteStops(id, [{stop_id, minutes_from_previous}]) — zastępuje CAŁĄ sekwencję.
+    replaceRouteStops: (id, stops) =>
+      put(`/api/routes/${encodeURIComponent(id)}/stops`, { stops }),
 
     // --- Typy dni ---
     getServiceDays: () => get('/service-days'),
@@ -133,21 +128,39 @@ function createApi(baseUrl) {
     // --- Święta ---
     getHolidays: () => get('/holidays'),
     createHoliday: (payload) => post('/holidays', payload),
-    deleteHoliday: (date) =>
-      del(`/holidays/${encodeURIComponent(date)}`),
+    deleteHoliday: (date) => del(`/holidays/${encodeURIComponent(date)}`),
 
     // --- Pojazdy ---
-    getVehicles: () => get('/vehicles'),
+    // Pojazdy (pcName) rejestrują się automatycznie po odebraniu ramki
+    // IsarsoftData — nigdy nie są tworzone ręcznie.
+    getVehicles: () => get('/api/vehicles'),
 
-    // --- Dyspozytura / przypisania pojazdów do kursów ---
-    assignVehicleTrips: (pcName, tripIds, date) =>
-      post('/api/vehicles/assign-trips', {
-        pcName,
-        trip_ids: tripIds,
-        date: date || null,
-      }),
+    // --- KURSY / PRZYPISANIA POJAZDÓW (trip_assignments) ---
+    // Kurs = przypisanie pojazd + trasa + godzina startu + typ dnia
+    // (opcjonalnie konkretna data i brygada). Ten sam pojazd może jechać tą
+    // samą trasą wielokrotnie o różnych godzinach.
+    //
+    // assignVehicleTrips(pcName, {
+    //   day_type?, date?, replace?,
+    //   assignments: [{ route_id, start_time: "HH:MM", day_type, block_id? }]
+    // })
+    assignVehicleTrips: (pcName, payload) =>
+      post('/api/vehicles/assign-trips', { pcName, ...payload }),
+
+    // Surowa lista przypisanych kursów pojazdu.
+    // getVehicleAssignments(pcName, { day_type?, date? })
+    getVehicleAssignments: (pcName, query) =>
+      get(`/api/vehicles/${encodeURIComponent(pcName)}/assignments`, query),
+
+    // Rozwinięty rozkład dnia: trips[] z wyliczonymi godzinami (planned_time)
+    // + legs[] (pauzy między kursami).
+    // getVehicleSchedule(pcName, { date?, day_type? })
     getVehicleSchedule: (pcName, query) =>
       get(`/api/vehicles/${encodeURIComponent(pcName)}/schedule`, query),
+
+    // Usuwa pojedynczy kurs (przypisanie) po jego id.
+    deleteTrip: (assignmentId) =>
+      del(`/api/trips/${encodeURIComponent(assignmentId)}`),
 
     // --- Zdarzenia trackingowe / raporty ---
     getTrips: (query) => get('/trips', query),
@@ -179,15 +192,62 @@ export const BackendProvider = ({ children, baseUrl }) => {
     setServerUrl(url || DEFAULT_BASE_URL);
   }, []);
 
-  // ---------- LINIE / KURSY / PRZYPISANIA POJAZDÓW ----------
-  const [schedules, setSchedules] = useState([]);
-  const [schedulesLoading, setSchedulesLoading] = useState(false);
-  const [trips, setTrips] = useState([]);
-  const [vehicleAssignments, setVehicleAssignments] = useState({});
+  // ---------- TRASY ----------
+  const [routes, setRoutes] = useState([]);
+  const [routesLoading, setRoutesLoading] = useState(false);
+
+  const fetchRoutes = useCallback(
+    async (query) => {
+      setRoutesLoading(true);
+      try {
+        const data = await api.getRoutes(query);
+        const next = data.routes || [];
+        setRoutes(next);
+        return next;
+      } finally {
+        setRoutesLoading(false);
+      }
+    },
+    [api]
+  );
+
+  const createRoute = useCallback(
+    async (data) => {
+      const result = await api.createRoute(data);
+      await fetchRoutes();
+      return result.route;
+    },
+    [api, fetchRoutes]
+  );
+
+  const updateRoute = useCallback(
+    async (id, payload) => {
+      const result = await api.updateRoute(id, payload);
+      await fetchRoutes();
+      return result.route;
+    },
+    [api, fetchRoutes]
+  );
+
+  const deleteRoute = useCallback(
+    async (id) => {
+      const result = await api.deleteRoute(id);
+      setRoutes((prev) => prev.filter((r) => r.id !== id));
+      return result;
+    },
+    [api]
+  );
+
+  const replaceRouteStops = useCallback(
+    async (id, stops) => {
+      const result = await api.replaceRouteStops(id, stops);
+      await fetchRoutes();
+      return result.route;
+    },
+    [api, fetchRoutes]
+  );
 
   // ---------- POJAZDY ----------
-  // Pojazdy (pcName) rejestrują się automatycznie w bazie po odebraniu ramki
-  // IsarsoftData — nigdy nie są tworzone ręcznie przez użytkownika.
   const [vehicles, setVehicles] = useState([]);
   const [vehiclesLoading, setVehiclesLoading] = useState(false);
 
@@ -203,74 +263,28 @@ export const BackendProvider = ({ children, baseUrl }) => {
     }
   }, [api]);
 
-  const fetchSchedules = useCallback(
-    async (query) => {
-      setSchedulesLoading(true);
-      try {
-        const data = await api.getSchedules(query);
-        const next = data.schedules || [];
-        setSchedules(next);
-        return next;
-      } finally {
-        setSchedulesLoading(false);
-      }
-    },
-    [api]
-  );
+  // ---------- KURSY / PRZYPISANIA ----------
+  const [vehicleSchedules, setVehicleSchedules] = useState({});
 
-  const createSchedule = useCallback(
-    async (data) => {
-      const result = await api.createSchedule(data);
-      await fetchSchedules();
-      return result.schedule;
-    },
-    [api, fetchSchedules]
-  );
-
-  const deleteSchedule = useCallback(
-    async (id) => {
-      const result = await api.deleteSchedule(id);
-      setSchedules((prev) => prev.filter((s) => s.id !== id));
+  const assignVehicleTrips = useCallback(
+    async (pcName, payload) => {
+      const result = await api.assignVehicleTrips(pcName, payload);
       return result;
     },
     [api]
   );
 
-  // ---------- NOWA METODA: aktualizacja nazwy wariantu kierunku ----------
-  const updateScheduleSide = useCallback(
-    async (scheduleId, sideId, payload) => {
-      const result = await api.updateScheduleSide(scheduleId, sideId, payload);
-      // Po pomyślnej aktualizacji odświeżamy całą listę linii,
-      // aby zobaczyć zmiany w interfejsie.
-      await fetchSchedules();
-      return result;
+  const fetchVehicleAssignments = useCallback(
+    async (pcName, query) => {
+      const result = await api.getVehicleAssignments(pcName, query);
+      return result.assignments || [];
     },
-    [api, fetchSchedules]
-  );
-
-  const createTrip = useCallback(
-    async (scheduleId, tripData) => {
-      const result = await api.createTrip(scheduleId, tripData);
-      setTrips((prev) => [...prev, result.trip]);
-      await fetchSchedules();
-      return result.trip;
-    },
-    [api, fetchSchedules]
+    [api]
   );
 
   const deleteTrip = useCallback(
-    async (tripId) => {
-      const result = await api.deleteTrip(tripId);
-      setTrips((prev) => prev.filter((t) => t.id !== tripId));
-      await fetchSchedules();
-      return result;
-    },
-    [api, fetchSchedules]
-  );
-
-  const assignVehicleToTrips = useCallback(
-    async (pcName, tripIds, date) => {
-      const result = await api.assignVehicleTrips(pcName, tripIds, date);
+    async (assignmentId) => {
+      const result = await api.deleteTrip(assignmentId);
       return result;
     },
     [api]
@@ -279,7 +293,7 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const fetchVehicleSchedule = useCallback(
     async (pcName, query) => {
       const result = await api.getVehicleSchedule(pcName, query);
-      setVehicleAssignments((prev) => ({ ...prev, [pcName]: result }));
+      setVehicleSchedules((prev) => ({ ...prev, [pcName]: result }));
       return result;
     },
     [api]
@@ -291,42 +305,46 @@ export const BackendProvider = ({ children, baseUrl }) => {
       serverUrl,
       setServerUrl: updateServerUrl,
 
-      schedules,
-      schedulesLoading,
-      trips,
-      vehicleAssignments,
+      // stan
+      routes,
+      routesLoading,
       vehicles,
       vehiclesLoading,
+      vehicleSchedules,
 
-      fetchSchedules,
-      createSchedule,
-      deleteSchedule,
-      updateScheduleSide,   // ← nowa metoda kontekstowa
-      createTrip,
-      deleteTrip,
-      assignVehicleToTrips,
-      fetchVehicleSchedule,
+      // trasy
+      fetchRoutes,
+      createRoute,
+      updateRoute,
+      deleteRoute,
+      replaceRouteStops,
+
+      // pojazdy / kursy
       fetchVehicles,
+      assignVehicleTrips,
+      fetchVehicleAssignments,
+      deleteTrip,
+      fetchVehicleSchedule,
     }),
     [
       api,
       serverUrl,
       updateServerUrl,
-      schedules,
-      schedulesLoading,
-      trips,
-      vehicleAssignments,
+      routes,
+      routesLoading,
       vehicles,
       vehiclesLoading,
-      fetchSchedules,
-      createSchedule,
-      deleteSchedule,
-      updateScheduleSide,
-      createTrip,
-      deleteTrip,
-      assignVehicleToTrips,
-      fetchVehicleSchedule,
+      vehicleSchedules,
+      fetchRoutes,
+      createRoute,
+      updateRoute,
+      deleteRoute,
+      replaceRouteStops,
       fetchVehicles,
+      assignVehicleTrips,
+      fetchVehicleAssignments,
+      deleteTrip,
+      fetchVehicleSchedule,
     ]
   );
 

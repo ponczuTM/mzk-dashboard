@@ -31,15 +31,6 @@ const DAY_TYPES = [
   { key: 'HOLIDAY', label: 'Święto' },
 ];
 
-const SIDE_DIRECTIONS = ['FROM_START', 'TO_START'];
-
-const DIRECTION_LABELS = {
-  FROM_START: 'Tam (od pętli początkowej)',
-  TO_START: 'Powrót (do pętli początkowej)',
-};
-
-// Losowe ID przystanku: 8 znaków (małe litery + cyfry).
-// Użytkownik nie ma żadnego wpływu na ID.
 const generateStopId = () => {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let out = '';
@@ -64,7 +55,7 @@ const createEmptyStopForm = () => ({
   longitude: '',
 });
 
-const createEmptyScheduleForm = () => ({
+const createEmptyRouteForm = () => ({
   name: '',
   code: '',
   color: '#3B82F6',
@@ -89,7 +80,6 @@ const normalizeTimeHHMM = (time) => {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 };
 
-// Parsuje liczbę akceptując zarówno kropkę, jak i przecinek dziesiętny.
 const parseCoord = (raw) => {
   if (raw === null || raw === undefined) return NaN;
   const cleaned = String(raw).trim().replace(',', '.');
@@ -97,32 +87,19 @@ const parseCoord = (raw) => {
   return parseFloat(cleaned);
 };
 
-// Parser CSV przystanków.
-// - separator: średnik (;) — zgodnie z przykładem użytkownika.
-// - pierwszy wiersz traktowany jest jako nagłówek, jeśli wygląda na nagłówek
-//   (tzn. jego kolumny współrzędnych nie są liczbami).
-// - kolejność kolumn: nazwa; szerokość; wysokość(=długość geogr.).
-// Zwraca { rows: [{ name, latitude, longitude }], errors: [string] }.
 const parseStopsCsv = (text) => {
   const errors = [];
   const rows = [];
-
-  // Usuń BOM, znormalizuj końce linii.
   const clean = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   const lines = clean.split('\n').filter((l) => l.trim() !== '');
-
   if (lines.length === 0) {
     return { rows, errors: ['Plik jest pusty.'] };
   }
-
-  // Wykryj nagłówek: jeśli druga i trzecia kolumna pierwszego wiersza nie są liczbami.
   const firstCols = lines[0].split(';');
   const looksLikeHeader =
     firstCols.length >= 3 &&
     (Number.isNaN(parseCoord(firstCols[1])) || Number.isNaN(parseCoord(firstCols[2])));
-
   const startIdx = looksLikeHeader ? 1 : 0;
-
   for (let i = startIdx; i < lines.length; i += 1) {
     const lineNo = i + 1;
     const cols = lines[i].split(';');
@@ -133,7 +110,6 @@ const parseStopsCsv = (text) => {
     const name = cols[0].trim();
     const latitude = parseCoord(cols[1]);
     const longitude = parseCoord(cols[2]);
-
     if (!name) {
       errors.push(`Wiersz ${lineNo}: brak nazwy przystanku.`);
       continue;
@@ -144,7 +120,6 @@ const parseStopsCsv = (text) => {
     }
     rows.push({ name, latitude, longitude });
   }
-
   return { rows, errors };
 };
 
@@ -169,62 +144,54 @@ const todayKey = () => {
 const Schedule = () => {
   const {
     api,
-    schedules,
-    schedulesLoading,
-    fetchSchedules,
-    createSchedule,
-    deleteSchedule,
-    createTrip,
+    routes,
+    routesLoading,
+    fetchRoutes,
+    createRoute,
+    updateRoute,
+    deleteRoute,
     deleteTrip,
+    replaceRouteStops,
     vehicles,
     vehiclesLoading,
     fetchVehicles,
-    assignVehicleToTrips,
     fetchVehicleSchedule,
+    fetchVehicleAssignments,
+    assignVehicleTrips,
   } = useBackend();
 
   const [activeTab, setActiveTab] = useState('schedules');
   const [error, setError] = useState(null);
 
-  // ---------- PRZYSTANKI ----------
   const [stops, setStops] = useState([]);
   const [stopsLoading, setStopsLoading] = useState(false);
   const [stopForm, setStopForm] = useState(createEmptyStopForm());
   const [editingStop, setEditingStop] = useState(null);
 
-  // ---------- IMPORT CSV PRZYSTANKÓW ----------
   const fileInputRef = useRef(null);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState({ done: 0, total: 0 });
-  const [importResult, setImportResult] = useState(null); // { created, updated, failed, errors: [] }
+  const [importResult, setImportResult] = useState(null);
 
-  // ---------- LINIE (schedules) ----------
-  const [scheduleForm, setScheduleForm] = useState(createEmptyScheduleForm());
-  const [savingSchedule, setSavingSchedule] = useState(false);
-  const [selectedScheduleId, setSelectedScheduleId] = useState('');
-  const [selectedSideId, setSelectedSideId] = useState('');
-  const [editingSideName, setEditingSideName] = useState(false);
-  const [sideNameDraft, setSideNameDraft] = useState('');
-  const [savingSideName, setSavingSideName] = useState(false);
+  const [routeForm, setRouteForm] = useState(createEmptyRouteForm());
+  const [savingRoute, setSavingRoute] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState('');
+  const [routeStops, setRouteStops] = useState([]);
+  const [savingStops, setSavingStops] = useState(false);
 
-  // ---------- NOWY KURS ----------
-  const [tripDayType, setTripDayType] = useState('WEEKDAY');
-  const [tripDepartureTime, setTripDepartureTime] = useState('');
-  const [tripBlockId, setTripBlockId] = useState('');
-  const [tripStops, setTripStops] = useState([]);
-  const [addStopId, setAddStopId] = useState('');
-  const [savingTrip, setSavingTrip] = useState(false);
-
-  // ---------- POJAZDY / DYSPOZYTURA ----------
   const [assignPcName, setAssignPcName] = useState('');
   const [assignDate, setAssignDate] = useState('');
-  const [assignDayTypeFilter, setAssignDayTypeFilter] = useState('WEEKDAY');
-  const [selectedTripIds, setSelectedTripIds] = useState(() => new Set());
-  const [assigning, setAssigning] = useState(false);
+  const [newTripRouteId, setNewTripRouteId] = useState('');
+  const [newTripDayType, setNewTripDayType] = useState('WEEKDAY');
+  const [newTripStartTime, setNewTripStartTime] = useState('');
+  const [newTripBlockId, setNewTripBlockId] = useState('');
+  const [savingTrip, setSavingTrip] = useState(false);
+  const [vehicleAssignments, setVehicleAssignments] = useState([]);
+  const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+
   const [preview, setPreview] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
-  // =================== ŁADOWANIE ===================
   const loadStops = useCallback(async () => {
     setStopsLoading(true);
     try {
@@ -237,13 +204,13 @@ const Schedule = () => {
     }
   }, [api]);
 
-  const loadSchedules = useCallback(async () => {
+  const loadRoutes = useCallback(async () => {
     try {
-      await fetchSchedules();
+      await fetchRoutes();
     } catch (err) {
-      setError(err.message || 'Nie udało się pobrać linii.');
+      setError(err.message || 'Nie udało się pobrać tras.');
     }
-  }, [fetchSchedules]);
+  }, [fetchRoutes]);
 
   const loadVehicles = useCallback(async () => {
     try {
@@ -253,79 +220,57 @@ const Schedule = () => {
     }
   }, [fetchVehicles]);
 
+  const loadVehicleAssignments = useCallback(async (pcName) => {
+    if (!pcName) {
+      setVehicleAssignments([]);
+      return;
+    }
+    setVehicleAssignmentsLoading(true);
+    try {
+      const assignments = await fetchVehicleAssignments(pcName, {
+        day_type: newTripDayType,
+        date: assignDate || undefined,
+      });
+      setVehicleAssignments(assignments);
+    } catch (err) {
+      setError(err.message || 'Nie udało się pobrać kursów pojazdu.');
+    } finally {
+      setVehicleAssignmentsLoading(false);
+    }
+  }, [fetchVehicleAssignments, newTripDayType, assignDate]);
+
   useEffect(() => {
     setError(null);
     loadStops();
-    loadSchedules();
+    loadRoutes();
     loadVehicles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const selectedSchedule = useMemo(
-    () => schedules.find((s) => s.id === selectedScheduleId) || null,
-    [schedules, selectedScheduleId]
+  useEffect(() => {
+    if (activeTab === 'assignments' && assignPcName) {
+      loadVehicleAssignments(assignPcName);
+    }
+  }, [activeTab, assignPcName, newTripDayType, assignDate, loadVehicleAssignments]);
+
+  const selectedRoute = useMemo(
+    () => routes.find((r) => r.id === selectedRouteId) || null,
+    [routes, selectedRouteId]
   );
 
-  const selectedSide = useMemo(() => {
-    if (!selectedSchedule) return null;
-    return (selectedSchedule.sides || []).find((s) => s.id === selectedSideId) || null;
-  }, [selectedSchedule, selectedSideId]);
-
-  // Po wybraniu/odświeżeniu linii, upewnij się że jest wybrana jakaś strona (kierunek).
   useEffect(() => {
-    if (!selectedSchedule) {
-      setSelectedSideId('');
-      return;
+    if (selectedRoute) {
+      const stopsWithMinutes = (selectedRoute.stops || []).map((s) => ({
+        stop_id: s.stop_id,
+        stop_name: s.name || s.stop_id,
+        minutes_from_previous: s.minutes_from_previous ?? 0,
+      }));
+      setRouteStops(stopsWithMinutes);
+    } else {
+      setRouteStops([]);
     }
-    const sides = selectedSchedule.sides || [];
-    if (!sides.some((s) => s.id === selectedSideId)) {
-      setSelectedSideId(sides[0]?.id || '');
-    }
-  }, [selectedSchedule, selectedSideId]);
+  }, [selectedRoute]);
 
-  useEffect(() => {
-    setSideNameDraft(selectedSide?.name || '');
-    setEditingSideName(false);
-  }, [selectedSide]);
-
-  // Wszystkie kursy ze wszystkich linii, spłaszczone — używane w zakładce Dyspozytura.
-  const allTrips = useMemo(() => {
-    const result = [];
-    for (const schedule of schedules) {
-      for (const side of schedule.sides || []) {
-        for (const trip of side.trips || []) {
-          result.push({
-            ...trip,
-            schedule_id: schedule.id,
-            schedule_name: schedule.name,
-            schedule_code: schedule.code,
-            schedule_color: schedule.color,
-            side_direction: side.direction,
-            side_name: side.name,
-          });
-        }
-      }
-    }
-    return result;
-  }, [schedules]);
-
-  const tripsForAssignment = useMemo(
-    () =>
-      allTrips
-        .filter((t) => t.day_type === assignDayTypeFilter)
-        .sort((a, b) => a.departure_time.localeCompare(b.departure_time)),
-    [allTrips, assignDayTypeFilter]
-  );
-
-  const tripsForSelectedSide = useMemo(() => {
-    if (!selectedSide) return [];
-    return (selectedSide.trips || [])
-      .filter((t) => t.day_type === tripDayType)
-      .slice()
-      .sort((a, b) => a.departure_time.localeCompare(b.departure_time));
-  }, [selectedSide, tripDayType]);
-
-  // =================== PRZYSTANKI (CRUD) ===================
   const resetStopForm = () => {
     setEditingStop(null);
     setStopForm(createEmptyStopForm());
@@ -363,10 +308,8 @@ const Schedule = () => {
         throw new Error('Współrzędne muszą być liczbami.');
       }
       if (editingStop) {
-        // ID pozostaje niezmienne — bierzemy je z edytowanego rekordu.
         await api.updateStop(editingStop.id, { id: editingStop.id, ...basePayload });
       } else {
-        // ID losowane automatycznie — użytkownik nie ma na nie wpływu.
         await api.createStop({ id: generateStopId(), ...basePayload });
       }
       resetStopForm();
@@ -380,12 +323,11 @@ const Schedule = () => {
     setStopForm((prev) => ({ ...prev, [field]: value }));
   };
 
-  // =================== IMPORT CSV PRZYSTANKÓW ===================
   const handleImportClick = () => {
     if (importing) return;
     setImportResult(null);
     if (fileInputRef.current) {
-      fileInputRef.current.value = ''; // pozwól wybrać ten sam plik ponownie
+      fileInputRef.current.value = '';
       fileInputRef.current.click();
     }
   };
@@ -393,10 +335,8 @@ const Schedule = () => {
   const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setImportResult(null);
     setError(null);
-
     let text;
     try {
       text = await file.text();
@@ -404,9 +344,7 @@ const Schedule = () => {
       window.alert(`Nie udało się odczytać pliku: ${err.message}`);
       return;
     }
-
     const { rows, errors: parseErrors } = parseStopsCsv(text);
-
     if (rows.length === 0) {
       window.alert(
         `Nie znaleziono poprawnych wierszy w pliku CSV.` +
@@ -414,14 +352,11 @@ const Schedule = () => {
       );
       return;
     }
-
-    // Scal duplikaty nazw w samym CSV — ostatni wygrywa.
     const dedupedMap = new Map();
     for (const row of rows) {
       dedupedMap.set(row.name.trim().toLowerCase(), row);
     }
     const deduped = [...dedupedMap.values()];
-
     if (
       !window.confirm(
         `Znaleziono ${deduped.length} unikalnych przystanków w pliku.\n\n` +
@@ -432,32 +367,24 @@ const Schedule = () => {
     ) {
       return;
     }
-
-    // Zbuduj mapę istniejących przystanków po znormalizowanej nazwie.
-    // Korzystamy z aktualnego stanu; dla pewności można by najpierw przeładować,
-    // ale stan `stops` jest odświeżany po każdym zapisie z UI.
     let currentStops = stops;
     try {
       const fresh = await api.getStops();
       currentStops = fresh.stops || [];
       setStops(currentStops);
     } catch {
-      // Jeśli odświeżenie się nie powiedzie, użyj aktualnego stanu w pamięci.
+      // ignore
     }
-
     const existingByName = new Map();
     for (const s of currentStops) {
       if (s.name) existingByName.set(String(s.name).trim().toLowerCase(), s);
     }
-
     setImporting(true);
     setImportProgress({ done: 0, total: deduped.length });
-
     let created = 0;
     let updated = 0;
     let failed = 0;
     const opErrors = [];
-
     for (let i = 0; i < deduped.length; i += 1) {
       const row = deduped[i];
       const key = row.name.trim().toLowerCase();
@@ -467,14 +394,11 @@ const Schedule = () => {
         latitude: row.latitude,
         longitude: row.longitude,
       };
-
       try {
         if (existing) {
-          // Aktualizacja: zachowaj istniejące ID, zmień tylko współrzędne (i nazwę 1:1).
           await api.updateStop(existing.id, { id: existing.id, ...payload });
           updated += 1;
         } else {
-          // Nowy przystanek: wygeneruj ID.
           await api.createStop({ id: generateStopId(), ...payload });
           created += 1;
         }
@@ -482,10 +406,8 @@ const Schedule = () => {
         failed += 1;
         opErrors.push(`${row.name}: ${err.message || 'nieznany błąd'}`);
       }
-
       setImportProgress({ done: i + 1, total: deduped.length });
     }
-
     setImporting(false);
     setImportResult({
       created,
@@ -493,98 +415,83 @@ const Schedule = () => {
       failed,
       errors: [...parseErrors, ...opErrors],
     });
-
     await loadStops();
   };
 
-  // =================== LINIE ===================
-  const handleSubmitSchedule = async (e) => {
+  const handleSubmitRoute = async (e) => {
     e.preventDefault();
-    if (!scheduleForm.name.trim()) {
-      window.alert('Podaj nazwę linii.');
+    if (!routeForm.name.trim()) {
+      window.alert('Podaj nazwę trasy.');
       return;
     }
-    setSavingSchedule(true);
+    setSavingRoute(true);
     try {
-      const created = await createSchedule({
-        name: scheduleForm.name.trim(),
-        code: scheduleForm.code.trim() || undefined,
-        color: scheduleForm.color || undefined,
+      const created = await createRoute({
+        name: routeForm.name.trim(),
+        code: routeForm.code.trim() || undefined,
+        color: routeForm.color || undefined,
+        // Nie wysyłamy stops – backend po zmianie przyjmie pustą tablicę
       });
-      setScheduleForm(createEmptyScheduleForm());
-      if (created?.id) setSelectedScheduleId(created.id);
+      setRouteForm(createEmptyRouteForm());
+      if (created?.id) setSelectedRouteId(created.id);
+      await loadRoutes();
     } catch (err) {
-      window.alert(`Nie udało się utworzyć linii: ${err.message}`);
+      window.alert(`Nie udało się utworzyć trasy: ${err.message}`);
     } finally {
-      setSavingSchedule(false);
+      setSavingRoute(false);
     }
   };
 
-  const handleDeleteSchedule = async (id) => {
+  const handleDeleteRoute = async (id) => {
     if (
       !window.confirm(
-        'Usunąć tę linię? Skasuje to oba warianty kierunku oraz wszystkie ich kursy, przystanki kursów i przypisania pojazdów.'
+        'Usunąć tę trasę? Skasuje to również wszystkie jej przystanki (route_stops) oraz kursy i przypisania pojazdów.'
       )
     )
       return;
     try {
-      await deleteSchedule(id);
-      if (selectedScheduleId === id) setSelectedScheduleId('');
+      await deleteRoute(id);
+      if (selectedRouteId === id) setSelectedRouteId('');
+      await loadRoutes();
     } catch (err) {
-      window.alert(`Nie udało się usunąć linii: ${err.message}`);
+      window.alert(`Nie udało się usunąć trasy: ${err.message}`);
     }
   };
 
-  const handleSaveSideName = async () => {
-    if (!selectedSchedule || !selectedSide) return;
-
-    // Sprawdź, czy metoda istnieje w api – jeśli nie, wyświetl czytelny komunikat.
-    if (typeof api.updateScheduleSide !== 'function') {
-      window.alert(
-        'Brak metody updateScheduleSide w BackendContext. ' +
-        'Dodaj endpoint PATCH /api/schedules/:scheduleId/sides/:sideId w backendzie.'
-      );
-      return;
-    }
-
-    setSavingSideName(true);
-    try {
-      await api.updateScheduleSide(selectedSchedule.id, selectedSide.id, {
-        name: sideNameDraft.trim() || null,
-      });
-      await loadSchedules();
-      setEditingSideName(false);
-    } catch (err) {
-      window.alert(`Nie udało się zapisać nazwy kierunku: ${err.message}`);
-    } finally {
-      setSavingSideName(false);
-    }
-  };
-
-  // =================== NOWY KURS ===================
-  const availableStopsToAdd = useMemo(() => {
-    const used = new Set(tripStops.map((rs) => rs.stop_id));
+  const availableStopsForRoute = useMemo(() => {
+    const used = new Set(routeStops.map((rs) => rs.stop_id));
     return stops.filter((s) => !used.has(s.id));
-  }, [stops, tripStops]);
+  }, [stops, routeStops]);
 
-  const handleAddTripStop = () => {
-    if (!addStopId) return;
-    const stop = stops.find((s) => s.id === addStopId);
+  const handleAddRouteStop = (stopId) => {
+    if (!stopId) return;
+    const stop = stops.find((s) => s.id === stopId);
     if (!stop) return;
-    setTripStops((prev) => [...prev, { stop_id: stop.id, stop_name: stop.name, time: '' }]);
-    setAddStopId('');
+    const minutes = routeStops.length === 0 ? 0 : 1;
+    setRouteStops((prev) => [
+      ...prev,
+      {
+        stop_id: stop.id,
+        stop_name: stop.name,
+        minutes_from_previous: minutes,
+      },
+    ]);
   };
 
-  const handleRemoveTripStop = (index) => {
-    setTripStops((prev) => prev.filter((_, i) => i !== index));
+  const handleRemoveRouteStop = (index) => {
+    setRouteStops((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handleTripStopTime = (index, value) => {
-    setTripStops((prev) => prev.map((rs, i) => (i === index ? { ...rs, time: value } : rs)));
+  const handleRouteStopMinutes = (index, value) => {
+    const num = parseInt(value, 10);
+    if (Number.isNaN(num) || num < 0) return;
+    setRouteStops((prev) =>
+      prev.map((rs, i) => (i === index ? { ...rs, minutes_from_previous: num } : rs))
+    );
   };
 
-  const moveTripStop = (index, delta) => {
-    setTripStops((prev) => {
+  const moveRouteStop = (index, delta) => {
+    setRouteStops((prev) => {
       const target = index + delta;
       if (target < 0 || target >= prev.length) return prev;
       const copy = [...prev];
@@ -593,102 +500,106 @@ const Schedule = () => {
     });
   };
 
-  const resetTripForm = () => {
-    setTripDepartureTime('');
-    setTripBlockId('');
-    setTripStops([]);
-    setAddStopId('');
-  };
-
-  const handleCreateTrip = async () => {
-    if (!selectedSchedule || !selectedSide) {
-      window.alert('Wybierz najpierw linię i wariant kierunku.');
+  const handleSaveRouteStops = async () => {
+    if (!selectedRoute) return;
+    if (routeStops.length === 0) {
+      window.alert('Trasa musi mieć co najmniej jeden przystanek.');
       return;
     }
-    const departureTime = normalizeTimeHHMM(tripDepartureTime);
-    if (!departureTime) {
-      window.alert('Podaj poprawną godzinę startu (HH:MM).');
+    if (routeStops[0].minutes_from_previous !== 0) {
+      window.alert('Pierwszy przystanek musi mieć czas 0 minut.');
       return;
     }
-    if (tripStops.length === 0) {
-      window.alert('Dodaj przynajmniej jeden przystanek.');
-      return;
-    }
-    for (const rs of tripStops) {
-      if (!normalizeTimeHHMM(rs.time)) {
-        window.alert(`Podaj poprawną godzinę (HH:MM) dla przystanku ${rs.stop_name || rs.stop_id}.`);
+    for (let i = 1; i < routeStops.length; i++) {
+      if (routeStops[i].minutes_from_previous < 0) {
+        window.alert('Czasy przejazdu nie mogą być ujemne.');
         return;
       }
     }
+    const stopsPayload = routeStops.map((rs) => ({
+      stop_id: rs.stop_id,
+      minutes_from_previous: rs.minutes_from_previous,
+    }));
+    setSavingStops(true);
+    try {
+      await replaceRouteStops(selectedRoute.id, stopsPayload);
+      await loadRoutes();
+      window.alert('Przystanki trasy zapisane.');
+    } catch (err) {
+      window.alert(`Nie udało się zapisać przystanków trasy: ${err.message}`);
+    } finally {
+      setSavingStops(false);
+    }
+  };
 
+  const resetTripForm = () => {
+    setNewTripRouteId('');
+    setNewTripStartTime('');
+    setNewTripBlockId('');
+    setNewTripDayType('WEEKDAY');
+  };
+
+  const handleCreateTripForVehicle = async () => {
+    const pcName = assignPcName.trim();
+    if (!pcName) {
+      window.alert('Wybierz pojazd z listy.');
+      return;
+    }
+    if (!newTripRouteId) {
+      window.alert('Wybierz trasę.');
+      return;
+    }
+    const startTime = normalizeTimeHHMM(newTripStartTime);
+    if (!startTime) {
+      window.alert('Podaj poprawną godzinę startu (HH:MM).');
+      return;
+    }
     setSavingTrip(true);
     try {
-      await createTrip(selectedSchedule.id, {
-        side_id: selectedSide.id,
-        day_type: tripDayType,
-        departure_time: departureTime,
-        block_id: tripBlockId.trim() || undefined,
-        stops: tripStops.map((rs, i) => ({
-          stop_id: rs.stop_id,
-          sequence_order: i + 1,
-          time: normalizeTimeHHMM(rs.time),
-        })),
+      await assignVehicleTrips(pcName, {
+        assignments: [
+          {
+            route_id: newTripRouteId,
+            day_type: newTripDayType,
+            start_time: startTime,
+            block_id: newTripBlockId.trim() || undefined,
+          },
+        ],
+        date: assignDate || undefined,
+        replace: false,
       });
       resetTripForm();
+      await loadVehicleAssignments(pcName);
+      if (preview) {
+        const data = await fetchVehicleSchedule(pcName, { date: assignDate || todayKey() });
+        setPreview(data);
+      }
+      window.alert('Dodano kurs do pojazdu.');
     } catch (err) {
-      window.alert(`Nie udało się utworzyć kursu: ${err.message}`);
+      window.alert(`Nie udało się dodać kursu: ${err.message}`);
     } finally {
       setSavingTrip(false);
     }
   };
 
-  const handleDeleteTrip = async (tripId) => {
-    if (!window.confirm('Usunąć ten kurs wraz z jego przystankami i przypisaniami pojazdów?')) return;
+  const handleDeleteAssignment = async (assignmentId) => {
+    if (!window.confirm('Usunąć ten kurs z pojazdu?')) return;
     try {
-      await deleteTrip(tripId);
+      await deleteTrip(assignmentId);
+      await loadVehicleAssignments(assignPcName);
+      if (preview) {
+        const data = await fetchVehicleSchedule(assignPcName, { date: assignDate || todayKey() });
+        setPreview(data);
+      }
     } catch (err) {
       window.alert(`Nie udało się usunąć kursu: ${err.message}`);
     }
   };
 
-  // =================== DYSPOZYTURA / PRZYPISANIA POJAZDÓW ===================
-  const toggleTripSelected = (tripId) => {
-    setSelectedTripIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(tripId)) next.delete(tripId);
-      else next.add(tripId);
-      return next;
-    });
-  };
-
-  const handleAssignTrips = async () => {
+  const handleLoadPreview = async () => {
     const pcName = assignPcName.trim();
     if (!pcName) {
-      window.alert('Wybierz pojazd z listy rozwijanej.');
-      return;
-    }
-    if (selectedTripIds.size === 0) {
-      window.alert('Wybierz przynajmniej jeden kurs do przypisania.');
-      return;
-    }
-    setAssigning(true);
-    try {
-      await assignVehicleToTrips(pcName, [...selectedTripIds], assignDate || null);
-      setSelectedTripIds(new Set());
-      await loadVehicles();
-      await handleLoadPreview(pcName);
-      window.alert('Przypisano wybrane kursy do pojazdu.');
-    } catch (err) {
-      window.alert(`Nie udało się przypisać kursów: ${err.message}`);
-    } finally {
-      setAssigning(false);
-    }
-  };
-
-  const handleLoadPreview = async (pcNameOverride) => {
-    const pcName = (pcNameOverride || assignPcName).trim();
-    if (!pcName) {
-      window.alert('Wybierz pojazd z listy rozwijanej.');
+      window.alert('Wybierz pojazd z listy.');
       return;
     }
     setPreviewLoading(true);
@@ -702,23 +613,16 @@ const Schedule = () => {
     }
   };
 
-  const tripLabel = (trip) => {
-    const dir = DIRECTION_LABELS[trip.side_direction] || trip.side_direction;
-    const dest = trip.side_name ? ` — ${trip.side_name}` : '';
-    return `${trip.schedule_name}${trip.schedule_code ? ` (${trip.schedule_code})` : ''} · ${dir}${dest}`;
-  };
-
   return (
     <section className={styles.page}>
       <div className={styles.container}>
         <header className={styles.header}>
           <p className={styles.headerLabel}>Zarządzanie infrastrukturą</p>
-          <h1 className={styles.title}>Rozkłady, kursy i pojazdy</h1>
+          <h1 className={styles.title}>Trasy, kursy i pojazdy</h1>
           <p className={styles.subtitle}>
-            Linia ma dwa warianty kierunku (tam / powrót). Dla każdego wariantu
-            i typu dnia tworzysz Kursy o konkretnej godzinie startu, z ich
-            własną sekwencją przystanków. W Dyspozyturze przypisujesz pojazd
-            do wybranych Kursów — na stałe (szablon) albo na konkretny dzień.
+            Trasa definiuje kolejność przystanków i czasy przejazdu między nimi (w minutach).
+            Kurs to konkretne wykonanie trasy o danej godzinie startu, w określonym typie dnia,
+            przypisane do pojazdu. W Dyspozyturze zarządzasz kursami dla każdego pojazdu.
           </p>
         </header>
 
@@ -731,7 +635,7 @@ const Schedule = () => {
 
         <div className={styles.tabs}>
           {[
-            { key: 'schedules', label: 'Linie i kursy', icon: CalendarClock },
+            { key: 'schedules', label: 'Trasy', icon: RouteIcon },
             { key: 'stops', label: 'Przystanki', icon: MapPin },
             { key: 'assignments', label: 'Dyspozytura', icon: Truck },
           ].map((t) => {
@@ -750,28 +654,28 @@ const Schedule = () => {
           })}
         </div>
 
-        {/* ================= LINIE I KURSY ================= */}
+        {/* ================= TRASY ================= */}
         {activeTab === 'schedules' && (
           <div className={styles.section}>
             <div className={styles.card}>
               <div className={styles.cardHeader}>
                 <div>
-                  <h2 className={styles.cardTitle}>Nowa linia</h2>
+                  <h2 className={styles.cardTitle}>Nowa trasa</h2>
                   <p className={styles.cardDescription}>
                     Nadaj nazwę, opcjonalny kod (np. numer linii) i kolor.
-                    Oba warianty kierunku (tam / powrót) tworzone są automatycznie.
+                    Po utworzeniu możesz dodać przystanki z czasami przejazdu.
                   </p>
                 </div>
               </div>
 
-              <form onSubmit={handleSubmitSchedule} className={styles.formGrid}>
+              <form onSubmit={handleSubmitRoute} className={styles.formGrid}>
                 <div>
-                  <label className={styles.label}>Nazwa linii</label>
+                  <label className={styles.label}>Nazwa trasy</label>
                   <input
                     className={styles.input}
-                    value={scheduleForm.name}
-                    onChange={(e) => setScheduleForm((p) => ({ ...p, name: e.target.value }))}
-                    placeholder="np. Linia 100"
+                    value={routeForm.name}
+                    onChange={(e) => setRouteForm((p) => ({ ...p, name: e.target.value }))}
+                    placeholder="np. Linia 100 – Pętla Zachód"
                     required
                   />
                 </div>
@@ -779,8 +683,8 @@ const Schedule = () => {
                   <label className={styles.label}>Kod / numer (opcjonalnie)</label>
                   <input
                     className={styles.input}
-                    value={scheduleForm.code}
-                    onChange={(e) => setScheduleForm((p) => ({ ...p, code: e.target.value }))}
+                    value={routeForm.code}
+                    onChange={(e) => setRouteForm((p) => ({ ...p, code: e.target.value }))}
                     placeholder="np. 100"
                   />
                 </div>
@@ -789,13 +693,13 @@ const Schedule = () => {
                   <input
                     type="color"
                     className={styles.colorInput}
-                    value={scheduleForm.color}
-                    onChange={(e) => setScheduleForm((p) => ({ ...p, color: e.target.value }))}
+                    value={routeForm.color}
+                    onChange={(e) => setRouteForm((p) => ({ ...p, color: e.target.value }))}
                   />
                 </div>
                 <div>
-                  <button type="submit" className={styles.btnPrimary} disabled={savingSchedule}>
-                    {savingSchedule ? <LoaderCircle size={16} className={styles.spinner} /> : <Save size={16} />}
+                  <button type="submit" className={styles.btnPrimary} disabled={savingRoute}>
+                    {savingRoute ? <LoaderCircle size={16} className={styles.spinner} /> : <Save size={16} />}
                     Utwórz
                   </button>
                 </div>
@@ -806,38 +710,38 @@ const Schedule = () => {
               <div className={styles.card}>
                 <div className={styles.cardHeader}>
                   <div>
-                    <h2 className={styles.cardTitle}>Linie</h2>
-                    <p className={styles.cardDescription}>Wybierz linię, aby skonfigurować jej kursy.</p>
+                    <h2 className={styles.cardTitle}>Trasy</h2>
+                    <p className={styles.cardDescription}>Wybierz trasę, aby skonfigurować jej przystanki.</p>
                   </div>
                 </div>
 
-                {schedulesLoading ? (
+                {routesLoading ? (
                   <div className={styles.loading}>
                     <LoaderCircle size={16} className={styles.spinner} />
-                    Ładowanie linii…
+                    Ładowanie tras…
                   </div>
-                ) : schedules.length === 0 ? (
-                  <div className={styles.emptyState}>Nie ma jeszcze żadnej linii. Utwórz pierwszą powyżej.</div>
+                ) : routes.length === 0 ? (
+                  <div className={styles.emptyState}>Nie ma jeszcze żadnej trasy. Utwórz pierwszą powyżej.</div>
                 ) : (
                   <div className={styles.scheduleList}>
-                    {schedules.map((s) => {
-                      const active = s.id === selectedScheduleId;
-                      const tripCount = (s.sides || []).reduce((sum, side) => sum + (side.trips || []).length, 0);
+                    {routes.map((r) => {
+                      const active = r.id === selectedRouteId;
+                      const stopCount = (r.stops || []).length;
                       return (
                         <div
-                          key={s.id}
+                          key={r.id}
                           className={`${styles.scheduleItem} ${active ? styles.scheduleItemActive : styles.scheduleItemInactive}`}
                         >
-                          <button className={styles.scheduleItemButton} onClick={() => setSelectedScheduleId(s.id)}>
-                            <span className={styles.colorDot} style={{ backgroundColor: s.color || '#3B82F6' }} />
-                            <span className={styles.scheduleName}>{s.name}</span>
-                            {s.code && <span className={styles.scheduleDirection}>{s.code}</span>}
-                            <span className={styles.extendedBadge}>{tripCount} kurs.</span>
+                          <button className={styles.scheduleItemButton} onClick={() => setSelectedRouteId(r.id)}>
+                            <span className={styles.colorDot} style={{ backgroundColor: r.color || '#3B82F6' }} />
+                            <span className={styles.scheduleName}>{r.name}</span>
+                            {r.code && <span className={styles.scheduleDirection}>{r.code}</span>}
+                            <span className={styles.extendedBadge}>{stopCount} przyst.</span>
                           </button>
                           <button
                             className={styles.btnIconDanger}
-                            onClick={() => handleDeleteSchedule(s.id)}
-                            title="Usuń linię"
+                            onClick={() => handleDeleteRoute(r.id)}
+                            title="Usuń trasę"
                           >
                             <Trash2 size={14} />
                           </button>
@@ -848,243 +752,100 @@ const Schedule = () => {
                 )}
               </div>
 
-              {selectedSchedule && (
+              {selectedRoute && (
                 <div className={styles.card}>
                   <div className={styles.cardHeader}>
                     <div>
                       <h2 className={styles.cardTitle}>
                         <RouteIcon size={18} className={styles.iconPrimary} />
-                        Wariant kierunku
+                        Przystanki trasy
                       </h2>
-                      <p className={styles.cardDescription}>Wybierz kierunek i nadaj mu nazwę docelową.</p>
+                      <p className={styles.cardDescription}>
+                        Kolejność przystanków oraz czasy dojazdu (w minutach od poprzedniego przystanku).
+                        Pierwszy przystanek ma czas 0.
+                      </p>
                     </div>
                   </div>
 
-                  <div className={styles.dayTypeTabs}>
-                    {SIDE_DIRECTIONS.map((direction) => {
-                      const side = (selectedSchedule.sides || []).find((s) => s.direction === direction);
-                      if (!side) return null;
-                      const active = selectedSideId === side.id;
-                      return (
-                        <button
-                          key={direction}
-                          onClick={() => setSelectedSideId(side.id)}
-                          className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
-                        >
-                          <RouteIcon size={16} />
-                          {DIRECTION_LABELS[direction]}
-                        </button>
-                      );
-                    })}
+                  <div className={styles.addStopRow}>
+                    <div className={styles.selectWrapper}>
+                      <select
+                        className={styles.select}
+                        value=""
+                        onChange={(e) => {
+                          handleAddRouteStop(e.target.value);
+                          e.target.value = '';
+                        }}
+                      >
+                        <option value="">— dodaj przystanek —</option>
+                        {availableStopsForRoute.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name} ({s.id})
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={16} className={styles.selectIcon} />
+                    </div>
                   </div>
 
-                  {selectedSide && (
-                    <div className={styles.formScheduleDirection}>
-                      <label className={styles.label}>Nazwa docelowa (np. „Do: Pętla Zachód”)</label>
-                      <div className={styles.buttonGroup} style={{ marginTop: 0 }}>
-                        <input
-                          className={styles.input}
-                          value={editingSideName ? sideNameDraft : selectedSide.name || ''}
-                          onChange={(e) => {
-                            setEditingSideName(true);
-                            setSideNameDraft(e.target.value);
-                          }}
-                          placeholder="np. Pętla Zachód"
-                        />
-                        <button
-                          className={styles.btnSecondary}
-                          onClick={handleSaveSideName}
-                          disabled={!editingSideName || savingSideName}
-                        >
-                          {savingSideName ? <LoaderCircle size={16} className={styles.spinner} /> : <Save size={16} />}
-                          Zapisz
-                        </button>
-                      </div>
+                  {routeStops.length === 0 ? (
+                    <div className={styles.emptyState}>
+                      <MapPinned size={32} className={styles.emptyIcon} />
+                      <p className={styles.emptyTitle}>Brak przystanków w tej trasie</p>
+                      <p className={styles.emptyDescription}>Dodaj przystanki i ustaw czasy przejazdu.</p>
                     </div>
+                  ) : (
+                    <ul className={styles.stopList}>
+                      {routeStops.map((rs, idx) => (
+                        <li key={`${rs.stop_id}-${idx}`} className={styles.stopItem}>
+                          <span className={styles.stopIndex}>{idx + 1}</span>
+                          <div className={styles.stopInfo}>
+                            <p className={styles.stopName}>{rs.stop_name || rs.stop_id}</p>
+                            <p className={styles.stopId}>{rs.stop_id}</p>
+                          </div>
+                          <div className={styles.stopTime}>
+                            <Clock3 size={14} className={styles.inputIcon} />
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              className={styles.stopTimeInput}
+                              value={rs.minutes_from_previous}
+                              onChange={(e) => handleRouteStopMinutes(idx, e.target.value)}
+                              title="Czas od poprzedniego przystanku (minuty)"
+                              disabled={idx === 0}
+                            />
+                            <span style={{ fontSize: '0.8rem', marginLeft: '4px' }}>min</span>
+                          </div>
+                          <div className={styles.stopMove}>
+                            <button className={styles.btnIcon} onClick={() => moveRouteStop(idx, -1)} disabled={idx === 0}>
+                              <ArrowUpDown size={14} />
+                            </button>
+                            <button
+                              className={styles.btnIcon}
+                              onClick={() => moveRouteStop(idx, 1)}
+                              disabled={idx === routeStops.length - 1}
+                            >
+                              <ArrowUpDown size={14} style={{ transform: 'rotate(180deg)' }} />
+                            </button>
+                          </div>
+                          <button className={styles.btnIconDanger} onClick={() => handleRemoveRouteStop(idx)}>
+                            <Trash2 size={16} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
                   )}
+
+                  <div className={styles.buttonGroup}>
+                    <button className={styles.btnPrimary} onClick={handleSaveRouteStops} disabled={savingStops}>
+                      {savingStops ? <LoaderCircle size={16} className={styles.spinner} /> : <Save size={16} />}
+                      Zapisz przystanki trasy
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
-
-            {selectedSchedule && selectedSide && (
-              <div className={styles.card}>
-                <div className={styles.cardHeader}>
-                  <div>
-                    <h2 className={styles.cardTitle}>
-                      <Clock3 size={18} className={styles.iconPrimary} />
-                      Nowy kurs
-                    </h2>
-                    <p className={styles.cardDescription}>
-                      Wybierz typ dnia, godzinę startu i sekwencję przystanków z godzinami przyjazdu.
-                    </p>
-                  </div>
-                </div>
-
-                <div className={styles.dayTypeTabs}>
-                  {DAY_TYPES.map((d) => {
-                    const active = tripDayType === d.key;
-                    return (
-                      <button
-                        key={d.key}
-                        onClick={() => setTripDayType(d.key)}
-                        className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
-                      >
-                        <CalendarClock size={16} />
-                        {d.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <div className={styles.stopFormGrid} style={{ marginBottom: '1rem' }}>
-                  <div>
-                    <label className={styles.label}>Godzina startu (HH:MM)</label>
-                    <input
-                      type="time"
-                      className={styles.input}
-                      value={tripDepartureTime}
-                      onChange={(e) => setTripDepartureTime(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className={styles.label}>Brygada / blok (opcjonalnie)</label>
-                    <input
-                      className={styles.input}
-                      value={tripBlockId}
-                      onChange={(e) => setTripBlockId(e.target.value)}
-                      placeholder="np. B1"
-                    />
-                  </div>
-                </div>
-
-                <div className={styles.addStopRow}>
-                  <div className={styles.selectWrapper}>
-                    <select className={styles.select} value={addStopId} onChange={(e) => setAddStopId(e.target.value)}>
-                      <option value="">— dodaj przystanek —</option>
-                      {availableStopsToAdd.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.id})
-                        </option>
-                      ))}
-                    </select>
-                    <ChevronDown size={16} className={styles.selectIcon} />
-                  </div>
-                  <button className={styles.btnSecondary} onClick={handleAddTripStop} disabled={!addStopId}>
-                    <Plus size={16} />
-                    Dodaj
-                  </button>
-                </div>
-
-                {tripStops.length === 0 ? (
-                  <div className={styles.emptyState}>
-                    <MapPinned size={32} className={styles.emptyIcon} />
-                    <p className={styles.emptyTitle}>Brak przystanków w tym kursie</p>
-                    <p className={styles.emptyDescription}>Dodaj przystanki i ustaw godziny.</p>
-                  </div>
-                ) : (
-                  <ul className={styles.stopList}>
-                    {tripStops.map((rs, idx) => (
-                      <li key={`${rs.stop_id}-${idx}`} className={styles.stopItem}>
-                        <span className={styles.stopIndex}>{idx + 1}</span>
-                        <div className={styles.stopInfo}>
-                          <p className={styles.stopName}>{rs.stop_name || rs.stop_id}</p>
-                          <p className={styles.stopId}>{rs.stop_id}</p>
-                        </div>
-                        <div className={styles.stopTime}>
-                          <Clock3 size={14} className={styles.inputIcon} />
-                          <input
-                            type="time"
-                            className={styles.stopTimeInput}
-                            value={rs.time}
-                            onChange={(e) => handleTripStopTime(idx, e.target.value)}
-                            title="Godzina przyjazdu na przystanek (HH:MM)"
-                          />
-                        </div>
-                        <div className={styles.stopMove}>
-                          <button className={styles.btnIcon} onClick={() => moveTripStop(idx, -1)} disabled={idx === 0}>
-                            <ArrowUpDown size={14} />
-                          </button>
-                          <button
-                            className={styles.btnIcon}
-                            onClick={() => moveTripStop(idx, 1)}
-                            disabled={idx === tripStops.length - 1}
-                          >
-                            <ArrowUpDown size={14} style={{ transform: 'rotate(180deg)' }} />
-                          </button>
-                        </div>
-                        <button className={styles.btnIconDanger} onClick={() => handleRemoveTripStop(idx)}>
-                          <Trash2 size={16} />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                <div className={styles.buttonGroup}>
-                  <button className={styles.btnPrimary} onClick={handleCreateTrip} disabled={savingTrip}>
-                    {savingTrip ? (
-                      <>
-                        <LoaderCircle size={16} className={styles.spinner} />
-                        Zapisywanie…
-                      </>
-                    ) : (
-                      <>
-                        <Save size={16} />
-                        Utwórz kurs
-                      </>
-                    )}
-                  </button>
-                  <button className={styles.btnSecondary} onClick={resetTripForm}>
-                    <RotateCcw size={16} />
-                    Wyczyść
-                  </button>
-                </div>
-
-                <div className={styles.preview}>
-                  <div className={styles.previewHeader}>
-                    <span className={styles.previewTitle}>
-                      <ListChecks size={16} />
-                      Kursy: {DIRECTION_LABELS[selectedSide.direction]} ·{' '}
-                      {DAY_TYPES.find((d) => d.key === tripDayType)?.label}
-                    </span>
-                  </div>
-                  {tripsForSelectedSide.length === 0 ? (
-                    <p className={styles.previewEmpty}>Brak jeszcze utworzonych kursów dla tego wariantu i typu dnia.</p>
-                  ) : (
-                    <div className={styles.tableWrapper}>
-                      <table className={styles.table}>
-                        <thead>
-                          <tr className={styles.tableHead}>
-                            <th>Odjazd</th>
-                            <th>Brygada</th>
-                            <th>Przystanków</th>
-                            <th>Trasa</th>
-                            <th>Akcje</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {tripsForSelectedSide.map((trip) => (
-                            <tr key={trip.id} className={styles.tableRow}>
-                              <td className={styles.tableCell}>{trip.departure_time}</td>
-                              <td className={styles.tableCell}>{trip.block_id || '—'}</td>
-                              <td className={styles.tableCell}>{(trip.stops || []).length}</td>
-                              <td className={styles.tableCell}>
-                                {(trip.stops || []).map((s) => s.stop_name).join(' → ')}
-                              </td>
-                              <td className={styles.tableCell}>
-                                <button className={styles.btnIconDanger} onClick={() => handleDeleteTrip(trip.id)}>
-                                  <Trash2 size={16} />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -1150,7 +911,6 @@ const Schedule = () => {
                 </div>
               </form>
 
-              {/* ---------- IMPORT CSV ---------- */}
               <div className={styles.preview} style={{ marginTop: '1.5rem' }}>
                 <div className={styles.previewHeader}>
                   <span className={styles.previewTitle}>
@@ -1305,11 +1065,11 @@ const Schedule = () => {
                 <div>
                   <h2 className={styles.cardTitle}>
                     <Truck size={18} className={styles.iconPrimary} />
-                    Przypisanie pojazdu do kursów
+                    Zarządzanie kursami pojazdu
                   </h2>
                   <p className={styles.cardDescription}>
-                    Wybierz pojazd, opcjonalnie datę (puste = przypisanie stałe/szablonowe dla danego typu dnia),
-                    a następnie zaznacz kursy, które ma wykonać.
+                    Wybierz pojazd, aby zobaczyć jego aktualne kursy. Możesz dodawać nowe kursy
+                    (przypisania trasy o konkretnej godzinie) lub usuwać istniejące.
                   </p>
                 </div>
                 <button className={styles.btnSecondary} onClick={loadVehicles}>
@@ -1357,11 +1117,11 @@ const Schedule = () => {
 
               <div className={styles.dayTypeTabs}>
                 {DAY_TYPES.map((d) => {
-                  const active = assignDayTypeFilter === d.key;
+                  const active = newTripDayType === d.key;
                   return (
                     <button
                       key={d.key}
-                      onClick={() => setAssignDayTypeFilter(d.key)}
+                      onClick={() => setNewTripDayType(d.key)}
                       className={`${styles.dayTypeTab} ${active ? styles.dayTypeTabActive : styles.dayTypeTabInactive}`}
                     >
                       <CalendarClock size={16} />
@@ -1371,50 +1131,141 @@ const Schedule = () => {
                 })}
               </div>
 
-              {tripsForAssignment.length === 0 ? (
-                <div className={styles.emptyState}>
-                  Brak kursów dla wybranego typu dnia. Utwórz je w zakładce „Linie i kursy”.
+              <div className={styles.preview} style={{ marginTop: '1rem' }}>
+                <div className={styles.previewHeader}>
+                  <span className={styles.previewTitle}>
+                    <ListChecks size={16} />
+                    Kursy pojazdu {assignPcName ? `„${assignPcName}”` : ''}
+                  </span>
+                  <span className={styles.previewBadge}>{vehicleAssignments.length}</span>
                 </div>
-              ) : (
-                <div className={styles.stopList} style={{ maxHeight: '20rem', overflowY: 'auto' }}>
-                  {tripsForAssignment.map((trip) => {
-                    const checked = selectedTripIds.has(trip.id);
-                    return (
-                      <label
-                        key={trip.id}
-                        className={`${styles.tripRow} ${checked ? styles.tripRowSelected : ''}`}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        <input
-                          type="checkbox"
-                          className={styles.checkbox}
-                          checked={checked}
-                          onChange={() => toggleTripSelected(trip.id)}
-                        />
-                        <span className={styles.colorDot} style={{ backgroundColor: trip.schedule_color || '#3B82F6' }} />
-                        <div className={styles.tripRowMain}>
-                          <span className={styles.tripRowTitle}>
-                            {trip.departure_time} — {tripLabel(trip)}
-                          </span>
-                          <span className={styles.tripRowSub}>
-                            {(trip.stops || []).map((s) => s.stop_name).join(' → ')}
-                          </span>
-                        </div>
-                        {trip.block_id && <span className={styles.tripRowBadge}>{trip.block_id}</span>}
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
+                {vehicleAssignmentsLoading ? (
+                  <div className={styles.loading}>
+                    <LoaderCircle size={16} className={styles.spinner} />
+                    Ładowanie kursów…
+                  </div>
+                ) : vehicleAssignments.length === 0 ? (
+                  <p className={styles.previewEmpty}>
+                    {assignPcName
+                      ? 'Brak kursów dla tego pojazdu w wybranym typie dnia i dacie.'
+                      : 'Wybierz pojazd, aby zobaczyć jego kursy.'}
+                  </p>
+                ) : (
+                  <div className={styles.tableWrapper}>
+                    <table className={styles.table}>
+                      <thead>
+                        <tr className={styles.tableHead}>
+                          <th>Trasa</th>
+                          <th>Start</th>
+                          <th>Brygada</th>
+                          <th>Akcje</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {vehicleAssignments.map((ass) => {
+                          const route = routes.find((r) => r.id === ass.route_id);
+                          return (
+                            <tr key={ass.id} className={styles.tableRow}>
+                              <td className={styles.tableCell}>
+                                {route ? route.name : ass.route_id}
+                                {route?.code && ` (${route.code})`}
+                              </td>
+                              <td className={styles.tableCell}>{ass.start_time}</td>
+                              <td className={styles.tableCell}>{ass.block_id || '—'}</td>
+                              <td className={styles.tableCell}>
+                                <button
+                                  className={styles.btnIconDanger}
+                                  onClick={() => handleDeleteAssignment(ass.id)}
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
 
-              <div className={styles.buttonGroup}>
-                <button className={styles.btnPrimary} onClick={handleAssignTrips} disabled={assigning}>
-                  {assigning ? <LoaderCircle size={16} className={styles.spinner} /> : <Save size={16} />}
-                  Przypisz zaznaczone kursy ({selectedTripIds.size})
-                </button>
-                <button className={styles.btnSecondary} onClick={() => handleLoadPreview()} disabled={previewLoading}>
-                  {previewLoading ? <LoaderCircle size={16} className={styles.spinner} /> : <ListChecks size={16} />}
-                  Podgląd trasy pojazdu
+              <div className={styles.card} style={{ marginTop: '1.5rem' }}>
+                <h3 className={styles.cardTitle}>Dodaj nowy kurs</h3>
+                <div className={styles.stopFormGrid}>
+                  <div>
+                    <label className={styles.label}>Trasa</label>
+                    <div className={styles.selectWrapper}>
+                      <select
+                        className={styles.select}
+                        value={newTripRouteId}
+                        onChange={(e) => setNewTripRouteId(e.target.value)}
+                      >
+                        <option value="">— wybierz trasę —</option>
+                        {routes.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}{r.code ? ` (${r.code})` : ''}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown size={16} className={styles.selectIcon} />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={styles.label}>Godzina startu (HH:MM)</label>
+                    <input
+                      type="time"
+                      className={styles.input}
+                      value={newTripStartTime}
+                      onChange={(e) => setNewTripStartTime(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={styles.label}>Brygada / blok (opcjonalnie)</label>
+                    <input
+                      className={styles.input}
+                      value={newTripBlockId}
+                      onChange={(e) => setNewTripBlockId(e.target.value)}
+                      placeholder="np. B1"
+                    />
+                  </div>
+                </div>
+                <div className={styles.buttonGroup}>
+                  <button
+                    className={styles.btnPrimary}
+                    onClick={handleCreateTripForVehicle}
+                    disabled={savingTrip || !assignPcName}
+                  >
+                    {savingTrip ? (
+                      <>
+                        <LoaderCircle size={16} className={styles.spinner} />
+                        Dodawanie…
+                      </>
+                    ) : (
+                      <>
+                        <Plus size={16} />
+                        Dodaj kurs
+                      </>
+                    )}
+                  </button>
+                  <button className={styles.btnSecondary} onClick={resetTripForm}>
+                    <RotateCcw size={16} />
+                    Wyczyść
+                  </button>
+                </div>
+              </div>
+
+              <div className={styles.buttonGroup} style={{ marginTop: '1rem' }}>
+                <button
+                  className={styles.btnPrimary}
+                  onClick={handleLoadPreview}
+                  disabled={previewLoading || !assignPcName}
+                >
+                  {previewLoading ? (
+                    <LoaderCircle size={16} className={styles.spinner} />
+                  ) : (
+                    <ListChecks size={16} />
+                  )}
+                  Podgląd harmonogramu pojazdu
                 </button>
               </div>
             </div>
@@ -1422,10 +1273,10 @@ const Schedule = () => {
             <div className={styles.card}>
               <div className={styles.cardHeader}>
                 <div>
-                  <h2 className={styles.cardTitle}>Podgląd ciągłości trasy</h2>
+                  <h2 className={styles.cardTitle}>Harmonogram pojazdu</h2>
                   <p className={styles.cardDescription}>
-                    Kursy przypisane pojazdowi {preview?.pcName ? `„${preview.pcName}”` : ''} w kolejności chronologicznej,
-                    z automatycznie wyliczonymi pauzami między kursami.
+                    Rozwinięty rozkład dnia dla pojazdu {preview?.pcName ? `„${preview.pcName}”` : ''}
+                    {preview?.date ? ` (${preview.date})` : ''} – każdy przystanek z wyliczoną godziną.
                   </p>
                 </div>
               </div>
@@ -1433,12 +1284,13 @@ const Schedule = () => {
               {previewLoading ? (
                 <div className={styles.loading}>
                   <LoaderCircle size={16} className={styles.spinner} />
-                  Ładowanie rozpiski…
+                  Ładowanie harmonogramu…
                 </div>
               ) : !preview || (preview.trips || []).length === 0 ? (
                 <div className={styles.timelineEmpty}>
-                  Brak przypisanych kursów dla tego pojazdu (dzień: {assignDate || todayKey()}). Przypisz kursy powyżej i
-                  kliknij „Podgląd trasy pojazdu”.
+                  {assignPcName
+                    ? 'Brak przypisanych kursów dla tego pojazdu w wybranym dniu.'
+                    : 'Wybierz pojazd i kliknij „Podgląd harmonogramu pojazdu”.'}
                 </div>
               ) : (
                 <div className={styles.timeline}>
@@ -1453,19 +1305,18 @@ const Schedule = () => {
                           <div style={{ flex: 1 }}>
                             <div className={styles.timelineTripHeader}>
                               <span>
-                                Kurs {idx + 1}: {firstStop?.time || trip.departure_time} – {lastStop?.time || '—'}
+                                Kurs {idx + 1}: {firstStop?.planned_time || trip.start_time} –{' '}
+                                {lastStop?.planned_time || '—'}
                               </span>
                               <span className={styles.tripRowBadge}>
-                                {trip.schedule_name}
-                                {trip.schedule_code ? ` (${trip.schedule_code})` : ''}
-                              </span>
-                              <span className={styles.tripRowBadge}>
-                                {DIRECTION_LABELS[trip.side_direction] || trip.side_direction}
+                                {trip.line_number || trip.route_id}
                               </span>
                               {trip.block_id && <span className={styles.tripRowBadge}>{trip.block_id}</span>}
                             </div>
                             <div className={styles.timelineTripStops}>
-                              {(trip.stops || []).map((s) => `${s.stop_name} (${s.time})`).join(' → ')}
+                              {(trip.stops || [])
+                                .map((s) => `${s.name || s.stop_id} (${s.planned_time})`)
+                                .join(' → ')}
                             </div>
                           </div>
                         </div>
