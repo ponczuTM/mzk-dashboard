@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from 'react';
 import {
   MapContainer,
   TileLayer,
@@ -93,25 +99,41 @@ const todayKey = () => {
 };
 
 /*
- * Przesuwa mapę do pojedynczego pojazdu albo dopasowuje widok
- * do wszystkich aktualnie widocznych markerów.
+ * Ten komponent reaguje WYŁĄCZNIE na zmianę viewKey,
+ * czyli wybór użytkownika w liście select.
+ *
+ * Nie reaguje na zmianę "points", więc odświeżenie GPS co 5 sekund
+ * nie przesunie mapy i nie zmieni zoomu użytkownika.
  */
-const MapViewport = ({ points, selectedVehicleMode }) => {
+const MapViewportOnSelection = ({ viewKey, points, singleVehicleMode }) => {
   const map = useMap();
+  const lastAppliedViewKeyRef = useRef(null);
 
   useEffect(() => {
-    if (!points.length) {
-      map.flyTo([52.0, 19.0], 6, {
-        animate: true,
-        duration: 0.6,
-      });
+    /*
+     * Ten sam wybór = brak ingerencji w widok mapy.
+     *
+     * Dzięki temu użytkownik może ręcznie przesunąć i przybliżyć mapę,
+     * a kolejne aktualizacje danych pozostawią ten widok bez zmian.
+     */
+    if (lastAppliedViewKeyRef.current === viewKey) {
       return;
     }
 
+    if (!points.length) {
+      return;
+    }
+
+    lastAppliedViewKeyRef.current = viewKey;
+
+    /*
+     * Jednorazowe ustawienie widoku po zmianie wyboru.
+     *
+     * Używamy setView/fitBounds bez animacji, aby mapa nie "rozbłyskiwała".
+     */
     if (points.length === 1) {
-      map.flyTo(points[0], selectedVehicleMode ? 14 : 13, {
-        animate: true,
-        duration: 0.6,
+      map.setView(points[0], singleVehicleMode ? 14 : 13, {
+        animate: false,
       });
       return;
     }
@@ -121,10 +143,9 @@ const MapViewport = ({ points, selectedVehicleMode }) => {
     map.fitBounds(bounds, {
       padding: [50, 50],
       maxZoom: 15,
-      animate: true,
-      duration: 0.6,
+      animate: false,
     });
-  }, [map, points, selectedVehicleMode]);
+  }, [map, viewKey, singleVehicleMode]);
 
   return null;
 };
@@ -165,6 +186,12 @@ const Map = () => {
   const shouldShowAllStops =
     isAllStopsMode || isAllVehiclesAndStopsMode;
 
+  /*
+   * Aktualizacja danych mapy następuje co pięć sekund.
+   *
+   * Ten proces zmienia tylko markery i ich pozycje.
+   * Nie zmienia center ani zoom MapContainer.
+   */
   const loadBaseData = useCallback(async () => {
     try {
       setError(null);
@@ -192,8 +219,8 @@ const Map = () => {
   }, [loadBaseData]);
 
   /*
-   * Przy pierwszym uruchomieniu automatycznie wybieramy pierwszy
-   * pojazd mający aktualne współrzędne GPS.
+   * Początkowo wybieramy pierwszy autobus z lokalizacją.
+   * Późniejsze aktualizacje nie zmieniają już wybranego pojazdu.
    */
   useEffect(() => {
     if (!selectedPcName) {
@@ -222,8 +249,7 @@ const Map = () => {
   }, [vehicles, selectedPcName, isGlobalMode]);
 
   /*
-   * Pobiera plan kursów tylko dla pojedynczego wybranego pojazdu.
-   * W trybach "Pokaż wszystkie..." harmonogram nie jest potrzebny.
+   * Harmonogram pobieramy tylko dla widoku pojedynczego pojazdu.
    */
   const loadSelectedVehicleSchedule = useCallback(
     async (pcName) => {
@@ -270,14 +296,7 @@ const Map = () => {
   }, [vehicles, selectedPcName, isGlobalMode]);
 
   /*
-   * Faktyczne przystanki kursów wybranego pojazdu.
-   *
-   * Struktura z BackendContext:
-   * vehicleSchedule.trips[].stops[] = {
-   *   stop_id,
-   *   name,
-   *   planned_time
-   * }
+   * Odczyt przystanków z konkretnych kursów przypisanych do pojazdu.
    */
   const tripStopReferences = useMemo(() => {
     const trips = vehicleSchedule?.trips || [];
@@ -294,30 +313,27 @@ const Map = () => {
     );
   }, [vehicleSchedule]);
 
-  /*
-   * Trasy przypisane do kursów pojazdu.
-   *
-   * Jeśli nie ma jeszcze pobranego harmonogramu, line_id pojazdu jest
-   * traktowane jako awaryjne ID trasy.
-   */
   const activeRouteIds = useMemo(() => {
-    const ids = [];
+    const routeIds = [];
 
     (vehicleSchedule?.trips || []).forEach((trip) => {
       const routeId = normalizeId(trip.route_id);
 
-      if (routeId && !ids.includes(routeId)) {
-        ids.push(routeId);
+      if (routeId && !routeIds.includes(routeId)) {
+        routeIds.push(routeId);
       }
     });
 
-    const fallbackLineId = normalizeId(selectedVehicle?.line_id);
+    /*
+     * Fallback: line_id pojazdu wskazuje ID trasy.
+     */
+    const lineId = normalizeId(selectedVehicle?.line_id);
 
-    if (fallbackLineId && !ids.includes(fallbackLineId)) {
-      ids.push(fallbackLineId);
+    if (lineId && !routeIds.includes(lineId)) {
+      routeIds.push(lineId);
     }
 
-    return ids;
+    return routeIds;
   }, [vehicleSchedule, selectedVehicle]);
 
   const activeRoutes = useMemo(() => {
@@ -327,20 +343,20 @@ const Map = () => {
   }, [routes, activeRouteIds]);
 
   /*
-   * Jeżeli istnieje harmonogram, używamy przystanków z kursów.
-   * Jeśli nie, pobieramy przystanki przypisane bezpośrednio do trasy:
-   * routes[].stops[].
+   * Jeśli harmonogram ma kursy, ich lista przystanków jest nadrzędna.
+   *
+   * Fallback: wykorzystujemy route.stops z danych tras.
    */
   const visibleStopReferences = useMemo(() => {
     if (tripStopReferences.length > 0) {
       return tripStopReferences;
     }
 
-    const fallbackRouteStops = [];
+    const routeStops = [];
 
     activeRoutes.forEach((route) => {
       (route.stops || []).forEach((stop, index) => {
-        fallbackRouteStops.push({
+        routeStops.push({
           stop_id: stop.stop_id,
           name: stop.name || stop.stop_name,
           planned_time: null,
@@ -351,12 +367,12 @@ const Map = () => {
       });
     });
 
-    return fallbackRouteStops;
+    return routeStops;
   }, [tripStopReferences, activeRoutes]);
 
   /*
-   * Łączy stop_id kursu z rekordem pobranym z GET /stops,
-   * który zawiera współrzędne latitude i longitude.
+   * Dopasowuje stop_id z harmonogramu do rekordów GET /stops,
+   * z których otrzymujemy latitude i longitude.
    */
   const vehicleRouteStops = useMemo(() => {
     const result = [];
@@ -391,9 +407,6 @@ const Map = () => {
     return result;
   }, [visibleStopReferences, stops]);
 
-  /*
-   * Markery autobusów widoczne na mapie.
-   */
   const displayedVehicles = useMemo(() => {
     if (shouldShowAllVehicles) {
       return vehicles.filter(hasVehicleCoordinates);
@@ -406,9 +419,6 @@ const Map = () => {
     return [];
   }, [vehicles, selectedVehicle, shouldShowAllVehicles]);
 
-  /*
-   * Markery przystanków widoczne na mapie.
-   */
   const displayedStops = useMemo(() => {
     if (shouldShowAllStops) {
       return stops.filter(hasStopCoordinates);
@@ -421,12 +431,8 @@ const Map = () => {
     return vehicleRouteStops;
   }, [stops, vehicleRouteStops, shouldShowAllStops, isAllVehiclesMode]);
 
-  const routeColor = activeRoutes[0]?.color || '#2563eb';
-
   /*
-   * Linię trasy pokazujemy tylko przy widoku pojedynczego pojazdu.
-   * W widoku globalnym polilinia byłaby myląca, bo wiele pojazdów
-   * może jechać różnymi trasami.
+   * Polilinia jest dostępna wyłącznie w trybie pojedynczego pojazdu.
    */
   const routePolylinePositions = useMemo(() => {
     if (isGlobalMode) {
@@ -439,8 +445,11 @@ const Map = () => {
     ]);
   }, [vehicleRouteStops, isGlobalMode]);
 
+  const routeColor = activeRoutes[0]?.color || '#2563eb';
+
   /*
-   * Punkty używane do automatycznego ustawienia widoku mapy.
+   * Punkty przekazane do MapViewportOnSelection służą jedynie
+   * do jednorazowego ustawienia widoku po zmianie selecta.
    */
   const viewportPoints = useMemo(() => {
     const points = [];
@@ -673,14 +682,18 @@ const Map = () => {
         zoom={6}
         className={styles.mapContainer}
         scrollWheelZoom
+        zoomAnimation={false}
+        fadeAnimation={false}
+        markerZoomAnimation={false}
         style={{
           width: '100%',
           height: '100%',
         }}
       >
-        <MapViewport
+        <MapViewportOnSelection
+          viewKey={selectedPcName}
           points={viewportPoints}
-          selectedVehicleMode={Boolean(selectedVehicle)}
+          singleVehicleMode={Boolean(selectedVehicle)}
         />
 
         <TileLayer
@@ -713,12 +726,14 @@ const Map = () => {
               </strong>
               <br />
               ID: {stop.id}
+
               {stop.planned_time && (
                 <>
                   <br />
                   Planowany czas: {stop.planned_time}
                 </>
               )}
+
               <br />
               Szer: {Number(stop.latitude).toFixed(5)}
               <br />
