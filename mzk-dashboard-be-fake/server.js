@@ -6,7 +6,8 @@ const { URL } = require('url');
 
 const PC_ID = process.env.PC_ID || 'mock-pc-1';
 const PC_NAME = process.env.PC_NAME || 'mock_linia_nr_2';
-const ROOM_SERVER_URL = process.env.ROOM_SERVER_URL || 'http://192.168.68.155:3001/api/data';
+const ROOM_SERVER_URL =
+  process.env.ROOM_SERVER_URL || 'http://192.168.68.155:3001/api/data';
 
 const SEND_INTERVAL_MS = Number(process.env.SEND_INTERVAL_MS || 5000);
 const REFRESH_INTERVAL_MS = Number(process.env.REFRESH_INTERVAL_MS || 30000);
@@ -20,26 +21,53 @@ const MOCK_PRESET = process.env.MOCK_PRESET || 'LAST_1_DAY';
 const MOCK_CLASSES = process.env.MOCK_CLASSES || 'PERSON,HEAD';
 
 /*
- * Godzina startu trasy w lokalnym czasie komputera.
+ * Godzina startu głównej, zaplanowanej trasy.
+ * Format: HH:MM
  *
- * Przykłady:
+ * Przykład:
  * ROUTE_START_HOUR=13:40
- * ROUTE_START_HOUR=13:50
  */
 const ROUTE_START_HOUR = process.env.ROUTE_START_HOUR || '13:40';
 
 /*
- * Poza trasą przesyłana jest ta pozycja.
+ * Czas przejazdu od punktu A do B.
+ * Powrót B -> A trwa tyle samo.
+ *
+ * Domyślnie:
+ * - minuta 1: A -> B
+ * - minuta 2: B -> A
+ * - następnie cykl zaczyna się ponownie
  */
-const DEFAULT_LATITUDE = 53.0000;
-const DEFAULT_LONGITUDE = 18.0000;
+const LOOP_ROUTE_ONE_WAY_DURATION_MS = Number(
+  process.env.LOOP_ROUTE_ONE_WAY_DURATION_MS || 60 * 1000
+);
 
 /*
- * Punkty trasy:
+ * Lokalizacja używana POZA główną trasą czasową.
  *
- * start + 0 min  -> 53.024180481478716; 18.66653585181815
- * start + 3 min  -> 53.0231855133872;   18.659680759545367
- * start + 6 min  -> 53.02155567943058;  18.6491505561822
+ * Ruch następuje po prostej:
+ * A -> B przez 1 minutę,
+ * B -> A przez kolejną minutę.
+ */
+const LOOP_ROUTE_START = {
+  latitude: 53.024180481478716,
+  longitude: 18.66653585181815,
+};
+
+const LOOP_ROUTE_END = {
+  latitude: 53.04803717176576,
+  longitude: 18.582307721079246,
+};
+
+/*
+ * Główna trasa, działająca w określonym czasie lokalnym komputera.
+ *
+ * Przy ROUTE_START_HOUR=13:40:
+ * 13:40 -> punkt 1
+ * 13:43 -> punkt 2
+ * 13:46 -> punkt 3
+ *
+ * Poza tym przedziałem włączana jest pętla LOOP_ROUTE_START <-> LOOP_ROUTE_END.
  */
 const ROUTE_POINTS = [
   {
@@ -96,10 +124,6 @@ function parseRouteStartHour(value) {
 
 const routeStartTime = parseRouteStartHour(ROUTE_START_HOUR);
 
-/*
- * Tworzy obiekt Date odpowiadający dzisiejszej godzinie startu
- * w lokalnej strefie czasowej komputera.
- */
 function getTodayRouteStartDate(now = new Date()) {
   return new Date(
     now.getFullYear(),
@@ -116,28 +140,16 @@ function interpolate(startValue, endValue, progress) {
   return startValue + (endValue - startValue) * progress;
 }
 
-/*
- * Zwraca aktualną lokalizację na podstawie lokalnego czasu systemowego.
- *
- * Przed startem trasy i po jej zakończeniu:
- * 53.0000;18.0000
- *
- * Pomiędzy punktami trasy współrzędne są interpolowane liniowo.
- */
-function getCurrentLocation(now = new Date()) {
+function getMainRouteLocation(now) {
   const routeStartDate = getTodayRouteStartDate(now);
   const elapsedMs = now.getTime() - routeStartDate.getTime();
+
   const firstPoint = ROUTE_POINTS[0];
   const lastPoint = ROUTE_POINTS[ROUTE_POINTS.length - 1];
   const routeDurationMs = lastPoint.offsetMinutes * 60 * 1000;
 
   if (elapsedMs < 0 || elapsedMs > routeDurationMs) {
-    return {
-      latitude: DEFAULT_LATITUDE,
-      longitude: DEFAULT_LONGITUDE,
-      locationSource: 'default-outside-route',
-      routeActive: false,
-    };
+    return null;
   }
 
   for (let index = 0; index < ROUTE_POINTS.length - 1; index += 1) {
@@ -148,7 +160,8 @@ function getCurrentLocation(now = new Date()) {
     const segmentEndMs = nextPoint.offsetMinutes * 60 * 1000;
 
     if (elapsedMs >= segmentStartMs && elapsedMs <= segmentEndMs) {
-      const progress = (elapsedMs - segmentStartMs) / (segmentEndMs - segmentStartMs);
+      const progress =
+        (elapsedMs - segmentStartMs) / (segmentEndMs - segmentStartMs);
 
       return {
         latitude: interpolate(
@@ -161,8 +174,9 @@ function getCurrentLocation(now = new Date()) {
           nextPoint.longitude,
           progress
         ),
-        locationSource: 'simulated-route',
+        locationSource: 'scheduled-main-route',
         routeActive: true,
+        routeType: 'main',
       };
     }
   }
@@ -170,9 +184,72 @@ function getCurrentLocation(now = new Date()) {
   return {
     latitude: lastPoint.latitude,
     longitude: lastPoint.longitude,
-    locationSource: 'simulated-route',
+    locationSource: 'scheduled-main-route',
     routeActive: true,
+    routeType: 'main',
   };
+}
+
+/*
+ * Wylicza pozycję na trasie wahadłowej.
+ *
+ * Cykl ma 2 minuty:
+ * 00:00 - 00:59.999: punkt A -> punkt B
+ * 01:00 - 01:59.999: punkt B -> punkt A
+ *
+ * Użycie Date.now() powoduje, że pętla bazuje na aktualnym czasie
+ * komputera i jest płynna także dla sekund oraz milisekund.
+ */
+function getLoopRouteLocation(now) {
+  const oneWayDurationMs = LOOP_ROUTE_ONE_WAY_DURATION_MS;
+  const fullLoopDurationMs = oneWayDurationMs * 2;
+
+  if (!Number.isFinite(oneWayDurationMs) || oneWayDurationMs <= 0) {
+    throw new Error(
+      'LOOP_ROUTE_ONE_WAY_DURATION_MS musi być liczbą większą od 0'
+    );
+  }
+
+  const cyclePositionMs = now.getTime() % fullLoopDurationMs;
+  const isGoingForward = cyclePositionMs < oneWayDurationMs;
+
+  let progress;
+
+  if (isGoingForward) {
+    progress = cyclePositionMs / oneWayDurationMs;
+  } else {
+    progress = (cyclePositionMs - oneWayDurationMs) / oneWayDurationMs;
+  }
+
+  const start = isGoingForward ? LOOP_ROUTE_START : LOOP_ROUTE_END;
+  const end = isGoingForward ? LOOP_ROUTE_END : LOOP_ROUTE_START;
+
+  return {
+    latitude: interpolate(start.latitude, end.latitude, progress),
+    longitude: interpolate(start.longitude, end.longitude, progress),
+    locationSource: 'loop-route',
+    routeActive: true,
+    routeType: isGoingForward ? 'loop-a-to-b' : 'loop-b-to-a',
+  };
+}
+
+/*
+ * Najpierw sprawdzana jest główna trasa czasowa.
+ *
+ * Jeśli aktualny czas jest między:
+ * ROUTE_START_HOUR oraz ROUTE_START_HOUR + 6 minut,
+ * używana jest trasa z trzema punktami.
+ *
+ * W każdym pozostałym momencie używana jest pętla A <-> B.
+ */
+function getCurrentLocation(now = new Date()) {
+  const mainRouteLocation = getMainRouteLocation(now);
+
+  if (mainRouteLocation) {
+    return mainRouteLocation;
+  }
+
+  return getLoopRouteLocation(now);
 }
 
 function httpPost(urlString, payload) {
@@ -525,7 +602,7 @@ async function sendDataToRoom() {
         `status=${response.status}, seq=${sequence}, ` +
         `lat=${currentLocation.latitude}, ` +
         `lng=${currentLocation.longitude}, ` +
-        `routeActive=${currentLocation.routeActive}`
+        `routeType=${currentLocation.routeType}`
       );
     } else {
       console.warn(
@@ -559,11 +636,10 @@ async function start() {
         refreshIntervalMs: REFRESH_INTERVAL_MS,
         sendIntervalMs: SEND_INTERVAL_MS,
         routeStartHour: ROUTE_START_HOUR,
-        defaultLocation: {
-          latitude: DEFAULT_LATITUDE,
-          longitude: DEFAULT_LONGITUDE,
-        },
-        routePoints: ROUTE_POINTS,
+        loopRouteOneWayDurationMs: LOOP_ROUTE_ONE_WAY_DURATION_MS,
+        loopRouteStart: LOOP_ROUTE_START,
+        loopRouteEnd: LOOP_ROUTE_END,
+        mainRoutePoints: ROUTE_POINTS,
       },
       null,
       2

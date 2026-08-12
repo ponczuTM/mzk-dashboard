@@ -6,6 +6,7 @@ import Cameras from './pages/Cameras';
 import Schedule from './pages/Schedule';
 import Vehicles from './pages/Vehicles';
 import Statistics from './pages/Statistics';
+import Map from './pages/Map';
 import { BackendProvider } from './context/BackendContext';
 
 function App() {
@@ -20,6 +21,7 @@ function App() {
             <Route path="/schedule" element={<Schedule />} />
             <Route path="/vehicles" element={<Vehicles />} />
             <Route path="/statistics" element={<Statistics />} />
+            <Route path="/map" element={<Map />} />
           </Routes>
         </div>
       </div>

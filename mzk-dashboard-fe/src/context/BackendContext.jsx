@@ -1,9 +1,9 @@
 import React, {
   createContext,
+  useCallback,
   useContext,
   useMemo,
   useState,
-  useCallback,
 } from 'react';
 
 const DEFAULT_BASE_URL =
@@ -17,16 +17,23 @@ const BackendContext = createContext(null);
 function joinUrl(base, path) {
   const b = String(base || '').replace(/\/+$/, '');
   const p = String(path || '').replace(/^\/+/, '');
+
   return `${b}/${p}`;
 }
 
 function buildQuery(params) {
   if (!params || typeof params !== 'object') return '';
+
   const parts = [];
+
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === null || value === '') continue;
-    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+
+    parts.push(
+      `${encodeURIComponent(key)}=${encodeURIComponent(value)}`
+    );
   }
+
   return parts.length ? `?${parts.join('&')}` : '';
 }
 
@@ -37,8 +44,11 @@ async function parseResponse(response) {
   if (text) {
     try {
       data = JSON.parse(text);
-    } catch (err) {
-      data = { ok: false, error: text };
+    } catch {
+      data = {
+        ok: false,
+        error: text,
+      };
     }
   }
 
@@ -46,9 +56,11 @@ async function parseResponse(response) {
     const message =
       (data && (data.error || data.message)) ||
       `Błąd HTTP ${response.status} ${response.statusText}`;
+
     const error = new Error(message);
     error.status = response.status;
     error.payload = data;
+
     throw error;
   }
 
@@ -58,9 +70,12 @@ async function parseResponse(response) {
 function createApi(baseUrl) {
   const request = async (method, path, { query, body } = {}) => {
     const url = joinUrl(baseUrl, path) + buildQuery(query);
+
     const options = {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+      },
     };
 
     if (body !== undefined && body !== null) {
@@ -68,12 +83,14 @@ function createApi(baseUrl) {
     }
 
     let response;
+
     try {
       response = await fetch(url, options);
     } catch (networkErr) {
       const error = new Error(
         `Nie można połączyć się z serwerem (${url}): ${networkErr.message}`
       );
+
       error.cause = networkErr;
       throw error;
     }
@@ -91,93 +108,144 @@ function createApi(baseUrl) {
     baseUrl,
     request,
 
-    // --- Info / IP ---
+    // --- Informacje / IP ---
     getRoot: () => get('/'),
     getApiIp: () => get('/api/ip'),
     getIsarsoftLatest: () => get('/api/isarsoft/latest'),
 
-    // --- Przystanki (stops) ---
+    // --- Przystanki ---
     getStops: (query) => get('/stops', query),
-    getStop: (id) => get(`/stops/${encodeURIComponent(id)}`),
-    createStop: (payload) => post('/stops', payload),
+
+    getStop: (id) =>
+      get(`/stops/${encodeURIComponent(id)}`),
+
+    createStop: (payload) =>
+      post('/stops', payload),
+
     updateStop: (id, payload) =>
       put(`/stops/${encodeURIComponent(id)}`, payload),
-    deleteStop: (id) => del(`/stops/${encodeURIComponent(id)}`),
 
-    // --- TRASY (routes) ---
-    // Trasa (Route) = uporządkowana sekwencja przystanków. Kierunek wynika
-    // z KOLEJNOŚCI przystanków. Każdy przystanek (poza pierwszym) ma
-    // minutes_from_previous — czas jazdy od poprzedniego przystanku.
-    // Odpowiedź getRoutes/getRoute zawiera już wyliczone skumulowane offsety
-    // (pola offset_minutes na przystankach oraz total_minutes na trasie).
+    deleteStop: (id) =>
+      del(`/stops/${encodeURIComponent(id)}`),
+
+    // --- Trasy ---
     getRoutes: (query) => get('/api/routes', query),
-    getRoute: (id) => get(`/api/routes/${encodeURIComponent(id)}`),
-    // createRoute({ name, code?, color?, isActive?, stops:[{stop_id, minutes_from_previous}] })
-    createRoute: (payload) => post('/api/routes', payload),
-    // updateRoute — aktualizuje metadane; jeśli poda się stops, zastępuje sekwencję.
+
+    getRoute: (id) =>
+      get(`/api/routes/${encodeURIComponent(id)}`),
+
+    createRoute: (payload) =>
+      post('/api/routes', payload),
+
     updateRoute: (id, payload) =>
       put(`/api/routes/${encodeURIComponent(id)}`, payload),
-    deleteRoute: (id) => del(`/api/routes/${encodeURIComponent(id)}`),
-    // replaceRouteStops(id, [{stop_id, minutes_from_previous}]) — zastępuje CAŁĄ sekwencję.
+
+    deleteRoute: (id) =>
+      del(`/api/routes/${encodeURIComponent(id)}`),
+
     replaceRouteStops: (id, stops) =>
-      put(`/api/routes/${encodeURIComponent(id)}/stops`, { stops }),
+      put(`/api/routes/${encodeURIComponent(id)}/stops`, {
+        stops,
+      }),
 
     // --- Typy dni ---
     getServiceDays: () => get('/service-days'),
 
     // --- Święta ---
     getHolidays: () => get('/holidays'),
-    createHoliday: (payload) => post('/holidays', payload),
-    deleteHoliday: (date) => del(`/holidays/${encodeURIComponent(date)}`),
+
+    createHoliday: (payload) =>
+      post('/holidays', payload),
+
+    deleteHoliday: (date) =>
+      del(`/holidays/${encodeURIComponent(date)}`),
 
     // --- Pojazdy ---
-    // Pojazdy (pcName) rejestrują się automatycznie po odebraniu ramki
-    // IsarsoftData — nigdy nie są tworzone ręcznie.
     getVehicles: () => get('/api/vehicles'),
 
-    // --- KURSY / PRZYPISANIA POJAZDÓW (trip_assignments) ---
-    // Kurs = przypisanie pojazd + trasa + godzina startu + typ dnia
-    // (opcjonalnie konkretna data i brygada). Ten sam pojazd może jechać tą
-    // samą trasą wielokrotnie o różnych godzinach.
-    //
-    // assignVehicleTrips(pcName, {
-    //   day_type?, date?, replace?,
-    //   assignments: [{ route_id, start_time: "HH:MM", day_type, block_id? }]
-    // })
+    // --- Kursy / przypisania pojazdów ---
     assignVehicleTrips: (pcName, payload) =>
-      post('/api/vehicles/assign-trips', { pcName, ...payload }),
+      post('/api/vehicles/assign-trips', {
+        pcName,
+        ...payload,
+      }),
 
-    // Surowa lista przypisanych kursów pojazdu.
-    // getVehicleAssignments(pcName, { day_type?, date? })
     getVehicleAssignments: (pcName, query) =>
-      get(`/api/vehicles/${encodeURIComponent(pcName)}/assignments`, query),
+      get(
+        `/api/vehicles/${encodeURIComponent(pcName)}/assignments`,
+        query
+      ),
 
-    // Rozwinięty rozkład dnia: trips[] z wyliczonymi godzinami (planned_time)
-    // + legs[] (pauzy między kursami).
-    // getVehicleSchedule(pcName, { date?, day_type? })
-    getVehicleSchedule: (pcName, query) =>
-      get(`/api/vehicles/${encodeURIComponent(pcName)}/schedule`, query),
+    getVehicleSchedule: (pcName, query) => {
+      if (!pcName) {
+        throw new Error(
+          'Brak pcName. Aby pobrać harmonogram, podaj nazwę pojazdu.'
+        );
+      }
 
-    // Usuwa pojedynczy kurs (przypisanie) po jego id.
+      return get(
+        `/api/vehicles/${encodeURIComponent(pcName)}/schedule`,
+        query
+      );
+    },
+
+    /*
+      Alias dla starszych komponentów.
+
+      Poprawne użycie:
+      api.getSchedules(pcName, { date: '2026-08-11', day_type: 'weekday' })
+    */
+    getSchedules: (pcName, query) => {
+      if (!pcName) {
+        throw new Error(
+          'Brak pcName. Użyj api.getSchedules(pcName, query) albo api.getVehicleSchedule(pcName, query).'
+        );
+      }
+
+      return get(
+        `/api/vehicles/${encodeURIComponent(pcName)}/schedule`,
+        query
+      );
+    },
+
     deleteTrip: (assignmentId) =>
       del(`/api/trips/${encodeURIComponent(assignmentId)}`),
 
     // --- Zdarzenia trackingowe / raporty ---
     getTrips: (query) => get('/trips', query),
+
     deleteTrips: (query) => del('/trips', query),
-    getReportCurrent: (query) => get('/reports/trip/current', query),
-    getCurrentStatus: (query) => get('/reports/trip/current', query),
-    getReportStopUsage: (query) => get('/reports/stop-usage', query),
-    getReportOnDemandStops: (query) => get('/reports/on-demand-stops', query),
+
+    getReportCurrent: (query) =>
+      get('/reports/trip/current', query),
+
+    getCurrentStatus: (query) =>
+      get('/reports/trip/current', query),
+
+    getReportStopUsage: (query) =>
+      get('/reports/stop-usage', query),
+
+    getReportOnDemandStops: (query) =>
+      get('/reports/on-demand-stops', query),
+
     getReportLinePerformance: (query) =>
       get('/reports/line-performance', query),
-    getReportAdminZone: (query) => get('/reports/admin-zone', query),
 
-    // Aliasy zgodności wstecznej (krótsze nazwy używane przez starsze komponenty)
-    getStopUsage: (query) => get('/reports/stop-usage', query),
-    getOnDemandStops: (query) => get('/reports/on-demand-stops', query),
-    getLinePerformance: (query) => get('/reports/line-performance', query),
-    getAdminZone: (query) => get('/reports/admin-zone', query),
+    getReportAdminZone: (query) =>
+      get('/reports/admin-zone', query),
+
+    // Aliasy zgodności dla starszych komponentów
+    getStopUsage: (query) =>
+      get('/reports/stop-usage', query),
+
+    getOnDemandStops: (query) =>
+      get('/reports/on-demand-stops', query),
+
+    getLinePerformance: (query) =>
+      get('/reports/line-performance', query),
+
+    getAdminZone: (query) =>
+      get('/reports/admin-zone', query),
 
     // --- Ustawienia ---
     getSettings: () => get('/settings'),
@@ -185,8 +253,14 @@ function createApi(baseUrl) {
 }
 
 export const BackendProvider = ({ children, baseUrl }) => {
-  const [serverUrl, setServerUrl] = useState(baseUrl || DEFAULT_BASE_URL);
-  const api = useMemo(() => createApi(serverUrl), [serverUrl]);
+  const [serverUrl, setServerUrl] = useState(
+    baseUrl || DEFAULT_BASE_URL
+  );
+
+  const api = useMemo(
+    () => createApi(serverUrl),
+    [serverUrl]
+  );
 
   const updateServerUrl = useCallback((url) => {
     setServerUrl(url || DEFAULT_BASE_URL);
@@ -199,10 +273,13 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const fetchRoutes = useCallback(
     async (query) => {
       setRoutesLoading(true);
+
       try {
         const data = await api.getRoutes(query);
         const next = data.routes || [];
+
         setRoutes(next);
+
         return next;
       } finally {
         setRoutesLoading(false);
@@ -214,7 +291,9 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const createRoute = useCallback(
     async (data) => {
       const result = await api.createRoute(data);
+
       await fetchRoutes();
+
       return result.route;
     },
     [api, fetchRoutes]
@@ -223,7 +302,9 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const updateRoute = useCallback(
     async (id, payload) => {
       const result = await api.updateRoute(id, payload);
+
       await fetchRoutes();
+
       return result.route;
     },
     [api, fetchRoutes]
@@ -232,7 +313,11 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const deleteRoute = useCallback(
     async (id) => {
       const result = await api.deleteRoute(id);
-      setRoutes((prev) => prev.filter((r) => r.id !== id));
+
+      setRoutes((prev) =>
+        prev.filter((route) => route.id !== id)
+      );
+
       return result;
     },
     [api]
@@ -241,7 +326,9 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const replaceRouteStops = useCallback(
     async (id, stops) => {
       const result = await api.replaceRouteStops(id, stops);
+
       await fetchRoutes();
+
       return result.route;
     },
     [api, fetchRoutes]
@@ -253,10 +340,13 @@ export const BackendProvider = ({ children, baseUrl }) => {
 
   const fetchVehicles = useCallback(async () => {
     setVehiclesLoading(true);
+
     try {
       const data = await api.getVehicles();
       const next = data.vehicles || [];
+
       setVehicles(next);
+
       return next;
     } finally {
       setVehiclesLoading(false);
@@ -268,15 +358,18 @@ export const BackendProvider = ({ children, baseUrl }) => {
 
   const assignVehicleTrips = useCallback(
     async (pcName, payload) => {
-      const result = await api.assignVehicleTrips(pcName, payload);
-      return result;
+      return api.assignVehicleTrips(pcName, payload);
     },
     [api]
   );
 
   const fetchVehicleAssignments = useCallback(
     async (pcName, query) => {
-      const result = await api.getVehicleAssignments(pcName, query);
+      const result = await api.getVehicleAssignments(
+        pcName,
+        query
+      );
+
       return result.assignments || [];
     },
     [api]
@@ -284,8 +377,7 @@ export const BackendProvider = ({ children, baseUrl }) => {
 
   const deleteTrip = useCallback(
     async (assignmentId) => {
-      const result = await api.deleteTrip(assignmentId);
-      return result;
+      return api.deleteTrip(assignmentId);
     },
     [api]
   );
@@ -293,7 +385,33 @@ export const BackendProvider = ({ children, baseUrl }) => {
   const fetchVehicleSchedule = useCallback(
     async (pcName, query) => {
       const result = await api.getVehicleSchedule(pcName, query);
-      setVehicleSchedules((prev) => ({ ...prev, [pcName]: result }));
+
+      setVehicleSchedules((prev) => ({
+        ...prev,
+        [pcName]: result,
+      }));
+
+      return result;
+    },
+    [api]
+  );
+
+  /*
+    Alias na poziomie contextu.
+
+    Możesz użyć:
+    const { fetchSchedules } = useBackend();
+    const schedule = await fetchSchedules(pcName, query);
+  */
+  const fetchSchedules = useCallback(
+    async (pcName, query) => {
+      const result = await api.getSchedules(pcName, query);
+
+      setVehicleSchedules((prev) => ({
+        ...prev,
+        [pcName]: result,
+      }));
+
       return result;
     },
     [api]
@@ -305,26 +423,27 @@ export const BackendProvider = ({ children, baseUrl }) => {
       serverUrl,
       setServerUrl: updateServerUrl,
 
-      // stan
+      // Stan
       routes,
       routesLoading,
       vehicles,
       vehiclesLoading,
       vehicleSchedules,
 
-      // trasy
+      // Trasy
       fetchRoutes,
       createRoute,
       updateRoute,
       deleteRoute,
       replaceRouteStops,
 
-      // pojazdy / kursy
+      // Pojazdy / kursy
       fetchVehicles,
       assignVehicleTrips,
       fetchVehicleAssignments,
       deleteTrip,
       fetchVehicleSchedule,
+      fetchSchedules,
     }),
     [
       api,
@@ -345,6 +464,7 @@ export const BackendProvider = ({ children, baseUrl }) => {
       fetchVehicleAssignments,
       deleteTrip,
       fetchVehicleSchedule,
+      fetchSchedules,
     ]
   );
 
@@ -357,9 +477,13 @@ export const BackendProvider = ({ children, baseUrl }) => {
 
 export const useBackend = () => {
   const ctx = useContext(BackendContext);
+
   if (!ctx) {
-    throw new Error('useBackend musi być użyty wewnątrz <BackendProvider>.');
+    throw new Error(
+      'useBackend musi być użyty wewnątrz <BackendProvider>.'
+    );
   }
+
   return ctx;
 };
 

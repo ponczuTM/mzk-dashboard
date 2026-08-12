@@ -37,6 +37,11 @@ const navItems = [
     label: 'Statystyki',
     icon: BarChart3,
   },
+  {
+    to: '/map',
+    label: 'Mapa',
+    icon: BarChart3,
+  },
 ];
 
 const Navbar = () => {

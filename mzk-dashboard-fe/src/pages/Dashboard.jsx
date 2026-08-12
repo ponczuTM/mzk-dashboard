@@ -42,27 +42,58 @@ const Dashboard = () => {
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
-
+  
     try {
-      const [vehData, schData, tripsData] = await Promise.all([
-        api.getVehicles(),
-        api.getSchedules({ active: 'true' }),
-        api.getTrips({ limit: 50, page: 1 }),
-      ]);
-
+      // Najpierw trzeba pobrać pojazdy, ponieważ harmonogram wymaga pcName.
+      const vehData = await api.getVehicles();
+  
       const nextVehicles = vehData.vehicles || [];
-      const nextSchedules = schData.schedules || [];
+  
+      const vehicleNames = nextVehicles
+        .map((vehicle) => vehicle.pcName)
+        .filter(Boolean);
+  
+      // Pobieranie ostatnich zdarzeń oraz rozkładów wszystkich pojazdów.
+      const [tripsData, scheduleResults] = await Promise.all([
+        api.getTrips({ limit: 50, page: 1 }),
+  
+        Promise.all(
+          vehicleNames.map(async (pcName) => {
+            try {
+              const result = await api.getVehicleSchedule(pcName);
+  
+              return {
+                pcName,
+                ...result,
+              };
+            } catch (scheduleError) {
+              console.warn(
+                `Nie udało się pobrać rozkładu pojazdu ${pcName}:`,
+                scheduleError.message
+              );
+  
+              return null;
+            }
+          })
+        ),
+      ]);
+  
+      // Backend może zwrócić `trips`, `assignments` albo pustą odpowiedź.
+      // Zapisujemy obiekty rozkładów, aby zachować także pcName pojazdu.
+      const nextSchedules = scheduleResults.filter(Boolean);
       const nextTrips = tripsData.rows || [];
-      const options = nextVehicles.map((v) => v.pcName).filter(Boolean);
-
+  
       setVehicles(nextVehicles);
       setSchedules(nextSchedules);
       setRecentTrips(nextTrips);
-      setVehicleOptions(options);
-
-      setSelectedVehicle((prev) => {
-        if (prev && options.includes(prev)) return prev;
-        return options[0] || '';
+      setVehicleOptions(vehicleNames);
+  
+      setSelectedVehicle((previousVehicle) => {
+        if (previousVehicle && vehicleNames.includes(previousVehicle)) {
+          return previousVehicle;
+        }
+  
+        return vehicleNames[0] || '';
       });
     } catch (err) {
       setError(err.message || 'Nie udało się pobrać danych dashboardu.');
@@ -127,7 +158,13 @@ const Dashboard = () => {
   };
 
   const totalVehicles = vehicles.length;
-  const activeSchedules = schedules.filter((schedule) => schedule.active).length;
+  const activeSchedules = useMemo(() => {
+    return schedules.reduce((total, schedule) => {
+      const trips = schedule.trips || [];
+  
+      return total + trips.length;
+    }, 0);
+  }, [schedules]);
   const totalTrips = recentTrips.length;
 
   const avgPassengers = useMemo(() => {
