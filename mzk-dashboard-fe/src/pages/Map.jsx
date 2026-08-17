@@ -99,53 +99,148 @@ const todayKey = () => {
 };
 
 /*
- * Ten komponent reaguje WYŁĄCZNIE na zmianę viewKey,
- * czyli wybór użytkownika w liście select.
+ * MapController ustawia widok mapy DOKŁADNIE JEDEN RAZ w całym cyklu
+ * życia komponentu — w momencie, gdy po raz pierwszy pojawią się
+ * jakiekolwiek punkty (pozycje autobusów / przystanków).
  *
- * Nie reaguje na zmianę "points", więc odświeżenie GPS co 5 sekund
- * nie przesunie mapy i nie zmieni zoomu użytkownika.
+ * Po tym pierwszym ("init") ustawieniu widoku flaga hasInitializedRef
+ * jest ustawiana na true i JUŻ NIGDY więcej widok mapy nie jest ruszany.
+ *
+ * Dzięki temu:
+ *  - przy starcie mapa sama wyśrodkuje się na lokalnych autobusach/przystankach,
+ *  - a każda kolejna aktualizacja danych (GPS co 5 s) NIE przesuwa
+ *    ani nie przybliża mapy — użytkownik zostaje dokładnie tam,
+ *    gdzie sam ustawił widok.
+ *
+ * Punkty czytamy przez ref, więc ich ciągłe zmiany nie wyzwalają
+ * żadnej logiki po inicjalizacji.
  */
-const MapViewportOnSelection = ({ viewKey, points, singleVehicleMode }) => {
+const MapController = ({ initialPoints, singleVehicleMode }) => {
   const map = useMap();
-  const lastAppliedViewKeyRef = useRef(null);
 
+  const hasInitializedRef = useRef(false);
+
+  const pointsRef = useRef(initialPoints);
+  pointsRef.current = initialPoints;
+
+  const singleVehicleModeRef = useRef(singleVehicleMode);
+  singleVehicleModeRef.current = singleVehicleMode;
+
+  /*
+   * Ostatni widok ustawiony ŚWIADOMIE:
+   *  - albo przez init (jednorazowe wyśrodkowanie),
+   *  - albo przez samego użytkownika (przeciągnięcie / zoom).
+   *
+   * To jest jedyne źródło prawdy o tym, gdzie ma być kadr mapy.
+   * Jakikolwiek inny ruch (np. auto-pan popupu przy aktualizacji
+   * pozycji markera) jest natychmiast cofany do tej wartości.
+   */
+  const userViewRef = useRef(null);
+
+  // Chroni przed pętlą: nasze własne przywracanie widoku nie może
+  // być traktowane jako "ruch użytkownika".
+  const isRestoringRef = useRef(false);
+
+  // Init — dokładnie raz, gdy pojawią się pierwsze punkty.
   useEffect(() => {
-    /*
-     * Ten sam wybór = brak ingerencji w widok mapy.
-     *
-     * Dzięki temu użytkownik może ręcznie przesunąć i przybliżyć mapę,
-     * a kolejne aktualizacje danych pozostawią ten widok bez zmian.
-     */
-    if (lastAppliedViewKeyRef.current === viewKey) {
+    if (hasInitializedRef.current) {
       return;
     }
+
+    const points = pointsRef.current;
 
     if (!points.length) {
       return;
     }
 
-    lastAppliedViewKeyRef.current = viewKey;
+    hasInitializedRef.current = true;
 
-    /*
-     * Jednorazowe ustawienie widoku po zmianie wyboru.
-     *
-     * Używamy setView/fitBounds bez animacji, aby mapa nie "rozbłyskiwała".
-     */
     if (points.length === 1) {
-      map.setView(points[0], singleVehicleMode ? 14 : 13, {
+      map.setView(points[0], singleVehicleModeRef.current ? 14 : 13, {
         animate: false,
       });
-      return;
+    } else {
+      map.fitBounds(L.latLngBounds(points), {
+        padding: [50, 50],
+        maxZoom: 15,
+        animate: false,
+      });
     }
 
-    const bounds = L.latLngBounds(points);
+    // Zapamiętujemy widok po inicjalizacji jako źródło prawdy.
+    userViewRef.current = {
+      center: map.getCenter(),
+      zoom: map.getZoom(),
+    };
+  });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 
-    map.fitBounds(bounds, {
-      padding: [50, 50],
-      maxZoom: 15,
-      animate: false,
-    });
-  }, [map, viewKey, singleVehicleMode]);
+  /*
+   * Strażnik widoku.
+   *
+   * moveend/zoomend odpalają się ZARÓWNO przy ruchu użytkownika,
+   * JAK I przy auto-panie wywołanym przez Leaflet (np. popup goniący
+   * przesunięty marker autobusu).
+   *
+   * Rozróżniamy je flagą isRestoringRef:
+   *  - jeśli to nasze przywracanie -> ignorujemy,
+   *  - jeśli ruch pochodzi od interakcji użytkownika (dragging /
+   *    zoom przez kółko lub przyciski) -> zapisujemy nowy widok,
+   *  - w pozostałych przypadkach (auto-pan) -> przywracamy zapamiętany
+   *    widok, więc mapa NIE goni autobusu.
+   */
+  useEffect(() => {
+    const handleMoveEnd = () => {
+      if (isRestoringRef.current) {
+        isRestoringRef.current = false;
+        return;
+      }
+
+      // Ruch pochodzący od użytkownika: aktualizujemy źródło prawdy.
+      userViewRef.current = {
+        center: map.getCenter(),
+        zoom: map.getZoom(),
+      };
+    };
+
+    const handleUnexpectedPan = () => {
+      // Auto-pan (np. z popupu) nie jest interakcją użytkownika.
+      // Jeśli mamy zapamiętany widok, natychmiast go przywracamy.
+      if (!userViewRef.current) {
+        return;
+      }
+
+      const current = { center: map.getCenter(), zoom: map.getZoom() };
+      const saved = userViewRef.current;
+
+      const moved =
+        current.zoom !== saved.zoom ||
+        Math.abs(current.center.lat - saved.center.lat) > 1e-9 ||
+        Math.abs(current.center.lng - saved.center.lng) > 1e-9;
+
+      if (!moved) {
+        return;
+      }
+
+      isRestoringRef.current = true;
+      map.setView(saved.center, saved.zoom, { animate: false });
+    };
+
+    // Ruch inicjowany przez użytkownika => zapis nowego widoku.
+    map.on('dragend', handleMoveEnd);
+    map.on('zoomend', handleMoveEnd);
+
+    // Auto-pan (np. popup) => cofnięcie do zapamiętanego widoku.
+    map.on('autopanstart', handleUnexpectedPan);
+    map.on('moveend', handleUnexpectedPan);
+
+    return () => {
+      map.off('dragend', handleMoveEnd);
+      map.off('zoomend', handleMoveEnd);
+      map.off('autopanstart', handleUnexpectedPan);
+      map.off('moveend', handleUnexpectedPan);
+    };
+  }, [map]);
 
   return null;
 };
@@ -448,8 +543,8 @@ const Map = () => {
   const routeColor = activeRoutes[0]?.color || '#2563eb';
 
   /*
-   * Punkty przekazane do MapViewportOnSelection służą jedynie
-   * do jednorazowego ustawienia widoku po zmianie selecta.
+   * Punkty potrzebne WYŁĄCZNIE do jednorazowej inicjalizacji widoku.
+   * Po pierwszym snapie MapController i tak ignoruje ich zmiany.
    */
   const viewportPoints = useMemo(() => {
     const points = [];
@@ -690,9 +785,8 @@ const Map = () => {
           height: '100%',
         }}
       >
-        <MapViewportOnSelection
-          viewKey={selectedPcName}
-          points={viewportPoints}
+        <MapController
+          initialPoints={viewportPoints}
           singleVehicleMode={Boolean(selectedVehicle)}
         />
 
@@ -718,7 +812,7 @@ const Map = () => {
             position={[Number(stop.latitude), Number(stop.longitude)]}
             icon={stopIcon}
           >
-            <Popup>
+            <Popup autoPan={false}>
               <strong>
                 {shouldShowAllStops || isAllVehiclesAndStopsMode
                   ? stop.name
@@ -751,7 +845,7 @@ const Map = () => {
             ]}
             icon={busIcon}
           >
-            <Popup>
+            <Popup autoPan={false}>
               <strong>{vehicle.pcName}</strong>
               <br />
               Status: {vehicle.status || 'brak'}
