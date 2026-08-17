@@ -4,8 +4,8 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
-const PC_ID = process.env.PC_ID || 'mock-pc-1';
-const PC_NAME = process.env.PC_NAME || 'mock_linia_nr_2';
+const PC_ID = process.env.PC_ID || 'Patryk_pc_1';
+const PC_NAME = process.env.PC_NAME || 'Patryk_linia_numer_1';
 const ROOM_SERVER_URL =
   process.env.ROOM_SERVER_URL || 'http://192.168.68.155:3001/api/data';
 
@@ -50,13 +50,13 @@ const LOOP_ROUTE_ONE_WAY_DURATION_MS = Number(
  * B -> A przez kolejną minutę.
  */
 const LOOP_ROUTE_START = {
-  latitude: 53.024180481478716,
-  longitude: 18.66653585181815,
+  latitude: 53.04803717176576,
+  longitude: 18.582307721079246,
 };
 
 const LOOP_ROUTE_END = {
-  latitude: 53.04803717176576,
-  longitude: 18.582307721079246,
+  latitude: 53.024180481478716,
+  longitude: 18.66653585181815,
 };
 
 /*

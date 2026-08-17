@@ -7,6 +7,7 @@ import {
   CalendarClock,
   BusFront,
   BarChart3,
+  MapPinned
 } from 'lucide-react';
 import styles from './Navbar.module.css';
 
@@ -40,7 +41,7 @@ const navItems = [
   {
     to: '/map',
     label: 'Mapa',
-    icon: BarChart3,
+    icon: MapPinned,
   },
 ];
 

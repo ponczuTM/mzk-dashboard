@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useBackend } from '../context/BackendContext';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import './Statistics.css';
+import { TrendingUp } from 'lucide-react';
+import styles from './Statistics.module.css';
 
 const Statistics = () => {
   const { api } = useBackend();
@@ -95,8 +96,8 @@ const Statistics = () => {
   };
 
   const renderContent = () => {
-    if (loading) return <div className="loading">Ładowanie raportu...</div>;
-    if (error) return <div className="error">Błąd: {error}</div>;
+    if (loading) return <div className={styles.loading}>Ładowanie raportu...</div>;
+    if (error) return <div className={styles.error}>Błąd: {error}</div>;
     if (!data) return <p>Brak danych.</p>;
 
     const rows = data.rows || [];
@@ -177,39 +178,39 @@ const Statistics = () => {
   };
 
   return (
-    <div className="statistics">
-      <h1>📈 Statystyki i raporty</h1>
-      <div className="tabs">
-        <button className={activeTab === 'stop-usage' ? 'active' : ''} onClick={() => setActiveTab('stop-usage')}>Wykorzystanie przystanków</button>
-        <button className={activeTab === 'on-demand' ? 'active' : ''} onClick={() => setActiveTab('on-demand')}>Przystanki na żądanie</button>
-        <button className={activeTab === 'line-performance' ? 'active' : ''} onClick={() => setActiveTab('line-performance')}>Wydajność linii</button>
-        <button className={activeTab === 'admin-zone' ? 'active' : ''} onClick={() => setActiveTab('admin-zone')}>Strefy administracyjne</button>
+    <div className={styles.statistics}>
+      <h1><TrendingUp size={28} /> Statystyki i raporty</h1>
+      <div className={styles.tabs}>
+        <button className={activeTab === 'stop-usage' ? styles.active : ''} onClick={() => setActiveTab('stop-usage')}>Wykorzystanie przystanków</button>
+        <button className={activeTab === 'on-demand' ? styles.active : ''} onClick={() => setActiveTab('on-demand')}>Przystanki na żądanie</button>
+        <button className={activeTab === 'line-performance' ? styles.active : ''} onClick={() => setActiveTab('line-performance')}>Wydajność linii</button>
+        <button className={activeTab === 'admin-zone' ? styles.active : ''} onClick={() => setActiveTab('admin-zone')}>Strefy administracyjne</button>
       </div>
 
-      <div className="filters">
-        <div className="filter-group">
+      <div className={styles.filters}>
+        <div className={styles.filterGroup}>
           <label>Pojazd:</label>
           <select name="pcName" value={filters.pcName} onChange={handleFilterChange}>
             <option value="">Wszystkie</option>
             {vehicles.map(v => <option key={v.pcName} value={v.pcName}>{v.pcName}</option>)}
           </select>
         </div>
-        <div className="filter-group">
+        <div className={styles.filterGroup}>
           <label>Linia:</label>
           <input type="text" name="line_id" value={filters.line_id} onChange={handleFilterChange} placeholder="np. 6" />
         </div>
-        <div className="filter-group">
+        <div className={styles.filterGroup}>
           <label>Data od:</label>
           <input type="date" name="start" value={filters.start} onChange={handleFilterChange} />
         </div>
-        <div className="filter-group">
+        <div className={styles.filterGroup}>
           <label>Data do:</label>
           <input type="date" name="end" value={filters.end} onChange={handleFilterChange} />
         </div>
         <button onClick={fetchReport}>Filtruj</button>
       </div>
 
-      <div className="report-content">
+      <div className={styles.reportContent}>
         {renderContent()}
       </div>
     </div>

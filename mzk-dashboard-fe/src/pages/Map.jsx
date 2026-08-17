@@ -1,9 +1,27 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useBackend } from '../context/BackendContext';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import {
+  MapContainer,
+  TileLayer,
+  Marker,
+  Popup,
+  Polyline,
+  useMap,
+} from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { Bus, MapPin, LayoutGrid, AlertTriangle } from 'lucide-react';
 import styles from './Map.module.css';
+
+
+// ---------- Tryby widoku ----------
+const MODE = {
+  ALL: 'ALL',
+  BUSES: 'BUSES',
+  STOPS: 'STOPS',
+  ROUTE: 'ROUTE', // aktywny gdy wybrano konkretną trasę
+};
+
 
 // ---------- Ikony SVG ----------
 const busSvg = `
@@ -16,12 +34,14 @@ const busSvg = `
   </svg>
 `;
 
+
 const stopSvg = `
   <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="#ffffff" stroke="#3b82f6" stroke-width="2">
     <circle cx="12" cy="12" r="10" />
     <text x="12" y="16" text-anchor="middle" font-size="10" fill="#3b82f6" font-weight="bold">P</text>
   </svg>
 `;
+
 
 const busIcon = L.divIcon({
   className: 'custom-bus-icon',
@@ -31,6 +51,7 @@ const busIcon = L.divIcon({
   popupAnchor: [0, -32],
 });
 
+
 const stopIcon = L.divIcon({
   className: 'custom-stop-icon',
   html: stopSvg,
@@ -39,14 +60,43 @@ const stopIcon = L.divIcon({
   popupAnchor: [0, -26],
 });
 
+
+const DEFAULT_CENTER = [53.02809365240993, 18.631034929317966]; // Warszawa
+const DEFAULT_ZOOM = 13;
+
+
+// ---------- Kontroler mapy: płynny przelot bez remontu MapContainer ----------
+const MapController = ({ target }) => {
+  const map = useMap();
+
+
+  useEffect(() => {
+    if (!target) return;
+    const { lat, lng, zoom } = target;
+    if (lat == null || lng == null) return;
+
+
+    map.flyTo([lat, lng], zoom ?? map.getZoom(), {
+      duration: 0.8,
+    });
+  }, [target, map]);
+
+
+  return null;
+};
+
+
 // ---------- Komponent ----------
 const Map = () => {
   const { api, vehicles, fetchVehicles, routes, fetchRoutes } = useBackend();
 
+
   const [allStops, setAllStops] = useState([]);
-  const [selectedPcName, setSelectedPcName] = useState('');
-  const [showAllStops, setShowAllStops] = useState(false);
+  const [mode, setMode] = useState(MODE.ALL); // domyślnie: wszystko
+  const [selectedRouteId, setSelectedRouteId] = useState('');
+  const [flyTarget, setFlyTarget] = useState(null);
   const intervalRef = useRef(null);
+
 
   // ---------- Pobranie danych początkowych ----------
   useEffect(() => {
@@ -63,17 +113,29 @@ const Map = () => {
     loadInitialData();
   }, [api, fetchVehicles, fetchRoutes]);
 
+
   // ---------- Cykliczne odświeżanie pojazdów co 5 s ----------
+  // Odświeżamy zawsze, gdy pojazdy są widoczne (tryb ALL, BUSES lub ROUTE).
+  const busesVisible =
+    mode === MODE.ALL || mode === MODE.BUSES || mode === MODE.ROUTE;
+
+
   useEffect(() => {
-    if (!selectedPcName) return;
+    if (!busesVisible) return;
+
 
     const refreshVehicles = async () => {
-      await fetchVehicles();
+      try {
+        await fetchVehicles();
+      } catch (err) {
+        console.error('Błąd odświeżania pojazdów:', err);
+      }
     };
 
-    refreshVehicles(); // pierwsze odświeżenie
 
+    refreshVehicles();
     intervalRef.current = setInterval(refreshVehicles, 5000);
+
 
     return () => {
       if (intervalRef.current) {
@@ -81,213 +143,326 @@ const Map = () => {
         intervalRef.current = null;
       }
     };
-  }, [selectedPcName, fetchVehicles]);
+  }, [busesVisible, fetchVehicles]);
 
-  // ---------- Wyznaczenie przystanków do wyświetlenia ----------
-  const visibleStops = useMemo(() => {
-    // Jeśli wybrano wszystkie pojazdy -> pokaż wszystkie przystanki
-    if (selectedPcName === 'ALL_VEHICLES') {
-      return allStops;
-    }
 
-    // Jeśli wybrano konkretny pojazd
-    if (selectedPcName) {
-      const vehicle = vehicles.find(v => v.pcName === selectedPcName);
-      if (!vehicle) return [];
-
-      const lineId = vehicle.line_id;
-      if (!lineId) return showAllStops ? allStops : [];
-
-      const route = routes.find(r => r.id === lineId || r.code === lineId);
-      if (!route) return showAllStops ? allStops : [];
-
-      const stopsInRoute = route.stops || [];
-      const fullStops = stopsInRoute
-        .map(rs => {
-          const stop = allStops.find(s => s.id === rs.stop_id);
-          return {
-            ...rs,
-            name: stop?.name || rs.stop_id,
-            latitude: stop?.latitude,
-            longitude: stop?.longitude,
-          };
-        })
-        .filter(s => s.latitude != null && s.longitude != null);
-
-      // Jeśli włączono "pokaż wszystkie przystanki" – doklejamy pozostałe
-      if (showAllStops) {
-        const routeStopIds = new Set(fullStops.map(s => s.stop_id));
-        const extraStops = allStops.filter(s => !routeStopIds.has(s.id));
-        return [...fullStops, ...extraStops.map(s => ({
-          stop_id: s.id,
-          name: s.name,
-          latitude: s.latitude,
-          longitude: s.longitude,
-        }))];
-      }
-      return fullStops;
-    }
-
-    return [];
-  }, [selectedPcName, vehicles, routes, allStops, showAllStops]);
-
-  // ---------- Wybór pojazdu ----------
-  const handleVehicleChange = (e) => {
-    setSelectedPcName(e.target.value);
+  // ---------- Zmiana trybu ----------
+  const handleModeChange = (nextMode) => {
+    setMode(nextMode);
+    setSelectedRouteId('');
+    setFlyTarget(null);
   };
 
-  // ---------- Obsługa checkboxa ----------
-  const handleShowAllStopsChange = (e) => {
-    setShowAllStops(e.target.checked);
+
+  const handleRouteChange = (e) => {
+    const id = e.target.value;
+    setSelectedRouteId(id);
+    setMode(id ? MODE.ROUTE : MODE.ALL);
+    setFlyTarget(null);
   };
 
-  // ---------- Pobranie wybranego pojazdu ----------
-  const selectedVehicle = useMemo(
-    () => vehicles.find(v => v.pcName === selectedPcName),
-    [vehicles, selectedPcName]
+
+  // ---------- Wybrana trasa ----------
+  const selectedRoute = useMemo(
+    () =>
+      routes.find(
+        (r) =>
+          String(r.id) === String(selectedRouteId) ||
+          String(r.code) === String(selectedRouteId)
+      ) || null,
+    [routes, selectedRouteId]
   );
 
-  const hasRoute = selectedVehicle && selectedVehicle.line_id;
-  const routeExists = hasRoute && visibleStops.length > 0;
 
-  // Czy pokazywać wszystkie pojazdy?
-  const showAllVehicles = selectedPcName === 'ALL_VEHICLES';
+  // ---------- Przystanki wybranej trasy w kolejności ----------
+  const routeStops = useMemo(() => {
+    if (!selectedRoute) return [];
 
-  // Filtruj pojazdy z poprawną lokalizacją
+
+    const stopsInRoute = [...(selectedRoute.stops || [])];
+
+
+    // Sortujemy po kolejności, jeśli backend podaje pole sequence/order/position.
+    stopsInRoute.sort((a, b) => {
+      const oa = a.sequence ?? a.order ?? a.position ?? 0;
+      const ob = b.sequence ?? b.order ?? b.position ?? 0;
+      return oa - ob;
+    });
+
+
+    return stopsInRoute
+      .map((rs) => {
+        const stop = allStops.find((s) => s.id === rs.stop_id);
+        return {
+          stop_id: rs.stop_id,
+          name: stop?.name || rs.stop_id,
+          latitude: stop?.latitude,
+          longitude: stop?.longitude,
+        };
+      })
+      .filter((s) => s.latitude != null && s.longitude != null);
+  }, [selectedRoute, allStops]);
+
+
+  // Współrzędne polyline (kolejność zachowana)
+  const routePolyline = useMemo(
+    () => routeStops.map((s) => [s.latitude, s.longitude]),
+    [routeStops]
+  );
+
+
+  // ---------- Pojazdy z lokalizacją ----------
   const vehiclesWithPosition = useMemo(
-    () => vehicles.filter(v => v.last_latitude != null && v.last_longitude != null),
+    () =>
+      vehicles.filter(
+        (v) => v.last_latitude != null && v.last_longitude != null
+      ),
     [vehicles]
   );
 
+
+  // ---------- Przystanki z lokalizacją ----------
+  const stopsWithPosition = useMemo(
+    () =>
+      allStops.filter(
+        (s) => s.latitude != null && s.longitude != null
+      ),
+    [allStops]
+  );
+
+
+  // ---------- Pojazdy przypisane do wybranej trasy ----------
+  const routeVehicles = useMemo(() => {
+    if (!selectedRoute) return [];
+    return vehiclesWithPosition.filter(
+      (v) =>
+        String(v.line_id) === String(selectedRoute.id) ||
+        String(v.line_id) === String(selectedRoute.code)
+    );
+  }, [selectedRoute, vehiclesWithPosition]);
+
+
+  // ---------- Co pokazać na mapie w danym trybie ----------
+  const displayedVehicles = useMemo(() => {
+    if (mode === MODE.STOPS) return [];
+    if (mode === MODE.ROUTE) return routeVehicles;
+    return vehiclesWithPosition; // ALL, BUSES
+  }, [mode, routeVehicles, vehiclesWithPosition]);
+
+
+  const displayedStops = useMemo(() => {
+    if (mode === MODE.BUSES) return [];
+    if (mode === MODE.ROUTE) return routeStops;
+    return stopsWithPosition; // ALL, STOPS
+  }, [mode, routeStops, stopsWithPosition]);
+
+
+  // ---------- Kliknięcie elementu w panelu -> przelot mapy ----------
+  const flyToVehicle = useCallback((v) => {
+    setFlyTarget({
+      lat: v.last_latitude,
+      lng: v.last_longitude,
+      zoom: 16,
+    });
+  }, []);
+
+
+  const flyToStop = useCallback((s) => {
+    setFlyTarget({
+      lat: s.latitude,
+      lng: s.longitude,
+      zoom: 16,
+    });
+  }, []);
+
+
+  // ---------- UI: panel boczny zależny od trybu ----------
+  const showBusList = mode === MODE.ALL || mode === MODE.BUSES || mode === MODE.ROUTE;
+  const showStopList = mode === MODE.ALL || mode === MODE.STOPS || mode === MODE.ROUTE;
+
+
   return (
     <div className={styles.container}>
-      <div className={styles.controls}>
-        <label htmlFor="vehicleSelect" className={styles.label}>
-          Wybierz pojazd:
-        </label>
-        <select
-          id="vehicleSelect"
-          className={styles.select}
-          value={selectedPcName}
-          onChange={handleVehicleChange}
-        >
-          <option value="">-- wybierz pojazd --</option>
-          {vehicles.map(v => (
-            <option key={v.pcName} value={v.pcName}>
-              {v.pcName} {v.line_id ? `(trasa ${v.line_id})` : ''}
-            </option>
-          ))}
-          <option value="ALL_VEHICLES">🚌 Wszystkie pojazdy</option>
-        </select>
+      {/* ---------- PANEL BOCZNY ---------- */}
+      <aside className={styles.sidebar}>
+        <div className={styles.controls}>
+          <div className={styles.modeGroup}>
+            <button
+              type="button"
+              className={`${styles.modeButton} ${mode === MODE.ALL ? styles.modeActive : ''}`}
+              onClick={() => handleModeChange(MODE.ALL)}
+            >
+              <LayoutGrid size={16} /> Wszystko
+            </button>
+            <button
+              type="button"
+              className={`${styles.modeButton} ${mode === MODE.BUSES ? styles.modeActive : ''}`}
+              onClick={() => handleModeChange(MODE.BUSES)}
+            >
+              <Bus size={16} /> Autobusy
+            </button>
+            <button
+              type="button"
+              className={`${styles.modeButton} ${mode === MODE.STOPS ? styles.modeActive : ''}`}
+              onClick={() => handleModeChange(MODE.STOPS)}
+            >
+              <MapPin size={16} /> Przystanki
+            </button>
+          </div>
 
-        <label className={styles.checkboxLabel}>
-          <input
-            type="checkbox"
-            checked={showAllStops}
-            onChange={handleShowAllStopsChange}
-            disabled={selectedPcName === 'ALL_VEHICLES'}
-          />
-          Pokaż wszystkie przystanki
-        </label>
 
-        {selectedPcName && !showAllVehicles && (
-          <div className={styles.info}>
-            {hasRoute ? (
-              routeExists ? (
-                <span className={styles.infoOk}>
-                  ✅ Trasa: {selectedVehicle.line_id} – {visibleStops.length} przystanków
-                </span>
-              ) : (
-                <span className={styles.infoWarning}>
-                  ⚠️ Trasa {selectedVehicle.line_id} nie ma zdefiniowanych przystanków lub brak współrzędnych
-                </span>
-              )
-            ) : (
-              <span className={styles.infoError}>
-                🚫 Brak przypisanej trasy
-              </span>
-            )}
-            {selectedVehicle?.last_latitude != null && selectedVehicle?.last_longitude != null ? (
+          <label htmlFor="routeSelect" className={styles.label}>
+            Wybierz trasę:
+          </label>
+          <select
+            id="routeSelect"
+            className={styles.select}
+            value={selectedRouteId}
+            onChange={handleRouteChange}
+          >
+            <option value="">-- brak (widok ogólny) --</option>
+            {routes.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.code ? `${r.code} — ` : ''}{r.name || `Trasa ${r.id}`}
+              </option>
+            ))}
+          </select>
+
+
+          {mode === MODE.ROUTE && selectedRoute && (
+            <div className={styles.info}>
               <span className={styles.infoOk}>
-                📍 Pozycja: {selectedVehicle.last_latitude.toFixed(5)}, {selectedVehicle.last_longitude.toFixed(5)}
+                <Bus size={14} /> {routeVehicles.length} pojazdów na trasie
               </span>
+              <span className={styles.infoOk}>
+                <MapPin size={14} /> {routeStops.length} przystanków
+              </span>
+              {routeStops.length === 0 && (
+                <span className={styles.infoWarning}>
+                  <AlertTriangle size={14} /> Trasa nie ma przystanków ze współrzędnymi
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
+
+        {/* ---------- LISTA POJAZDÓW ---------- */}
+        {showBusList && (
+          <div className={styles.listSection}>
+            <h3 className={styles.listHeading}>
+              Autobusy ({displayedVehicles.length})
+            </h3>
+            {displayedVehicles.length === 0 ? (
+              <p className={styles.listEmpty}>Brak pojazdów z lokalizacją.</p>
             ) : (
-              <span className={styles.infoWarning}>⏳ Oczekiwanie na lokalizację…</span>
+              <ul className={styles.list}>
+                {displayedVehicles.map((v) => (
+                  <li
+                    key={v.pcName}
+                    className={styles.listItem}
+                    onClick={() => flyToVehicle(v)}
+                  >
+                    <span className={styles.listItemName}><Bus size={14} /> {v.pcName}</span>
+                    <span className={styles.listItemMeta}>
+                      {v.line_id ? `Trasa ${v.line_id}` : 'Brak trasy'}
+                    </span>
+                    <span className={styles.listItemCoords}>
+                      {v.last_latitude.toFixed(5)}, {v.last_longitude.toFixed(5)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         )}
 
-        {showAllVehicles && (
-          <div className={styles.info}>
-            <span className={styles.infoOk}>
-              🚌 Wyświetlono {vehiclesWithPosition.length} pojazdów
-            </span>
-            <span className={styles.infoOk}>
-              📍 {visibleStops.length} przystanków
-            </span>
+
+        {/* ---------- LISTA PRZYSTANKÓW ---------- */}
+        {showStopList && (
+          <div className={styles.listSection}>
+            <h3 className={styles.listHeading}>
+              Przystanki ({displayedStops.length})
+            </h3>
+            {displayedStops.length === 0 ? (
+              <p className={styles.listEmpty}>Brak przystanków z lokalizacją.</p>
+            ) : (
+              <ul className={styles.list}>
+                {displayedStops.map((s, idx) => (
+                  <li
+                    key={s.stop_id || s.id}
+                    className={styles.listItem}
+                    onClick={() => flyToStop(s)}
+                  >
+                    <span className={styles.listItemName}>
+                      {mode === MODE.ROUTE ? `${idx + 1}. ` : <MapPin size={14} />}
+                      {' '}{s.name}
+                    </span>
+                    <span className={styles.listItemCoords}>
+                      {s.latitude.toFixed(5)}, {s.longitude.toFixed(5)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
-      </div>
+      </aside>
 
+
+      {/* ---------- MAPA ---------- */}
       <div className={styles.mapWrapper}>
         <MapContainer
-          center={[52.2297, 21.0122]} // środek Warszawy jako domyślny
-          zoom={13}
+          center={DEFAULT_CENTER}
+          zoom={DEFAULT_ZOOM}
           className={styles.mapContainer}
           zoomControl={true}
           attributionControl={true}
         >
           <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          />
+  url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+/>
+
+
+          <MapController target={flyTarget} />
+
+
+          {/* Linia trasy łącząca przystanki w kolejności */}
+          {mode === MODE.ROUTE && routePolyline.length >= 2 && (
+            <Polyline
+              positions={routePolyline}
+              pathOptions={{ color: '#2563eb', weight: 4, opacity: 0.8 }}
+            />
+          )}
+
 
           {/* Markery pojazdów */}
-          {showAllVehicles
-            ? vehiclesWithPosition.map(v => (
-                <Marker
-                  key={v.pcName}
-                  position={[v.last_latitude, v.last_longitude]}
-                  icon={busIcon}
-                >
-                  <Popup>
-                    <div className={styles.popupBus}>
-                      <strong>{v.pcName}</strong>
-                      {v.line_id ? (
-                        <p>Trasa: {v.line_id}</p>
-                      ) : (
-                        <p style={{ color: '#dc2626' }}>Brak trasy</p>
-                      )}
-                      <p className={styles.popupCoords}>
-                        {v.last_latitude.toFixed(5)}, {v.last_longitude.toFixed(5)}
-                      </p>
-                    </div>
-                  </Popup>
-                </Marker>
-              ))
-            : selectedVehicle && selectedVehicle.last_latitude != null && selectedVehicle.last_longitude != null && (
-                <Marker
-                  position={[selectedVehicle.last_latitude, selectedVehicle.last_longitude]}
-                  icon={busIcon}
-                >
-                  <Popup>
-                    <div className={styles.popupBus}>
-                      <strong>{selectedVehicle.pcName}</strong>
-                      {selectedVehicle.line_id ? (
-                        <p>Trasa: {selectedVehicle.line_id}</p>
-                      ) : (
-                        <p style={{ color: '#dc2626' }}>Brak trasy</p>
-                      )}
-                      <p className={styles.popupCoords}>
-                        {selectedVehicle.last_latitude.toFixed(5)}, {selectedVehicle.last_longitude.toFixed(5)}
-                      </p>
-                    </div>
-                  </Popup>
-                </Marker>
-              )}
+          {displayedVehicles.map((v) => (
+            <Marker
+              key={v.pcName}
+              position={[v.last_latitude, v.last_longitude]}
+              icon={busIcon}
+            >
+              <Popup>
+                <div className={styles.popupBus}>
+                  <strong>{v.pcName}</strong>
+                  {v.line_id ? (
+                    <p>Trasa: {v.line_id}</p>
+                  ) : (
+                    <p style={{ color: '#dc2626' }}>Brak trasy</p>
+                  )}
+                  <p className={styles.popupCoords}>
+                    {v.last_latitude.toFixed(5)}, {v.last_longitude.toFixed(5)}
+                  </p>
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+
 
           {/* Markery przystanków */}
-          {visibleStops.map(stop => (
+          {displayedStops.map((stop, idx) => (
             <Marker
               key={stop.stop_id || stop.id}
               position={[stop.latitude, stop.longitude]}
@@ -295,7 +470,10 @@ const Map = () => {
             >
               <Popup>
                 <div className={styles.popupStop}>
-                  <strong>{stop.name}</strong>
+                  <strong>
+                    {mode === MODE.ROUTE ? `${idx + 1}. ` : ''}
+                    {stop.name}
+                  </strong>
                   <p className={styles.popupCoords}>
                     {stop.latitude.toFixed(5)}, {stop.longitude.toFixed(5)}
                   </p>
@@ -308,5 +486,6 @@ const Map = () => {
     </div>
   );
 };
+
 
 export default Map;

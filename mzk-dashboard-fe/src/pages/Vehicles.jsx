@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useBackend } from '../context/BackendContext';
-import './Vehicles.css';
+import { Bus } from 'lucide-react';
+import styles from './Vehicles.module.css';
 
 const Vehicles = () => {
   const { api } = useBackend();
@@ -81,22 +82,22 @@ const Vehicles = () => {
     }
   };
 
-  if (loading) return <div className="loading">Ładowanie...</div>;
-  if (error) return <div className="error">Błąd: {error}</div>;
+  if (loading) return <div className={styles.loading}>Ładowanie...</div>;
+  if (error) return <div className={styles.error}>Błąd: {error}</div>;
 
   return (
-    <div className="vehicles">
-      <h1>🚌 Pojazdy</h1>
-      <div className="filter-bar">
+    <div className={styles.vehicles}>
+      <h1><Bus size={28} /> Pojazdy</h1>
+      <div className={styles.filterBar}>
         <label>Wybierz pojazd: </label>
         <select value={selectedVehicle} onChange={handleVehicleChange}>
           {vehicles.map(v => <option key={v.pcName} value={v.pcName}>{v.pcName}</option>)}
         </select>
       </div>
 
-      <div className="vehicle-detail">
+      <div className={styles.vehicleDetail}>
         {vehicles.filter(v => v.pcName === selectedVehicle).map(v => (
-          <div key={v.pcName} className="vehicle-info">
+          <div key={v.pcName} className={styles.vehicleInfo}>
             <h2>{v.pcName}</h2>
             <p><strong>PC ID:</strong> {v.pcId}</p>
             <p><strong>Linia:</strong> {v.line_id || '—'}</p>
@@ -106,10 +107,10 @@ const Vehicles = () => {
         ))}
       </div>
 
-      <div className="history-section">
+      <div className={styles.historySection}>
         <h3>Historia lokalizacji (ostatnie 100 punktów)</h3>
         {history.length > 0 ? (
-          <div className="history-list">
+          <div className={styles.historyList}>
             <table>
               <thead>
                 <tr>
@@ -138,7 +139,7 @@ const Vehicles = () => {
         )}
       </div>
 
-      <div className="trips-section">
+      <div className={styles.tripsSection}>
         <h3>Zdarzenia pojazdu (kursy)</h3>
         <table>
           <thead>
@@ -164,7 +165,7 @@ const Vehicles = () => {
             ))}
           </tbody>
         </table>
-        <div className="pagination">
+        <div className={styles.pagination}>
           <button onClick={() => handlePageChange(page - 1)} disabled={page <= 1}>Poprzednia</button>
           <span>Strona {page} z {totalPages}</span>
           <button onClick={() => handlePageChange(page + 1)} disabled={page >= totalPages}>Następna</button>

@@ -1,7 +1,10 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&family=Rubik:ital,wght@0,300..900;1,300..900&display=swap');
+
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+  font-family: 'Outfit', 'Rubik', sans-serif !important;
 }
 
 html, body, #root {
@@ -9,9 +12,10 @@ html, body, #root {
   padding: 0;
   width: 100%;
   height: 100%;
+  font-family: 'Outfit', 'Rubik', sans-serif !important;
+  background-color: #f4f6fa;
 }
 
 body {
-  line-height: 1;
+  line-height: 1.5; /* Zwiększyłem z 1 na 1.5 dla lepszej czytelności tekstu */
 }
-

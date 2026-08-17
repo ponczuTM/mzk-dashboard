@@ -1,0 +1,629 @@
+.vehicles {
+  --bg-base: #f4f6fa;
+  --surface: #ffffff;
+  --surface-inset: #f7f9fc;
+  --surface-hover: #eef2f9;
+
+  --text-primary: #1a2233;
+  --text-secondary: #4a5568;
+  --text-muted: #7b8494;
+
+  --accent: #4472c4;
+  --accent-hover: #3a63ac;
+  --accent-soft: rgba(68, 114, 196, 0.1);
+  --accent-border: rgba(68, 114, 196, 0.3);
+
+  --success: #1a9d5a;
+  --success-soft: rgba(26, 157, 90, 0.12);
+  --danger: #d64545;
+  --danger-soft: rgba(214, 69, 69, 0.1);
+  --neutral-soft: rgba(15, 23, 42, 0.05);
+
+  --border-soft: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.14);
+
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+
+  --shadow-card:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 10px 30px rgba(15, 23, 42, 0.06);
+  --shadow-card-hover:
+    0 2px 6px rgba(15, 23, 42, 0.06),
+    0 16px 38px rgba(15, 23, 42, 0.1);
+
+  width: 100%;
+  max-width: 1440px;
+  min-height: 100%;
+  padding: 40px;
+  margin: 0 auto;
+  color: var(--text-primary);
+  background: var(--bg-base);
+}
+
+.vehicles > h1 {
+  margin: 0 0 28px;
+  color: var(--text-primary);
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+}
+
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 20px;
+  margin-bottom: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.filterBar label {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.filterBar select {
+  width: min(100%, 360px);
+  min-height: 46px;
+  padding: 0 42px 0 14px;
+  color: var(--text-primary);
+  appearance: none;
+  background-color: var(--surface-inset);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) 19px,
+    calc(100% - 13px) 19px;
+  background-repeat: no-repeat;
+  background-size: 5px 5px, 5px 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  transition:
+    background-color 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease;
+}
+
+.filterBar select:hover {
+  background-color: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.filterBar select:focus {
+  background-color: var(--surface);
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.vehicleDetail {
+  margin-bottom: 28px;
+}
+
+.vehicleInfo {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  transition:
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    transform 0.14s ease;
+}
+
+.vehicleInfo:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-2px);
+}
+
+.vehicleInfo > h2 {
+  grid-column: 1 / -1;
+  padding: 24px 26px 20px;
+  margin: 0;
+  color: var(--text-primary);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.vehicleInfo > h2::before {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  margin-right: 11px;
+  color: var(--accent);
+  vertical-align: -7px;
+  content: "🚌";
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  font-size: 17px;
+}
+
+.vehicleInfo > p {
+  min-width: 0;
+  padding: 17px 26px;
+  margin: 0;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.vehicleInfo > p:nth-of-type(odd) {
+  border-right: 1px solid var(--border-soft);
+}
+
+.vehicleInfo > p:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.vehicleInfo strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.historySection,
+.tripsSection {
+  min-width: 0;
+  padding: 28px;
+  margin-top: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.historySection > h3,
+.tripsSection > h3 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 18px;
+  margin: 0 0 20px;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
+.historySection > h3::before {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  content: "";
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 5px var(--accent-soft);
+}
+
+.tripsSection > h3::before {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  content: "";
+  background: var(--success);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 5px var(--success-soft);
+}
+
+.historySection > p {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 130px;
+  padding: 22px;
+  margin: 0;
+  color: var(--text-muted);
+  background: var(--surface-inset);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.historyList {
+  width: 100%;
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.historyList table,
+.tripsSection > table {
+  width: 100%;
+  min-width: 740px;
+  border-collapse: collapse;
+  color: var(--text-primary);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.historyList th,
+.historyList td,
+.tripsSection > table th,
+.tripsSection > table td {
+  padding: 16px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.historyList th,
+.tripsSection > table th {
+  color: var(--text-muted);
+  background: var(--surface-inset);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.historyList td,
+.tripsSection > table td {
+  color: var(--text-secondary);
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.historyList tbody tr,
+.tripsSection > table tbody tr {
+  transition: background-color 0.14s ease;
+}
+
+.historyList tbody tr:hover,
+.tripsSection > table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.historyList tbody tr:last-child td,
+.tripsSection > table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.tripsSection {
+  overflow-x: auto;
+}
+
+.tripsSection > table {
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.tripsSection > table th:nth-child(4),
+.tripsSection > table td:nth-child(4),
+.tripsSection > table th:nth-child(5),
+.tripsSection > table td:nth-child(5) {
+  text-align: right;
+}
+
+.tripsSection > table td:last-child,
+.historyList td:nth-child(4) {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 20px;
+}
+
+.pagination span {
+  min-width: 136px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.pagination button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 15px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  transition:
+    color 0.14s ease,
+    background-color 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    transform 0.14s ease;
+}
+
+.pagination button:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  transform: translateY(-1px);
+}
+
+.pagination button:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.pagination button:disabled {
+  color: var(--text-muted);
+  background: var(--surface-inset);
+  border-color: var(--border-soft);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.loading,
+.error {
+  width: 100%;
+  max-width: 1440px;
+  min-height: 230px;
+  padding: 40px;
+  margin: 0 auto;
+  border-radius: var(--radius-lg);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-card);
+}
+
+.loading::before {
+  width: 22px;
+  height: 22px;
+  margin-right: 11px;
+  content: "";
+  border: 3px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: var(--radius-pill);
+  animation: spin 0.85s linear infinite;
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid rgba(214, 69, 69, 0.24);
+  text-align: center;
+}
+
+.error::before {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-right: 10px;
+  color: var(--danger);
+  content: "!";
+  border: 2px solid currentColor;
+  border-radius: var(--radius-pill);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1080px) {
+  .vehicles {
+    padding: 32px 24px;
+  }
+
+  .vehicleInfo {
+    grid-template-columns: 1fr;
+  }
+
+  .vehicleInfo > p:nth-of-type(odd) {
+    border-right: 0;
+  }
+
+  .vehicleInfo > p:nth-last-child(-n + 2) {
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .vehicleInfo > p:last-child {
+    border-bottom: 0;
+  }
+
+  .historySection,
+  .tripsSection {
+    padding: 24px;
+  }
+}
+
+@media (max-width: 640px) {
+  .vehicles {
+    padding: 24px 18px;
+  }
+
+  .vehicles > h1 {
+    margin-bottom: 24px;
+    font-size: 30px;
+    line-height: 1.16;
+  }
+
+  .filterBar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 9px;
+    padding: 18px;
+    margin-bottom: 20px;
+  }
+
+  .filterBar select {
+    width: 100%;
+  }
+
+  .vehicleDetail {
+    margin-bottom: 20px;
+  }
+
+  .vehicleInfo {
+    border-radius: var(--radius-md);
+  }
+
+  .vehicleInfo > h2 {
+    padding: 20px 18px 17px;
+    font-size: 21px;
+  }
+
+  .vehicleInfo > p {
+    padding: 14px 18px;
+    font-size: 14px;
+  }
+
+  .historySection,
+  .tripsSection {
+    padding: 20px;
+    margin-top: 20px;
+    border-radius: var(--radius-md);
+  }
+
+  .historySection > h3,
+  .tripsSection > h3 {
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    font-size: 18px;
+  }
+
+  .pagination {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .pagination span {
+    order: -1;
+    width: 100%;
+  }
+
+  .loading,
+  .error {
+    min-height: 180px;
+    padding: 24px 18px;
+    border-radius: var(--radius-md);
+  }
+}
+
+@media (max-width: 420px) {
+  .vehicles {
+    padding: 20px 14px;
+  }
+
+  .vehicles > h1 {
+    font-size: 27px;
+  }
+
+  .historySection,
+  .tripsSection {
+    padding: 16px;
+  }
+
+  .vehicleInfo > h2 {
+    padding: 17px 15px;
+    font-size: 19px;
+  }
+
+  .vehicleInfo > p {
+    padding: 13px 15px;
+  }
+
+  .pagination {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .pagination span {
+    width: auto;
+    min-width: 0;
+  }
+
+  .pagination button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vehicleInfo,
+  .filterBar select,
+  .historyList tbody tr,
+  .tripsSection > table tbody tr,
+  .pagination button {
+    transition: none;
+  }
+
+  .vehicleInfo:hover,
+  .pagination button:hover:not(:disabled) {
+    transform: none;
+  }
+
+  .loading::before {
+    animation: none;
+  }
+}
