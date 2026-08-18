@@ -270,6 +270,33 @@ function initSchema(conn) {
       value TEXT
     );
 
+    -- Ostatni znany, CAŁKOWITY (narastający) stan licznika osób przesłany
+    -- przez kamerę Isarsoft dla danego urządzenia (pcName). Służy do
+    -- wyliczania przyrostów (delt) zamiast sumowania surowych paczek.
+    CREATE TABLE IF NOT EXISTS device_state (
+      device_id TEXT PRIMARY KEY,
+      last_in INTEGER NOT NULL DEFAULT 0,
+      last_out INTEGER NOT NULL DEFAULT 0,
+      current_occupancy INTEGER NOT NULL DEFAULT 0,
+      total_in INTEGER NOT NULL DEFAULT 0,
+      total_out INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT
+    );
+
+    -- Historia zdarzeń zliczania osób: co paczka z kamery to jeden wiersz
+    -- z surowymi wartościami ORAZ wyliczonym przyrostem (deltą).
+    CREATE TABLE IF NOT EXISTS passenger_count_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id TEXT NOT NULL,
+      raw_in INTEGER NOT NULL,
+      raw_out INTEGER NOT NULL,
+      delta_in INTEGER NOT NULL,
+      delta_out INTEGER NOT NULL,
+      occupancy_after INTEGER NOT NULL,
+      reset_detected INTEGER NOT NULL DEFAULT 0,
+      received_at TEXT NOT NULL
+    );
+
   `);
   // UWAGA: indeksy tworzymy w osobnej funkcji (createIndexes), wywoływanej
   // DOPIERO po migracji kolumn (ensureColumn). W przeciwnym razie na bazie z
@@ -285,6 +312,7 @@ function initSchema(conn) {
   ensureColumn(conn, 'current_status', 'longitude', 'REAL');
   ensureColumn(conn, 'current_status', 'payload_json', 'TEXT');
   ensureColumn(conn, 'current_status', 'status_json', 'TEXT');
+  ensureColumn(conn, 'current_status', 'current_occupancy', 'INTEGER');
 
   ensureColumn(conn, 'trips', 'pcId', 'TEXT');
   ensureColumn(conn, 'trips', 'line_number', 'TEXT');
@@ -358,6 +386,8 @@ function createIndexes(conn) {
     CREATE INDEX IF NOT EXISTS idx_trips_stop ON trips(stop_id, received_at);
     CREATE INDEX IF NOT EXISTS idx_trips_id ON trips(id);
     CREATE INDEX IF NOT EXISTS idx_trips_quality ON trips(camera_error_detected);
+    CREATE INDEX IF NOT EXISTS idx_passenger_events_device_time ON passenger_count_events(device_id, received_at);
+    CREATE INDEX IF NOT EXISTS idx_passenger_events_id ON passenger_count_events(id);
   `);
 }
 
@@ -403,6 +433,15 @@ function pruneHistory() {
       DELETE FROM trips
       WHERE id NOT IN (
         SELECT id FROM trips
+        ORDER BY id DESC
+        LIMIT ?
+      )
+    `).run(FRAME_HISTORY_LIMIT_IN_DB);
+
+    conn.prepare(`
+      DELETE FROM passenger_count_events
+      WHERE id NOT IN (
+        SELECT id FROM passenger_count_events
         ORDER BY id DESC
         LIMIT ?
       )

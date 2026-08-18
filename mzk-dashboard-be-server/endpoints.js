@@ -293,6 +293,17 @@ async function handleIncomingData(req, res) {
     receivedAt,
     savedRawFrame: `sqlite:raw_frames:${result.rawFrameId}`,
     savedFrame: minimalFrame,
+    // Wyliczony przyrost (delta) względem ostatniego znanego stanu licznika
+    // kamery — patrz functions.js#processPassengerCounts. currentStatus
+    // zawiera te same dane zagnieżdżone w polu `passengers`.
+    passengerCount: {
+      raw_in: result.status.passengers?.raw_in ?? null,
+      raw_out: result.status.passengers?.raw_out ?? null,
+      delta_in: result.status.passengers?.delta_in ?? 0,
+      delta_out: result.status.passengers?.delta_out ?? 0,
+      current_occupancy: result.status.passengers?.current_occupancy ?? 0,
+      reset_detected: Boolean(result.status.passengers?.reset_detected)
+    },
     currentStatus: result.status
   });
 }

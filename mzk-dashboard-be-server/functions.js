@@ -588,7 +588,8 @@ function extractPassengerStats(payload) {
     totals.people_in,
     payload.selected_in,
     payload.passengers_in,
-    payload.boardings
+    payload.boardings,
+    payload.in
   )) || 0;
 
   const selectedOut = toFiniteNumber(firstDefined(
@@ -599,7 +600,8 @@ function extractPassengerStats(payload) {
     totals.people_out,
     payload.selected_out,
     payload.passengers_out,
-    payload.alightings
+    payload.alightings,
+    payload.out
   )) || 0;
 
   const onboard = toFiniteNumber(firstDefined(
@@ -628,6 +630,145 @@ function extractPassengerStats(payload) {
     selected_area_avg: selectedAreaAvg === null ? null : selectedAreaAvg,
     selected_area_count: selectedAreaCount === null ? null : selectedAreaCount
   };
+}
+
+// --------------------- LICZNIK OSÓB: STAN URZĄDZENIA I DELTY ---------------------
+// Kamera Isarsoft wysyła CAŁKOWITE, narastające liczniki (in/out) co 5 sekund,
+// wielokrotnie powtarzając ten sam pakiet lub przesyłając wyższe wartości.
+// Zamiast sumować surowe paczki (co prowadzi do absurdalnych wyników po
+// kilku godzinach), wyliczamy przyrost (deltę) względem OSTATNIEGO znanego
+// stanu zapisanego w device_state.
+
+function toNonNegativeInt(value, fieldName) {
+  const n = toFiniteInt(value);
+  if (n === null) throw new Error(`Pole ${fieldName} musi być liczbą całkowitą`);
+  if (n < 0) throw new Error(`Pole ${fieldName} nie może być ujemne`);
+  return n;
+}
+
+function getDeviceState(deviceId) {
+  const row = db.connection.prepare('SELECT * FROM device_state WHERE device_id = ?').get(deviceId);
+  return row || {
+    device_id: deviceId,
+    last_in: 0,
+    last_out: 0,
+    current_occupancy: 0,
+    total_in: 0,
+    total_out: 0,
+    updated_at: null
+  };
+}
+
+// Zwraca stan bez modyfikowania bazy — używane przy cyklicznym odświeżaniu
+// statusu pojazdu (ten sam pakiet analizowany ponownie co SYNC_INTERVAL_MS
+// bez nowych danych z kamery), żeby nie logować sztucznych zdarzeń "zerowych".
+function peekPassengerState(deviceId) {
+  const state = getDeviceState(deviceId);
+  return {
+    device_id: deviceId,
+    raw_in: state.last_in,
+    raw_out: state.last_out,
+    delta_in: 0,
+    delta_out: 0,
+    current_occupancy: state.current_occupancy,
+    total_in: state.total_in,
+    total_out: state.total_out,
+    reset_detected: false,
+    updated_at: state.updated_at
+  };
+}
+
+// Czysta funkcja: wylicza przyrost (in/out) na podstawie ostatniego i
+// bieżącego stanu licznika kamery. Ujemna delta oznacza reset licznika
+// (np. restart urządzenia) — w takim wypadku bieżące wartości traktujemy
+// jako przyrost od zera, a nie jako ubytek.
+function computePassengerDelta(lastIn, lastOut, currentIn, currentOut) {
+  let deltaIn = currentIn - lastIn;
+  let deltaOut = currentOut - lastOut;
+  let resetDetected = false;
+
+  if (deltaIn < 0 || deltaOut < 0) {
+    resetDetected = true;
+    deltaIn = currentIn;
+    deltaOut = currentOut;
+  }
+
+  return { deltaIn, deltaOut, resetDetected };
+}
+
+// Waliduje pakiet z kamery, wylicza deltę względem ostatniego znanego stanu
+// i atomowo (transakcja) zapisuje: nowy stan urządzenia (device_state) oraz
+// wpis w historii zdarzeń (passenger_count_events). Zwraca ujednolicony
+// widok stanu, gotowy do dalszego wykorzystania (current_status / trips).
+function processPassengerCounts(deviceId, rawIn, rawOut, receivedAtIso) {
+  const deviceIdValue = requiredString(deviceId, 'device_id');
+  const currentIn = toNonNegativeInt(rawIn, 'in');
+  const currentOut = toNonNegativeInt(rawOut, 'out');
+  const receivedAt = receivedAtIso || new Date().toISOString();
+
+  const conn = db.connection;
+
+  const tx = conn.transaction(() => {
+    const previous = getDeviceState(deviceIdValue);
+    const { deltaIn, deltaOut, resetDetected } = computePassengerDelta(
+      previous.last_in, previous.last_out, currentIn, currentOut
+    );
+
+    const nextOccupancy = previous.current_occupancy + deltaIn - deltaOut;
+    const nextTotalIn = previous.total_in + deltaIn;
+    const nextTotalOut = previous.total_out + deltaOut;
+
+    conn.prepare(`
+      INSERT INTO device_state(device_id, last_in, last_out, current_occupancy, total_in, total_out, updated_at)
+      VALUES(@device_id, @last_in, @last_out, @current_occupancy, @total_in, @total_out, @updated_at)
+      ON CONFLICT(device_id) DO UPDATE SET
+        last_in = excluded.last_in,
+        last_out = excluded.last_out,
+        current_occupancy = excluded.current_occupancy,
+        total_in = excluded.total_in,
+        total_out = excluded.total_out,
+        updated_at = excluded.updated_at
+    `).run({
+      device_id: deviceIdValue,
+      last_in: currentIn,
+      last_out: currentOut,
+      current_occupancy: nextOccupancy,
+      total_in: nextTotalIn,
+      total_out: nextTotalOut,
+      updated_at: receivedAt
+    });
+
+    conn.prepare(`
+      INSERT INTO passenger_count_events(
+        device_id, raw_in, raw_out, delta_in, delta_out, occupancy_after, reset_detected, received_at
+      )
+      VALUES(@device_id, @raw_in, @raw_out, @delta_in, @delta_out, @occupancy_after, @reset_detected, @received_at)
+    `).run({
+      device_id: deviceIdValue,
+      raw_in: currentIn,
+      raw_out: currentOut,
+      delta_in: deltaIn,
+      delta_out: deltaOut,
+      occupancy_after: nextOccupancy,
+      reset_detected: resetDetected ? 1 : 0,
+      received_at: receivedAt
+    });
+
+    return {
+      device_id: deviceIdValue,
+      raw_in: currentIn,
+      raw_out: currentOut,
+      delta_in: deltaIn,
+      delta_out: deltaOut,
+      current_occupancy: nextOccupancy,
+      total_in: nextTotalIn,
+      total_out: nextTotalOut,
+      reset_detected: resetDetected,
+      updated_at: receivedAt
+    };
+  });
+
+  return tx();
 }
 
 function getCameraCollections(payload) {
@@ -831,13 +972,13 @@ function upsertCurrentStatus(status, payload) {
     INSERT INTO current_status(
       pcName, line_id, current_stop_id, nearest_stop_id, punctuality_status,
       delay_seconds, geo_distance, passengers_in, passengers_out, passengers_onboard,
-      camera_quality_json, updated_at, status, pcId, day_type, timestamp, received_at,
+      current_occupancy, camera_quality_json, updated_at, status, pcId, day_type, timestamp, received_at,
       latitude, longitude, payload_json, status_json
     )
     VALUES(
       @pcName, @line_id, @current_stop_id, @nearest_stop_id, @punctuality_status,
       @delay_seconds, @geo_distance, @passengers_in, @passengers_out, @passengers_onboard,
-      @camera_quality_json, @updated_at, @status, @pcId, @day_type, @timestamp, @received_at,
+      @current_occupancy, @camera_quality_json, @updated_at, @status, @pcId, @day_type, @timestamp, @received_at,
       @latitude, @longitude, @payload_json, @status_json
     )
     ON CONFLICT(pcName) DO UPDATE SET
@@ -850,6 +991,7 @@ function upsertCurrentStatus(status, payload) {
       passengers_in = excluded.passengers_in,
       passengers_out = excluded.passengers_out,
       passengers_onboard = excluded.passengers_onboard,
+      current_occupancy = excluded.current_occupancy,
       camera_quality_json = excluded.camera_quality_json,
       updated_at = excluded.updated_at,
       status = excluded.status,
@@ -869,9 +1011,12 @@ function upsertCurrentStatus(status, payload) {
     punctuality_status: status.punctuality_status || null,
     delay_seconds: Number.isFinite(status.delay_seconds) ? status.delay_seconds : null,
     geo_distance: distance,
-    passengers_in: Number(passengers.selected_in || 0),
-    passengers_out: Number(passengers.selected_out || 0),
+    // passengers_in/out = przyrost (delta) z OSTATNIEGO odebranego pakietu,
+    // NIE surowy narastający licznik kamery — patrz processPassengerCounts.
+    passengers_in: Number(passengers.delta_in || 0),
+    passengers_out: Number(passengers.delta_out || 0),
     passengers_onboard: passengers.onboard === null || passengers.onboard === undefined ? null : Number(passengers.onboard),
+    current_occupancy: Number(passengers.current_occupancy || 0),
     camera_quality_json: jsonStringify(status.data_quality || null),
     updated_at: status.updated_at,
     status: status.status || null,
@@ -927,8 +1072,12 @@ function appendTripEventIfNeeded(status, date, appendTripEvent) {
     stop_id: stop ? stop.stop_id : null,
     timestamp: status.timestamp,
     day_type: status.day_type,
-    passengers_in: Number(passengers.selected_in || 0),
-    passengers_out: Number(passengers.selected_out || 0),
+    // Zapisujemy przyrost (delta) wyliczony względem ostatniego znanego
+    // stanu licznika kamery — sumowanie tych wartości w raportach daje
+    // realną liczbę wsiadających/wysiadających, a nie wielokrotność
+    // narastającego licznika z kamery.
+    passengers_in: Number(passengers.delta_in || 0),
+    passengers_out: Number(passengers.delta_out || 0),
     passengers_onboard: passengers.onboard === null || passengers.onboard === undefined ? null : Number(passengers.onboard),
     delay_seconds: Number.isFinite(status.delay_seconds) ? status.delay_seconds : null,
     punctuality_status: status.punctuality_status || null,
@@ -962,6 +1111,24 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
   const timestamp = optionalString(payload.timestamp, nowIso);
   const coordinates = extractCoordinates(payload);
   const stats = extractPassengerStats(payload);
+
+  // Delta narastających liczników kamery liczymy TYLKO gdy przetwarzamy
+  // świeżo odebrany pakiet (appendTripEvent=true). Cykliczne odświeżanie
+  // statusu (co SYNC_INTERVAL_MS) reanalizuje ten sam zapisany payload bez
+  // nowych danych z kamery — tam jedynie podglądamy stan, bez zapisu, aby
+  // nie tworzyć sztucznych zdarzeń o zerowym przyroście w historii.
+  const passengerState = appendTripEvent
+    ? processPassengerCounts(pcName, stats.selected_in, stats.selected_out, metadata.receivedAt || nowIso)
+    : peekPassengerState(pcName);
+
+  stats.raw_in = passengerState.raw_in;
+  stats.raw_out = passengerState.raw_out;
+  stats.delta_in = passengerState.delta_in;
+  stats.delta_out = passengerState.delta_out;
+  stats.current_occupancy = passengerState.current_occupancy;
+  stats.reset_detected = passengerState.reset_detected;
+  stats.passenger_events = passengerState.delta_in + passengerState.delta_out;
+
   const dayType = determineDayType(now);
   const dateKey = formatDateKey(now);
   const assignment = findVehicleAssignmentForDay(pcName, dayType, dateKey);
@@ -1386,6 +1553,10 @@ module.exports = {
   findNearestStopByPlannedTime,
   determineDayType,
   extractPassengerStats,
+  getDeviceState,
+  peekPassengerState,
+  computePassengerDelta,
+  processPassengerCounts,
   getCameraCollections,
   isCameraOnline,
   extractCameraQuality,
