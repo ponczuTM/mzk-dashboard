@@ -15,12 +15,15 @@ import {
   Activity,
   TrendingUp,
   AlertCircle,
+  AlertTriangle,
   LoaderCircle,
   ChevronDown,
   Clock3,
   Route,
   MapPinned,
   Users,
+  LogIn,
+  LogOut,
   TimerReset,
   CircleAlert,
 } from 'lucide-react';
@@ -38,6 +41,8 @@ const Dashboard = () => {
   const [error, setError] = useState(null);
   const [selectedVehicle, setSelectedVehicle] = useState('');
   const [vehicleOptions, setVehicleOptions] = useState([]);
+  const [currentStatusMap, setCurrentStatusMap] = useState({});
+  const [occupancyLoading, setOccupancyLoading] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -143,6 +148,21 @@ const Dashboard = () => {
     [api]
   );
 
+  // Aktualna liczba osób w pojazdach — dane oparte o skorygowane delty
+  // (nie surowe, narastające liczniki kamery), patrz be-server/functions.js.
+  const loadCurrentStatus = useCallback(async () => {
+    setOccupancyLoading(true);
+
+    try {
+      const data = await api.getReportCurrent();
+      setCurrentStatusMap(data.current_status || {});
+    } catch (err) {
+      console.error('Błąd ładowania aktualnego obłożenia pojazdów:', err);
+    } finally {
+      setOccupancyLoading(false);
+    }
+  }, [api]);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
@@ -152,6 +172,13 @@ const Dashboard = () => {
       loadPassengerHistory(selectedVehicle);
     }
   }, [selectedVehicle, loadPassengerHistory]);
+
+  useEffect(() => {
+    loadCurrentStatus();
+
+    const interval = setInterval(loadCurrentStatus, 10000);
+    return () => clearInterval(interval);
+  }, [loadCurrentStatus]);
 
   const handleVehicleChange = (event) => {
     setSelectedVehicle(event.target.value);
@@ -177,6 +204,29 @@ const Dashboard = () => {
 
     return Math.round(total / recentTrips.length);
   }, [recentTrips]);
+
+  const occupancyRows = useMemo(() => {
+    return Object.values(currentStatusMap)
+      .map((status) => {
+        const passengers = status.passengers || {};
+
+        return {
+          pcName: status.pcName,
+          lineNumber: status.line_number || status.line_id || '',
+          currentOccupancy: Math.max(0, Number(passengers.current_occupancy || 0)),
+          deltaIn: Number(passengers.delta_in || 0),
+          deltaOut: Number(passengers.delta_out || 0),
+          resetDetected: Boolean(passengers.reset_detected),
+          updatedAt: status.updated_at || status.received_at || null,
+        };
+      })
+      .sort((a, b) => (a.pcName || '').localeCompare(b.pcName || ''));
+  }, [currentStatusMap]);
+
+  const totalOnboard = useMemo(
+    () => occupancyRows.reduce((sum, row) => sum + row.currentOccupancy, 0),
+    [occupancyRows]
+  );
 
   const chartData = useMemo(
     () =>
@@ -335,6 +385,86 @@ const Dashboard = () => {
             </div>
           </article>
         </div>
+
+        <section className={styles.occupancySection}>
+          <div className={styles.sectionHeader}>
+            <div>
+              <h2 className={styles.sectionTitle}>Aktualna liczba osób w pojazdach</h2>
+              <p className={styles.sectionText}>
+                Obłożenie wyliczone z przyrostów (delt) liczników kamer Isarsoft —
+                odporne na powtórzone paczki i restarty kamery.
+              </p>
+            </div>
+
+            <div className={styles.occupancySummary}>
+              {occupancyLoading && (
+                <div className={styles.inlineLoading}>
+                  <LoaderCircle className={`${styles.inlineLoadingIcon} ${styles.spin}`} />
+                  <span>Odświeżanie</span>
+                </div>
+              )}
+
+              <div className={styles.occupancyTotal}>
+                <Users className={styles.occupancyTotalIcon} />
+                <div>
+                  <span className={styles.occupancyTotalLabel}>Łącznie na pokładzie</span>
+                  <strong className={styles.occupancyTotalValue}>{totalOnboard}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {occupancyRows.length > 0 ? (
+            <div className={styles.occupancyGrid}>
+              {occupancyRows.map((row) => (
+                <article key={row.pcName} className={styles.occupancyCard}>
+                  <div className={styles.occupancyCardHeader}>
+                    <span className={styles.occupancyVehicle}>
+                      <BusFront className={styles.occupancyVehicleIcon} />
+                      {row.pcName}
+                      {row.lineNumber ? ` · ${row.lineNumber}` : ''}
+                    </span>
+
+                    {row.resetDetected && (
+                      <span
+                        className={styles.occupancyResetBadge}
+                        title="Wykryto reset licznika kamery — przyrost policzony od zera"
+                      >
+                        <AlertTriangle className={styles.occupancyResetIcon} />
+                        Reset
+                      </span>
+                    )}
+                  </div>
+
+                  <div className={styles.occupancyCount}>
+                    <span className={styles.occupancyCountValue}>{row.currentOccupancy}</span>
+                    <span className={styles.occupancyCountLabel}>osób na pokładzie</span>
+                  </div>
+
+                  <div className={styles.occupancyDeltaRow}>
+                    <span className={styles.occupancyDeltaIn}>
+                      <LogIn className={styles.occupancyDeltaIcon} />+{row.deltaIn}
+                    </span>
+                    <span className={styles.occupancyDeltaOut}>
+                      <LogOut className={styles.occupancyDeltaIcon} />-{row.deltaOut}
+                    </span>
+                  </div>
+
+                  <span className={styles.occupancyUpdatedAt}>
+                    Ostatnia aktualizacja: {formatDateTime(row.updatedAt)}
+                  </span>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className={styles.emptyState}>
+              <CircleAlert className={styles.emptyStateIcon} />
+              <p className={styles.emptyStateText}>
+                Brak danych o obłożeniu pojazdów — poczekaj na pierwszy pakiet z kamer.
+              </p>
+            </div>
+          )}
+        </section>
 
         <div className={styles.mainGrid}>
           <section className={styles.chartCard}>

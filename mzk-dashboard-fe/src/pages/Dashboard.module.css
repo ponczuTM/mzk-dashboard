@@ -218,6 +218,172 @@
 }
 
 /* ============================================================
+   OBŁOŻENIE POJAZDÓW (aktualna liczba osób)
+   ============================================================ */
+.occupancySection {
+  padding: 28px 30px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.occupancySummary {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-shrink: 0;
+}
+
+.occupancyTotal {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-md);
+}
+
+.occupancyTotalIcon {
+  width: 22px;
+  height: 22px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.occupancyTotalLabel {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.occupancyTotalValue {
+  display: block;
+  margin-top: 2px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.occupancyGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.occupancyCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.occupancyCard:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(15, 23, 42, 0.06), 0 14px 36px rgba(15, 23, 42, 0.09);
+}
+
+.occupancyCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.occupancyVehicle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.occupancyVehicleIcon {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.occupancyResetBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.occupancyResetIcon {
+  width: 12px;
+  height: 12px;
+}
+
+.occupancyCount {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.occupancyCountValue {
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.occupancyCountLabel {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.occupancyDeltaRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+}
+
+.occupancyDeltaIn,
+.occupancyDeltaOut {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+}
+
+.occupancyDeltaIcon {
+  width: 15px;
+  height: 15px;
+}
+
+.occupancyDeltaIn {
+  color: var(--success);
+}
+
+.occupancyDeltaOut {
+  color: var(--danger);
+}
+
+.occupancyUpdatedAt {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ============================================================
    MAIN GRID (chart + side panel)
    ============================================================ */
 .mainGrid {
@@ -559,6 +725,11 @@
 @media (max-width: 640px) {
   .dashboardShell {
     padding: 24px 18px;
+  }
+
+  .occupancySummary {
+    width: 100%;
+    justify-content: space-between;
   }
 
   .hero {
