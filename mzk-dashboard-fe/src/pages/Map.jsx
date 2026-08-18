@@ -19,11 +19,18 @@ import 'leaflet/dist/leaflet.css';
 import 'leaflet.markercluster';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
-import { AlertTriangle, Bus, LayoutGrid, MapPin } from 'lucide-react';
+import {
+  AlertTriangle,
+  Bus,
+  Eye,
+  LayoutGrid,
+  MapPin,
+  Goal
+} from 'lucide-react';
 import styles from './Map.module.css';
 
 // -----------------------------------------------------------------------------
-// Tryby widoku
+// Konfiguracja
 // -----------------------------------------------------------------------------
 
 const MODE = {
@@ -35,18 +42,11 @@ const MODE = {
 
 const DEFAULT_CENTER = [53.02809365240993, 18.631034929317966];
 const DEFAULT_ZOOM = 13;
-
 const VEHICLES_REFRESH_MS = 5000;
-
-// Dodatkowy obszar wokół ekranu dla pojazdów. Zapobiega miganiu markerów
-// przy samej krawędzi mapy podczas przesuwania.
 const VIEWPORT_PADDING = 0.15;
 
 // -----------------------------------------------------------------------------
-// Ikony
-//
-// Tworzone jeden raz poza komponentami. Nie generujemy nowych divIcon podczas
-// renderowania Reacta ani podczas kolejnych aktualizacji GPS.
+// Ikony współdzielone
 // -----------------------------------------------------------------------------
 
 const busSvg = `
@@ -160,18 +160,15 @@ const isInsideExtendedBounds = (
 };
 
 // -----------------------------------------------------------------------------
-// Popup tworzone bez Reacta
-//
-// Markery znajdują się poza drzewem Reacta, dlatego popup jest tworzony
-// imperatywnie przez zwykłe elementy DOM.
+// Popupy Leaflet
 // -----------------------------------------------------------------------------
 
 const createBusPopup = (vehicle) => {
   const wrapper = document.createElement('div');
   wrapper.className = styles.popupBus;
 
-  const name = document.createElement('strong');
-  name.textContent = vehicle.pcName || vehicle._id;
+  const title = document.createElement('strong');
+  title.textContent = vehicle.pcName || vehicle._id;
 
   const route = document.createElement('p');
   route.textContent = vehicle.line_id
@@ -186,17 +183,17 @@ const createBusPopup = (vehicle) => {
   coordinates.className = styles.popupCoords;
   coordinates.textContent = formatCoords(vehicle._lat, vehicle._lng);
 
-  wrapper.append(name, route, coordinates);
+  wrapper.append(title, route, coordinates);
 
   return wrapper;
 };
 
-const createStopPopup = (stop, index, isRouteMode) => {
+const createStopPopup = (stop, index, routeMode) => {
   const wrapper = document.createElement('div');
   wrapper.className = styles.popupStop;
 
-  const name = document.createElement('strong');
-  name.textContent = `${isRouteMode ? `${index + 1}. ` : ''}${
+  const title = document.createElement('strong');
+  title.textContent = `${routeMode ? `${index + 1}. ` : ''}${
     stop.name || 'Przystanek'
   }`;
 
@@ -204,13 +201,13 @@ const createStopPopup = (stop, index, isRouteMode) => {
   coordinates.className = styles.popupCoords;
   coordinates.textContent = formatCoords(stop.latitude, stop.longitude);
 
-  wrapper.append(name, coordinates);
+  wrapper.append(title, coordinates);
 
   return wrapper;
 };
 
 // -----------------------------------------------------------------------------
-// Sterowanie mapą
+// Sterowanie widokiem
 // -----------------------------------------------------------------------------
 
 const MapController = memo(({ target }) => {
@@ -240,10 +237,7 @@ const MapController = memo(({ target }) => {
 MapController.displayName = 'MapController';
 
 // -----------------------------------------------------------------------------
-// Obserwator viewportu
-//
-// Używamy moveend i zoomend, nie `move`. Aktualizacje listy widocznych pojazdów
-// nie uruchamiają Reacta podczas każdego piksela dragowania mapy.
+// Obserwowanie viewportu dla cullingu pojazdów
 // -----------------------------------------------------------------------------
 
 const ViewportObserver = memo(({ onBoundsChange }) => {
@@ -268,83 +262,97 @@ const ViewportObserver = memo(({ onBoundsChange }) => {
 ViewportObserver.displayName = 'ViewportObserver';
 
 // -----------------------------------------------------------------------------
-// Warstwa przystanków: natywny Leaflet.markercluster
+// Warstwa przystanków
 //
-// Brak react-leaflet-cluster:
-// - brak konfliktu hooków / React 19,
-// - brak dodatkowego Reactowego renderowania setek <Marker />,
-// - cała klasteryzacja działa w Leaflecie.
+// optimized = true:
+// - markerClusterGroup,
+// - chunkedLoading,
+// - renderowanie klastrów.
 //
-// Każda zmiana trybu/przystanków podmienia warstwę klastrową jednorazowo.
-// Tick GPS pojazdów NIE powoduje przebudowy tej warstwy.
+// optimized = false:
+// - standardowy L.layerGroup,
+// - każdy przystanek jako osobny L.Marker,
+// - brak klastrów i brak cullingu.
 // -----------------------------------------------------------------------------
 
-const ClusteredStopsLayer = memo(({ stops, routeMode }) => {
+const StopsLayer = memo(({ stops, routeMode, optimized }) => {
   const map = useMap();
-  const clusterRef = useRef(null);
+  const layerRef = useRef(null);
 
   useEffect(() => {
-    if (!clusterRef.current) {
-      clusterRef.current = L.markerClusterGroup({
-        chunkedLoading: true,
-        chunkInterval: 100,
-        chunkDelay: 20,
-        maxClusterRadius: 55,
-        disableClusteringAtZoom: 17,
-        removeOutsideVisibleBounds: true,
-        showCoverageOnHover: false,
-        spiderfyOnMaxZoom: true,
-        iconCreateFunction: (cluster) => {
-          const count = cluster.getChildCount();
-
-          return L.divIcon({
-            html: `<div class="map-stop-cluster"><span>${count}</span></div>`,
-            className: 'map-stop-cluster-wrapper',
-            iconSize: L.point(42, 42, true),
-          });
-        },
-      });
-
-      clusterRef.current.addTo(map);
+    if (layerRef.current) {
+      map.removeLayer(layerRef.current);
+      layerRef.current = null;
     }
 
-    const cluster = clusterRef.current;
-
-    // clearLayers + addLayers wykonuje Leaflet, bez Reactowych markerów.
-    // Przystanki są statyczne, więc dzieje się to tylko po ich pobraniu
-    // albo po przełączeniu trybu / trasy.
-    cluster.clearLayers();
-
-    if (stops.length > 0) {
-      const markers = stops.map((stop, index) => {
-        const marker = L.marker(
-          [Number(stop.latitude), Number(stop.longitude)],
-          {
-            icon: stopIcon,
-            keyboard: false,
-            riseOnHover: true,
-          }
-        );
-
-        marker.bindPopup(createStopPopup(stop, index, routeMode), {
-          autoPan: true,
-          closeButton: true,
-        });
-
-        return marker;
-      });
-
-      cluster.addLayers(markers);
+    if (!stops.length) {
+      return undefined;
     }
 
-    return undefined;
-  }, [map, routeMode, stops]);
+    const layer = optimized
+      ? L.markerClusterGroup({
+          chunkedLoading: true,
+          chunkInterval: 100,
+          chunkDelay: 20,
+          maxClusterRadius: 55,
+          disableClusteringAtZoom: 17,
+          removeOutsideVisibleBounds: true,
+          showCoverageOnHover: false,
+          spiderfyOnMaxZoom: true,
+          iconCreateFunction: (cluster) => {
+            const count = cluster.getChildCount();
+
+            return L.divIcon({
+              html: `<div class="map-stop-cluster"><span>${count}</span></div>`,
+              className: 'map-stop-cluster-wrapper',
+              iconSize: L.point(42, 42, true),
+            });
+          },
+        })
+      : L.layerGroup();
+
+    const stopMarkers = stops.map((stop, index) => {
+      const marker = L.marker(
+        [Number(stop.latitude), Number(stop.longitude)],
+        {
+          icon: stopIcon,
+          keyboard: false,
+          riseOnHover: true,
+        }
+      );
+
+      marker.bindPopup(createStopPopup(stop, index, routeMode), {
+        autoPan: true,
+        closeButton: true,
+      });
+
+      return marker;
+    });
+
+    if (optimized) {
+      layer.addLayers(stopMarkers);
+    } else {
+      stopMarkers.forEach((marker) => {
+        layer.addLayer(marker);
+      });
+    }
+
+    layer.addTo(map);
+    layerRef.current = layer;
+
+    return () => {
+      if (layerRef.current === layer) {
+        map.removeLayer(layer);
+        layerRef.current = null;
+      }
+    };
+  }, [map, optimized, routeMode, stops]);
 
   useEffect(() => {
     return () => {
-      if (clusterRef.current) {
-        map.removeLayer(clusterRef.current);
-        clusterRef.current = null;
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
       }
     };
   }, [map]);
@@ -352,19 +360,10 @@ const ClusteredStopsLayer = memo(({ stops, routeMode }) => {
   return null;
 });
 
-ClusteredStopsLayer.displayName = 'ClusteredStopsLayer';
+StopsLayer.displayName = 'StopsLayer';
 
 // -----------------------------------------------------------------------------
 // Dynamiczna warstwa pojazdów
-//
-// Kluczowa optymalizacja:
-// - instancje L.Marker trzymamy w globalThis.Map,
-// - istniejący marker dostaje setLatLng(),
-// - nie ma Reactowego <Marker> dla pojazdu,
-// - poza viewportem marker jest usuwany z mapy i DOM,
-// - przy 150 pojazdach renderowane są tylko te widoczne.
-//
-// globalThis.Map jest użyte, ponieważ główny komponent nazywa się Map.
 // -----------------------------------------------------------------------------
 
 const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
@@ -383,7 +382,7 @@ const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
       return;
     }
 
-    const visibleVehicleIds = new Set();
+    const visibleIds = new Set();
 
     latestVehiclesRef.current.forEach((vehicle, vehicleId) => {
       const visible = isInsideExtendedBounds(
@@ -396,17 +395,16 @@ const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
         return;
       }
 
-      visibleVehicleIds.add(vehicleId);
+      visibleIds.add(vehicleId);
 
       const existingMarker = markersRef.current.get(vehicleId);
 
       if (existingMarker) {
-        const oldPosition = existingMarker.getLatLng();
+        const previousPosition = existingMarker.getLatLng();
 
-        // Aktualizacja pozycji bez remountu / bez usunięcia HTML markera.
         if (
-          oldPosition.lat !== vehicle._lat ||
-          oldPosition.lng !== vehicle._lng
+          previousPosition.lat !== vehicle._lat ||
+          previousPosition.lng !== vehicle._lng
         ) {
           existingMarker.setLatLng([vehicle._lat, vehicle._lng]);
         }
@@ -433,9 +431,8 @@ const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
       markersRef.current.set(vehicleId, marker);
     });
 
-    // Usuń markery poza viewportem lub nieobecne w świeżych danych.
     markersRef.current.forEach((marker, vehicleId) => {
-      if (!visibleVehicleIds.has(vehicleId)) {
+      if (!visibleIds.has(vehicleId)) {
         map.removeLayer(marker);
         markersRef.current.delete(vehicleId);
       }
@@ -458,7 +455,7 @@ const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
 
     latestVehiclesRef.current = normalizedVehicles;
     syncMarkers();
-  }, [syncMarkers, vehicles]);
+  }, [vehicles, syncMarkers]);
 
   useEffect(() => {
     syncMarkers();
@@ -480,7 +477,7 @@ const DynamicVehiclesLayer = memo(({ vehicles, bounds, enabled }) => {
 DynamicVehiclesLayer.displayName = 'DynamicVehiclesLayer';
 
 // -----------------------------------------------------------------------------
-// Warstwa polilinii trasy
+// Linia wybranej trasy
 // -----------------------------------------------------------------------------
 
 const RouteLayer = memo(({ positions }) => {
@@ -517,9 +514,12 @@ const Map = () => {
   const [flyTarget, setFlyTarget] = useState(null);
   const [mapBounds, setMapBounds] = useState(null);
 
+  // false = wersja zoptymalizowana / klastrowana.
+  // true = wszystkie przystanki jako osobne markery.
+  const [showAllStops, setShowAllStops] = useState(false);
+
   const refreshInFlightRef = useRef(false);
 
-  // Początkowe pobranie danych.
   useEffect(() => {
     let cancelled = false;
 
@@ -551,8 +551,6 @@ const Map = () => {
     mode === MODE.BUSES ||
     mode === MODE.ROUTE;
 
-  // Aktualizuj dane GPS tylko wtedy, kiedy pojazdy są potrzebne.
-  // Chronimy przed nakładaniem requestów przy wolniejszym backendzie.
   useEffect(() => {
     if (!busesVisible) {
       return undefined;
@@ -593,6 +591,9 @@ const Map = () => {
     setMode(nextMode);
     setSelectedRouteId('');
     setFlyTarget(null);
+
+    // Po zmianie widoku wracamy do wydajnej wersji.
+    setShowAllStops(false);
   }, []);
 
   const handleRouteChange = useCallback((event) => {
@@ -601,6 +602,9 @@ const Map = () => {
     setSelectedRouteId(routeId);
     setMode(routeId ? MODE.ROUTE : MODE.ALL);
     setFlyTarget(null);
+
+    // Nowa trasa = przywróć klastrowanie.
+    setShowAllStops(false);
   }, []);
 
   const selectedRoute = useMemo(() => {
@@ -613,7 +617,6 @@ const Map = () => {
     );
   }, [routes, selectedRouteId]);
 
-  // Indeksowanie przystanków usuwa wielokrotne allStops.find(...) w routeStops.
   const stopsById = useMemo(() => {
     const result = new globalThis.Map();
 
@@ -686,14 +689,14 @@ const Map = () => {
       return [];
     }
 
-    const routeIdentifiers = new Set(
+    const routeIds = new Set(
       [selectedRoute.id, selectedRoute.code]
         .filter((value) => value != null)
         .map(String)
     );
 
     return vehiclesWithPosition.filter((vehicle) =>
-      routeIdentifiers.has(String(vehicle.line_id))
+      routeIds.has(String(vehicle.line_id))
     );
   }, [selectedRoute, vehiclesWithPosition]);
 
@@ -741,6 +744,10 @@ const Map = () => {
     setMapBounds(bounds);
   }, []);
 
+  const toggleShowAllStops = useCallback(() => {
+    setShowAllStops((previous) => !previous);
+  }, []);
+
   const showBusList =
     mode === MODE.ALL ||
     mode === MODE.BUSES ||
@@ -750,6 +757,11 @@ const Map = () => {
     mode === MODE.ALL ||
     mode === MODE.STOPS ||
     mode === MODE.ROUTE;
+
+  // Przycisk istnieje tylko, jeśli przystanki są faktycznie wyświetlane.
+  const canToggleAllStops =
+    mode !== MODE.BUSES &&
+    displayedStops.length > 0;
 
   return (
     <div className={styles.container}>
@@ -915,6 +927,42 @@ const Map = () => {
       </aside>
 
       <div className={styles.mapWrapper}>
+        {canToggleAllStops && (
+          <button
+            type="button"
+            onClick={toggleShowAllStops}
+            title={
+              showAllStops
+                ? 'Wróć do zoptymalizowanego widoku klastrów'
+                : 'Wyświetl każdy przystanek jako osobny marker'
+            }
+            style={{
+              position: 'absolute',
+              zIndex: 1000,
+              top: '12px',
+              right: '12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '10px 14px',
+              border: '1px solid #dbeafe',
+              borderRadius: '8px',
+              color: showAllStops ? '#ffffff' : '#1d4ed8',
+              background: showAllStops ? '#2563eb' : '#ffffff',
+              boxShadow: '0 2px 8px rgba(15, 23, 42, 0.16)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              fontWeight: 700,
+            }}
+          >
+            {showAllStops ? <Goal size={16} /> : <Eye size={16} />}
+
+            {showAllStops
+              ? 'Włącz optymalizację przystanków'
+              : 'Pokaż wszystkie przystanki'}
+          </button>
+        )}
+
         <MapContainer
           center={DEFAULT_CENTER}
           zoom={DEFAULT_ZOOM}
@@ -945,9 +993,10 @@ const Map = () => {
             enabled={busesVisible}
           />
 
-          <ClusteredStopsLayer
+          <StopsLayer
             stops={displayedStops}
             routeMode={mode === MODE.ROUTE}
+            optimized={!showAllStops}
           />
         </MapContainer>
       </div>
