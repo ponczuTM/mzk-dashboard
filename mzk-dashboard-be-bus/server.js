@@ -6,15 +6,6 @@ const { URL, URLSearchParams } = require('url');
 const { SerialPort } = require('serialport');
 const { GPS } = require('gps');
 
-/*
-  Ten klient:
-  - pobiera wszystkie aplikacje ObjectFlow z Isarsoft,
-  - wysyła dane WYŁĄCZNIE z aplikacji o statusie ONLINE,
-  - ignoruje Paused, Offline, Error, zatrzymane i historyczne aplikacje,
-  - domyślnie liczy tylko PERSON, bez HEAD,
-  - dodatkowo wymaga świeżego last_online, aby odrzucić stare wpisy.
-*/
-
 const PC_ID = Number(process.env.PC_ID || 1);
 const PC_NAME = process.env.PC_NAME || 'linia_nr_1';
 
@@ -26,6 +17,7 @@ const SEND_INTERVAL_MS = Number(process.env.SEND_INTERVAL_MS || 5 * 1000);
 
 const GPS_PORT_PATH = process.env.GPS_PORT_PATH || '/dev/ttyUSB0';
 const GPS_BAUD_RATE = Number(process.env.GPS_BAUD_RATE || 9600);
+
 const GPS_FIX_MAX_AGE_MS = Number(process.env.GPS_FIX_MAX_AGE_MS || 30 * 1000);
 const GPS_REOPEN_DELAY_MS = Number(process.env.GPS_REOPEN_DELAY_MS || 10 * 1000);
 
@@ -33,23 +25,23 @@ const GEO_FALLBACK_URL = process.env.GEO_FALLBACK_URL || 'http://ip-api.com/json
 const ENABLE_IP_GEO_FALLBACK = process.env.ENABLE_IP_GEO_FALLBACK !== 'false';
 
 /*
-  ONLINE jest jedynym akceptowanym statusem.
+  Wysyłane są wyłącznie aplikacje o statusie Online.
 
-  API Isarsoft zwróciło w Twoich logach:
-  - Paused
-  - Online
-
-  Normalizacja zamienia "Online" na "ONLINE", więc aplikacja Office
-  przejdzie filtr, a wszystkie Paused zostaną pominięte.
+  API zwraca "Online", ale kod normalizuje go do "ONLINE".
+  Każdy inny status, np. Paused / Offline / Error, jest ignorowany.
 */
 const ONLINE_STATUS = 'ONLINE';
 
 /*
-  Czy aplikacja ma mieć świeży status last_online.
-  Domyślnie: tak.
+  Dodatkowe zabezpieczenie:
+  aplikacja Online musi posiadać świeże last_online.
 
-  Jeśli Isarsoft odświeża last_online rzadziej niż raz na 2 minuty,
-  zwiększ wartość przez ISARSOFT_APP_ONLINE_MAX_AGE_MS.
+  Jeśli Isarsoft aktualizuje last_online rzadziej niż co 2 minuty,
+  możesz uruchomić:
+  ISARSOFT_APP_ONLINE_MAX_AGE_MS=300000 node server.js
+
+  Aby całkowicie wyłączyć tę kontrolę:
+  ISARSOFT_REQUIRE_RECENT_ONLINE=false node server.js
 */
 const REQUIRE_RECENT_ONLINE = process.env.ISARSOFT_REQUIRE_RECENT_ONLINE !== 'false';
 const APP_ONLINE_MAX_AGE_MS = Number(
@@ -58,31 +50,31 @@ const APP_ONLINE_MAX_AGE_MS = Number(
 
 const CONFIG = {
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
-  graphqlPath: process.env.ISARSOFT_GRAPHQL_PATH || '/isarsoft/api/graphql',
+
+  graphqlPath:
+    process.env.ISARSOFT_GRAPHQL_PATH || '/isarsoft/api/graphql',
+
   tokenPath:
     process.env.ISARSOFT_TOKEN_PATH ||
     '/isarsoft/auth/realms/perception/protocol/openid-connect/token',
+
   clientId: process.env.ISARSOFT_CLIENT_ID || 'perception',
   username: process.env.ISARSOFT_USERNAME || 'perception',
   password: process.env.ISARSOFT_PASSWORD || 'perception',
+
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
+
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
 
   /*
-    LAST_1_DAY oznacza zsumowane przejścia z ostatnich 24 godzin.
+    Liczymy wyłącznie osoby.
 
-    Jeśli potrzebujesz sumy tylko z ostatniej godziny, uruchom:
-    ISARSOFT_PRESET=LAST_1_HOUR node server.js
+    Nie używamy jednocześnie PERSON i HEAD, aby nie liczyć jednej
+    osoby jako człowieka oraz jako głowy.
   */
-  defaultPreset: process.env.ISARSOFT_PRESET || 'LAST_1_DAY',
-
-  /*
-    PERSON zamiast PERSON,HEAD, aby nie ryzykować podwójnego liczenia:
-    tej samej osoby jako pełnej sylwetki i jako głowy.
-  */
-  defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON')
+  objectClasses: (process.env.ISARSOFT_CLASSES || 'PERSON')
     .split(',')
-    .map((x) => x.trim().toUpperCase())
+    .map((item) => item.trim().toUpperCase())
     .filter(Boolean),
 };
 
@@ -122,14 +114,6 @@ function toArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function lower(value) {
-  return String(value || '').toLowerCase();
-}
-
-function normalizeStatus(value) {
-  return String(value || '').trim().toUpperCase();
-}
-
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -145,6 +129,10 @@ function safeJson(text) {
   } catch {
     return null;
   }
+}
+
+function normalizeStatus(value) {
+  return String(value || '').trim().toUpperCase();
 }
 
 function parseDateMs(value) {
@@ -170,11 +158,8 @@ function hasFreshGpsFix() {
 }
 
 /*
-  Jedyny filtr aplikacji:
-  - status musi być ONLINE,
-  - opcjonalnie last_online musi być świeże.
-
-  Nie ma allowlisty UUID, nazw ani plików konfiguracyjnych.
+  Filtruje aplikacje wyłącznie po statusie Online oraz świeżości last_online.
+  Nie ma allowlisty, UUID ani zewnętrznych plików konfiguracyjnych.
 */
 function isApplicationOnline(app) {
   if (normalizeStatus(app?.status) !== ONLINE_STATUS) {
@@ -194,13 +179,13 @@ function isApplicationOnline(app) {
   const ageMs = Date.now() - lastOnlineMs;
 
   /*
-    Dopuszczamy maksymalnie 60 sekund różnicy, jeśli zegar Isarsoft
-    jest minimalnie do przodu względem zegara urządzenia.
+    Margines -60 sekund uwzględnia minimalną różnicę między zegarem
+    urządzenia a zegarem serwera Isarsoft.
   */
   return ageMs >= -60 * 1000 && ageMs <= APP_ONLINE_MAX_AGE_MS;
 }
 
-function getOfflineReason(app) {
+function getExcludedReason(app) {
   const status = normalizeStatus(app?.status);
 
   if (status !== ONLINE_STATUS) {
@@ -220,11 +205,11 @@ function getOfflineReason(app) {
   const ageMs = Date.now() - lastOnlineMs;
 
   if (ageMs < -60 * 1000) {
-    return `last_online jest w przyszłości (${app.last_online})`;
+    return `last_online jest w przyszłości: ${app.last_online}`;
   }
 
   if (ageMs > APP_ONLINE_MAX_AGE_MS) {
-    return `last_online za stare (${app.last_online})`;
+    return `last_online jest zbyt stare: ${app.last_online}`;
   }
 
   return null;
@@ -239,7 +224,7 @@ function requestRaw(urlString, options = {}, body = null) {
     const url = new URL(urlString);
     const lib = url.protocol === 'https:' ? https : http;
 
-    const req = lib.request(
+    const request = lib.request(
       {
         protocol: url.protocol,
         hostname: url.hostname,
@@ -250,20 +235,20 @@ function requestRaw(urlString, options = {}, body = null) {
         agent: url.protocol === 'https:' ? httpsAgent : undefined,
         timeout: CONFIG.requestTimeoutMs,
       },
-      (res) => {
+      (response) => {
         let raw = '';
 
-        res.setEncoding('utf8');
+        response.setEncoding('utf8');
 
-        res.on('data', (chunk) => {
+        response.on('data', (chunk) => {
           raw += chunk;
         });
 
-        res.on('end', () => {
+        response.on('end', () => {
           resolve({
-            ok: res.statusCode >= 200 && res.statusCode < 300,
-            status: res.statusCode,
-            statusText: res.statusMessage,
+            ok: response.statusCode >= 200 && response.statusCode < 300,
+            status: response.statusCode,
+            statusText: response.statusMessage,
             text: raw,
             json: () => safeJson(raw),
           });
@@ -271,17 +256,19 @@ function requestRaw(urlString, options = {}, body = null) {
       }
     );
 
-    req.on('timeout', () => {
-      req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`));
+    request.on('timeout', () => {
+      request.destroy(
+        new Error(`Timeout po ${CONFIG.requestTimeoutMs} ms`)
+      );
     });
 
-    req.on('error', reject);
+    request.on('error', reject);
 
     if (body) {
-      req.write(body);
+      request.write(body);
     }
 
-    req.end();
+    request.end();
   });
 }
 
@@ -306,7 +293,7 @@ async function getToken(force = false) {
     password: CONFIG.password,
   }).toString();
 
-  const res = await requestRaw(
+  const response = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.tokenPath}`,
     {
       method: 'POST',
@@ -318,11 +305,11 @@ async function getToken(force = false) {
     body
   );
 
-  const json = res.json();
+  const json = response.json();
 
-  if (!res.ok || !json?.access_token) {
+  if (!response.ok || !json?.access_token) {
     throw new Error(
-      `Token request failed: ${res.status} ${res.statusText} ${res.text}`
+      `Token request failed: ${response.status} ${response.statusText} ${response.text}`
     );
   }
 
@@ -335,10 +322,14 @@ async function getToken(force = false) {
 }
 
 async function graphql(query, variables = null, retry = true) {
-  const token = await getToken();
-  const payload = JSON.stringify({ query, variables });
+  const token = await getToken(false);
 
-  const res = await requestRaw(
+  const body = JSON.stringify({
+    query,
+    variables,
+  });
+
+  const response = await requestRaw(
     `${CONFIG.baseUrl}${CONFIG.graphqlPath}`,
     {
       method: 'POST',
@@ -346,27 +337,27 @@ async function graphql(query, variables = null, retry = true) {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
+        'Content-Length': Buffer.byteLength(body),
       },
     },
-    payload
+    body
   );
 
-  const json = res.json();
+  const json = response.json();
 
-  if (res.status === 401 && retry) {
+  if (response.status === 401 && retry) {
     await getToken(true);
     return graphql(query, variables, false);
   }
 
-  if (!res.ok) {
+  if (!response.ok) {
     throw new Error(
-      `GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text}`
+      `GraphQL HTTP error: ${response.status} ${response.statusText} ${response.text}`
     );
   }
 
   if (!json) {
-    throw new Error(`GraphQL returned invalid JSON: ${res.text}`);
+    throw new Error(`GraphQL zwrócił niepoprawny JSON: ${response.text}`);
   }
 
   if (json.errors?.length) {
@@ -376,20 +367,11 @@ async function graphql(query, variables = null, retry = true) {
   return json.data || null;
 }
 
-const QUERY_SCHEMA = `
-query {
-  __schema {
-    types {
-      name
-      kind
-      enumValues {
-        name
-      }
-    }
-  }
-}
-`;
+/*
+  Pierwsze zapytanie pobiera tylko listę aplikacji i ich statusy.
 
+  Jest ono potrzebne tylko po to, aby wybrać aplikacje o statusie ONLINE.
+*/
 const QUERY_OBJECTFLOW_APPS = `
 query {
   allApplications {
@@ -410,25 +392,23 @@ query {
         uuid
         name
       }
-      lines {
-        uuid
-        name
-        tags
-        coordinates
-      }
-      areas {
-        uuid
-        name
-        tags
-        coordinates
-      }
     }
   }
 }
 `;
 
-const QUERY_ONE_APP_COUNTS = `
-query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
+/*
+  Najważniejsze zapytanie.
+
+  Celowo NIE ma count_data i NIE ma TimeRangeInput.
+
+  count_live:
+  - zwraca aktualny stan liczników przekazany przez aktywną aplikację,
+  - nie sumuje bucketów z LAST_1_DAY / LAST_1_HOUR,
+  - zwraca bieżące IN oraz OUT dla każdej linii.
+*/
+const QUERY_ONE_APP_LIVE = `
+query($app: String!, $classes: [ObjectClassInput!]!) {
   getApplication(application: { uuid: $app }) {
     __typename
     ... on ObjectFlow {
@@ -445,12 +425,6 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
         name
         tags
         coordinates
-        count_data(time_range: $range, object_classes: $classes) {
-          time_bucket
-          number_of_samples
-          count_in
-          count_out
-        }
         count_live(object_classes: $classes) {
           count_in
           count_out
@@ -461,13 +435,6 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
         name
         tags
         coordinates
-        count_data(time_range: $range, object_classes: $classes) {
-          time_bucket
-          number_of_samples
-          count_min
-          count_avg
-          count_max
-        }
         count_live(object_classes: $classes) {
           count
         }
@@ -494,147 +461,39 @@ query {
 }
 `;
 
-function getEnumValues(schema, typeName) {
-  const type = toArray(schema?.types).find((item) => item.name === typeName);
-
-  return toArray(type?.enumValues)
-    .map((item) => item.name)
-    .filter(Boolean);
-}
-
-function normalizePreset(input, allowed) {
-  const fallback = CONFIG.defaultPreset;
-
-  if (!input) {
-    return allowed.includes(fallback)
-      ? fallback
-      : allowed[0] || 'LAST_1_DAY';
-  }
-
-  const raw = String(input).trim().toUpperCase();
-
-  if (allowed.includes(raw)) {
-    return raw;
-  }
-
-  const collapsed = raw.replace(/[_\s-]/g, '');
-
-  const found = allowed.find(
-    (item) => item.replace(/[_\s-]/g, '') === collapsed
-  );
-
-  return (
-    found ||
-    (allowed.includes(fallback) ? fallback : allowed[0]) ||
-    'LAST_1_DAY'
-  );
-}
-
-function parseClasses(input) {
-  const classes = (input || CONFIG.defaultClasses.join(','))
-    .split(',')
-    .map((item) => item.trim().toUpperCase())
-    .filter(Boolean);
-
-  return classes.length ? classes : CONFIG.defaultClasses;
-}
-
-function classInputs(classes) {
-  return classes.map((name) => ({ name }));
-}
-
 function flattenRows(rows) {
-  if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
+  if (Array.isArray(rows) && rows.length && Array.isArray(rows[0])) {
     return rows.flat();
   }
 
   return toArray(rows);
 }
 
-function summarizeBuckets(rows) {
+function summarizeLiveLine(rows) {
   const raw = flattenRows(rows);
 
   return {
-    buckets: raw.length,
-    first_bucket: raw[0]?.time_bucket || null,
-    last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    total_in: sumBy(raw, (item) => item?.count_in),
-    total_out: sumBy(raw, (item) => item?.count_out),
+    total_in: sumBy(raw, (row) => row?.count_in),
+    total_out: sumBy(raw, (row) => row?.count_out),
     raw,
   };
 }
 
-function summarizeAreaBuckets(rows) {
+function summarizeLiveArea(rows) {
   const raw = flattenRows(rows);
 
   return {
-    buckets: raw.length,
-    first_bucket: raw[0]?.time_bucket || null,
-    last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    avg_min: raw.length
-      ? sumBy(raw, (item) => item?.count_min) / raw.length
-      : 0,
-    avg_avg: raw.length
-      ? sumBy(raw, (item) => item?.count_avg) / raw.length
-      : 0,
-    avg_max: raw.length
-      ? sumBy(raw, (item) => item?.count_max) / raw.length
-      : 0,
-    total_samples: sumBy(raw, (item) => item?.number_of_samples),
+    total_count: sumBy(raw, (row) => row?.count),
     raw,
   };
 }
 
-function summarizeLive(rows) {
-  const raw = flattenRows(rows);
-
-  return {
-    total_in: sumBy(raw, (item) => item?.count_in),
-    total_out: sumBy(raw, (item) => item?.count_out),
-    raw,
-  };
+function classInputs(classes) {
+  return classes.map((name) => ({ name }));
 }
 
-function summarizeAreaLive(rows) {
-  const raw = flattenRows(rows);
-
-  return {
-    total_count: sumBy(raw, (item) => item?.count),
-    raw,
-  };
-}
-
-async function collectAllData(filters = {}) {
-  let allowedPresets = [
-    'LAST_1_DAY',
-    'LAST_1_HOUR',
-    'LAST_12_HOUR',
-    'THIS_YEAR',
-    'THIS_WEEK',
-    'THIS_MONTH',
-  ];
-
-  try {
-    const schemaData = await graphql(QUERY_SCHEMA);
-    const enumValues = getEnumValues(schemaData?.__schema, 'TimeRangePreset');
-
-    if (enumValues.length) {
-      allowedPresets = enumValues;
-    }
-  } catch (error) {
-    console.warn(
-      '[collectAllData] Nie udało się pobrać enumów, używam domyślnych:',
-      error.message
-    );
-  }
-
-  const preset = normalizePreset(filters.preset, allowedPresets);
-  const classes = parseClasses(filters.class);
-
-  const range = {
-    time_range_preset: preset,
-  };
-
+async function collectAllData() {
+  const classes = CONFIG.objectClasses;
   const classesVar = classInputs(classes);
 
   let allObjectFlowApps = [];
@@ -646,7 +505,11 @@ async function collectAllData(filters = {}) {
       (app) => app.__typename === 'ObjectFlow'
     );
   } catch (error) {
-    console.error('[collectAllData] Błąd pobierania aplikacji:', error.message);
+    console.error(
+      '[collectAllData] Błąd pobierania listy aplikacji:',
+      error.message
+    );
+
     throw error;
   }
 
@@ -660,28 +523,17 @@ async function collectAllData(filters = {}) {
     );
   }
 
-  let visibleApps = allObjectFlowApps;
-
-  if (filters.app) {
-    visibleApps = visibleApps.filter((app) =>
-      lower(app.name).includes(lower(filters.app))
-    );
-  }
-
-  if (filters.camera) {
-    visibleApps = visibleApps.filter((app) =>
-      lower(app.camera?.name).includes(lower(filters.camera))
-    );
-  }
-
   const onlineApps = [];
   const excludedApps = [];
 
-  for (const app of visibleApps) {
-    const reason = getOfflineReason(app);
+  for (const app of allObjectFlowApps) {
+    const reason = getExcludedReason(app);
 
     if (reason) {
-      excludedApps.push({ app, reason });
+      excludedApps.push({
+        app,
+        reason,
+      });
     } else {
       onlineApps.push(app);
     }
@@ -701,13 +553,12 @@ async function collectAllData(filters = {}) {
 
   for (const app of onlineApps) {
     try {
-      const one = await graphql(QUERY_ONE_APP_COUNTS, {
+      const appData = await graphql(QUERY_ONE_APP_LIVE, {
         app: app.uuid,
-        range,
         classes: classesVar,
       });
 
-      const objectFlow = one?.getApplication;
+      const objectFlow = appData?.getApplication;
 
       if (!objectFlow || objectFlow.__typename !== 'ObjectFlow') {
         detailedApps.push({
@@ -728,112 +579,92 @@ async function collectAllData(filters = {}) {
       }
 
       /*
-        Weryfikacja statusu drugi raz po pobraniu szczegółów.
-        Gdy aplikacja zostanie zatrzymana pomiędzy zapytaniami,
-        nie trafi do raportu.
+        Druga kontrola po pobraniu szczegółów.
+
+        Chroni przed przypadkiem, gdy aplikacja została zatrzymana
+        dokładnie pomiędzy pierwszym a drugim zapytaniem GraphQL.
       */
-      const appAfterRead = {
+      const currentApp = {
         ...app,
         status: objectFlow.status ?? app.status,
         last_online: objectFlow.last_online ?? app.last_online,
       };
 
-      const currentReason = getOfflineReason(appAfterRead);
+      const exclusionReason = getExcludedReason(currentApp);
 
-      if (currentReason) {
+      if (exclusionReason) {
         console.warn(
-          `[collectAllData] Aplikacja "${app.name}" zmieniła stan podczas odczytu: ${currentReason}`
+          `[collectAllData] "${app.name}" nie jest już ONLINE po pobraniu szczegółów: ${exclusionReason}`
         );
 
         excludedApps.push({
-          app: appAfterRead,
-          reason: `zmiana stanu po odczycie: ${currentReason}`,
+          app: currentApp,
+          reason: `zmiana statusu po odczycie: ${exclusionReason}`,
         });
 
         continue;
       }
 
-      let lines = toArray(objectFlow.lines);
-
-      if (filters.line) {
-        lines = lines.filter((line) =>
-          lower(line.name).includes(lower(filters.line))
-        );
-      }
-
-      const mappedLines = lines.map((line) => {
-        const data = summarizeBuckets(line.count_data);
-        const live = summarizeLive(line.count_live);
+      const mappedLines = toArray(objectFlow.lines).map((line) => {
+        const live = summarizeLiveLine(line.count_live);
 
         return {
           uuid: line.uuid,
           name: line.name,
           tags: toArray(line.tags),
           coordinates: toArray(line.coordinates),
+
+          /*
+            To są aktualne wartości z count_live.
+            Nie są sumą danych historycznych.
+          */
           totals: {
-            in: data.total_in,
-            out: data.total_out,
+            in: live.total_in,
+            out: live.total_out,
           },
+
           live,
-          data,
         };
       });
 
-      let areas = toArray(objectFlow.areas);
-
-      if (filters.area) {
-        areas = areas.filter((area) =>
-          lower(area.name).includes(lower(filters.area))
-        );
-      }
-
-      const mappedAreas = areas.map((area) => {
-        const data = summarizeAreaBuckets(area.count_data);
-        const live = summarizeAreaLive(area.count_live);
+      const mappedAreas = toArray(objectFlow.areas).map((area) => {
+        const live = summarizeLiveArea(area.count_live);
 
         return {
           uuid: area.uuid,
           name: area.name,
           tags: toArray(area.tags),
           coordinates: toArray(area.coordinates),
-          totals: {
-            min: data.avg_min,
-            avg: data.avg_avg,
-            max: data.avg_max,
-            samples: data.total_samples,
-          },
+
+          /*
+            Aktualna liczba osób / obiektów w danym obszarze.
+          */
           live,
-          data,
         };
       });
 
-      const totalIn = sumBy(mappedLines, (line) => line.totals.in);
-      const totalOut = sumBy(mappedLines, (line) => line.totals.out);
+      /*
+        Suma aktualnych count_live ze wszystkich linii aplikacji.
 
-      const areaMin = mappedAreas.length
-        ? sumBy(mappedAreas, (area) => area.totals.min) / mappedAreas.length
-        : 0;
+        W Twoim przypadku Office ma jedną linię "New Line",
+        więc wartości będą dokładnie takie jak zwraca Isarsoft:
+        np. IN=1, OUT=4.
+      */
+      const currentIn = sumBy(mappedLines, (line) => line.live.total_in);
+      const currentOut = sumBy(mappedLines, (line) => line.live.total_out);
 
-      const areaAvg = mappedAreas.length
-        ? sumBy(mappedAreas, (area) => area.totals.avg) / mappedAreas.length
-        : 0;
-
-      const areaMax = mappedAreas.length
-        ? sumBy(mappedAreas, (area) => area.totals.max) / mappedAreas.length
-        : 0;
-
-      const areaCount = sumBy(
+      const currentAreaCount = sumBy(
         mappedAreas,
         (area) => area.live.total_count
       );
 
       console.log(
-        `[collectAllData] ONLINE "${app.name}" (${app.uuid}): IN=${totalIn}, OUT=${totalOut}, liveArea=${areaCount}, lines=${mappedLines.length}, areas=${mappedAreas.length}`
+        `[collectAllData] ONLINE "${app.name}" (${app.uuid}): AKTUALNE IN=${currentIn}, AKTUALNE OUT=${currentOut}, osoby w obszarach=${currentAreaCount}, lines=${mappedLines.length}, areas=${mappedAreas.length}`
       );
 
       for (const line of mappedLines) {
         console.log(
-          `[collectAllData]   Linia "${line.name}": IN=${line.totals.in}, OUT=${line.totals.out}, liveIn=${line.live.total_in}, liveOut=${line.live.total_out}`
+          `[collectAllData]   Linia "${line.name}": aktualne IN=${line.live.total_in}, aktualne OUT=${line.live.total_out}`
         );
       }
 
@@ -841,23 +672,32 @@ async function collectAllData(filters = {}) {
         uuid: app.uuid,
         name: app.name,
         tags: toArray(app.tags),
-        status: appAfterRead.status || null,
-        last_online: appAfterRead.last_online || null,
+
+        status: currentApp.status || null,
+        last_online: currentApp.last_online || null,
+
         camera: objectFlow.camera || app.camera || null,
         model: app.model || null,
+
         created_at: app.created_at || null,
         updated_at: app.updated_at || null,
+
         lines: mappedLines,
         areas: mappedAreas,
+
+        /*
+          Zachowujemy kompatybilność z Twoim serwerem pokojowym:
+          data.totals.selected_in i data.totals.selected_out.
+
+          Tu są aktualne count_live, a nie count_data z LAST_1_DAY.
+        */
         totals: {
-          in: totalIn,
-          out: totalOut,
+          in: currentIn,
+          out: currentOut,
         },
+
         area_totals: {
-          min: areaMin,
-          avg: areaAvg,
-          max: areaMax,
-          count: areaCount,
+          count: currentAreaCount,
         },
       });
     } catch (error) {
@@ -882,58 +722,23 @@ async function collectAllData(filters = {}) {
     }
   }
 
-  let allCameras = [];
+  let cameras = [];
 
   try {
     const camerasData = await graphql(QUERY_ALL_CAMERAS);
-    allCameras = toArray(camerasData?.allCameras);
+    cameras = toArray(camerasData?.allCameras);
   } catch (error) {
     console.error('[collectAllData] Błąd pobierania kamer:', error.message);
   }
 
-  let licenseStatus = null;
+  let license = null;
 
   try {
     const licenseData = await graphql(QUERY_LICENSE);
-    licenseStatus = licenseData?.getLicenseStatus || null;
+    license = licenseData?.getLicenseStatus || null;
   } catch (error) {
     console.error('[collectAllData] Błąd pobierania licencji:', error.message);
   }
-
-  let mqttSettings = null;
-
-  try {
-    const mqttData = await graphql(`
-      query {
-        getMQTTSettings {
-          enabled
-          host
-          port
-          username
-          topic_prefix
-        }
-      }
-    `);
-
-    mqttSettings = mqttData?.getMQTTSettings || null;
-  } catch {}
-
-  let kafkaSettings = null;
-
-  try {
-    const kafkaData = await graphql(`
-      query {
-        getKafkaSettings {
-          enabled
-          bootstrap_servers
-          topic
-          security_protocol
-        }
-      }
-    `);
-
-    kafkaSettings = kafkaData?.getKafkaSettings || null;
-  } catch {}
 
   const successfulApps = detailedApps.filter(
     (app) => !app._error && app.totals
@@ -946,15 +751,19 @@ async function collectAllData(filters = {}) {
       application_status: app.status,
       application_last_online: app.last_online,
       camera_name: app.camera?.name || null,
+
       line_uuid: line.uuid,
       line_name: line.name,
-      total_in: line.totals.in,
-      total_out: line.totals.out,
+
+      /*
+        Nazwy zachowane dla kompatybilności z odbiorcą danych.
+        Wartości są jednak pobrane z count_live.
+      */
+      total_in: line.live.total_in,
+      total_out: line.live.total_out,
+
       live_in: line.live.total_in,
       live_out: line.live.total_out,
-      buckets: line.data.buckets,
-      first_bucket: line.data.first_bucket,
-      last_bucket: line.data.last_bucket,
     }))
   );
 
@@ -969,32 +778,32 @@ async function collectAllData(filters = {}) {
       application_status: app.status,
       application_last_online: app.last_online,
       camera_name: app.camera?.name || null,
+
       area_uuid: area.uuid,
       area_name: area.name,
-      avg_min: area.totals.min,
-      avg_avg: area.totals.avg,
-      avg_max: area.totals.max,
+
       live_count: area.live.total_count,
-      buckets: area.data.buckets,
     }))
   );
 
-  areaRows.sort((a, b) => b.avg_avg - a.avg_avg);
+  areaRows.sort((a, b) => b.live_count - a.live_count);
 
   return {
     ok: true,
     generated_at: nowIso(),
 
+    /*
+      Informacja diagnostyczna dla systemu odbierającego:
+      wartości główne pochodzą z count_live.
+    */
+    mode: 'LIVE_CURRENT_VALUES',
+
     filters: {
-      preset,
-      class: classes.join(','),
-      app: filters.app || '',
-      camera: filters.camera || '',
-      line: filters.line || '',
-      area: filters.area || '',
+      object_classes: classes.join(','),
       accepted_status: ONLINE_STATUS,
       require_recent_online: REQUIRE_RECENT_ONLINE,
       online_max_age_ms: APP_ONLINE_MAX_AGE_MS,
+      count_source: 'count_live',
     },
 
     applications_summary: {
@@ -1019,18 +828,23 @@ async function collectAllData(filters = {}) {
         })),
     },
 
-    available_presets: allowedPresets,
-
     totals: {
       objectflow_apps: successfulApps.length,
+
+      /*
+        Te pola czyta najpewniej Twój dashboard:
+        Suma IN / Suma OUT.
+
+        Są to aktualne wartości count_live.
+      */
       selected_in: sumBy(successfulApps, (app) => app.totals.in),
       selected_out: sumBy(successfulApps, (app) => app.totals.out),
 
-      selected_area_avg: successfulApps.length
-        ? sumBy(successfulApps, (app) => app.area_totals.avg) /
-          successfulApps.length
-        : 0,
+      selected_area_avg: 0,
 
+      /*
+        Aktualna liczba wykrytych obiektów we wszystkich obszarach.
+      */
       selected_area_count: sumBy(
         successfulApps,
         (app) => app.area_totals.count
@@ -1040,13 +854,9 @@ async function collectAllData(filters = {}) {
     applications: successfulApps,
     lines: lineRows,
     areas: areaRows,
-    cameras: allCameras,
-    license: licenseStatus,
 
-    integrations: {
-      mqtt: mqttSettings,
-      kafka: kafkaSettings,
-    },
+    cameras,
+    license,
   };
 }
 
@@ -1055,13 +865,14 @@ async function refreshCache() {
     console.warn(
       '[refreshCache] Poprzednie odświeżanie nadal trwa, pomijam kolejne.'
     );
+
     return;
   }
 
   refreshInProgress = true;
 
   try {
-    console.log('[refreshCache] Odświeżanie danych z Isarsoft...');
+    console.log('[refreshCache] Odświeżanie aktualnych danych z Isarsoft...');
 
     const data = await collectAllData();
 
@@ -1069,7 +880,7 @@ async function refreshCache() {
     lastRefreshSuccess = nowIso();
 
     console.log(
-      `[refreshCache] Dane odświeżone. Aplikacje ONLINE: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}, osoby w obszarach live: ${data.totals.selected_area_count}`
+      `[refreshCache] Dane odświeżone. Aplikacje ONLINE: ${data.totals.objectflow_apps}, AKTUALNE IN: ${data.totals.selected_in}, AKTUALNE OUT: ${data.totals.selected_out}, obszary live: ${data.totals.selected_area_count}`
     );
   } catch (error) {
     console.error('[refreshCache] Błąd odświeżania:', error.message);
@@ -1268,7 +1079,7 @@ async function getIpFallbackLocation() {
   }
 
   try {
-    const res = await requestRaw(GEO_FALLBACK_URL, {
+    const response = await requestRaw(GEO_FALLBACK_URL, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
@@ -1276,10 +1087,10 @@ async function getIpFallbackLocation() {
       },
     });
 
-    const json = res.json();
+    const json = response.json();
 
-    if (!res.ok || !json) {
-      throw new Error(`HTTP ${res.status}`);
+    if (!response.ok || !json) {
+      throw new Error(`HTTP ${response.status}`);
     }
 
     const latitude = Number(json.lat ?? json.latitude);
@@ -1388,6 +1199,11 @@ async function sendDataToRoom() {
         : null,
 
       lastRefreshSuccess,
+
+      /*
+        data.totals.selected_in oraz data.totals.selected_out
+        zawierają aktualne wartości count_live.
+      */
       data: cachedData,
     };
 
@@ -1399,8 +1215,8 @@ async function sendDataToRoom() {
     const url = new URL(ROOM_SERVER_URL);
     const lib = url.protocol === 'https:' ? https : http;
 
-    const res = await new Promise((resolve, reject) => {
-      const req = lib.request(
+    const response = await new Promise((resolve, reject) => {
+      const request = lib.request(
         {
           protocol: url.protocol,
           hostname: url.hostname,
@@ -1414,43 +1230,43 @@ async function sendDataToRoom() {
           agent: url.protocol === 'https:' ? httpsAgent : undefined,
           timeout: CONFIG.requestTimeoutMs,
         },
-        (response) => {
+        (res) => {
           let raw = '';
 
-          response.setEncoding('utf8');
+          res.setEncoding('utf8');
 
-          response.on('data', (chunk) => {
+          res.on('data', (chunk) => {
             raw += chunk;
           });
 
-          response.on('end', () => {
+          res.on('end', () => {
             resolve({
-              status: response.statusCode,
+              status: res.statusCode,
               body: raw,
             });
           });
         }
       );
 
-      req.on('error', reject);
+      request.on('error', reject);
 
-      req.on('timeout', () => {
-        req.destroy(
+      request.on('timeout', () => {
+        request.destroy(
           new Error('Timeout wysyłania do serwera pokojowego')
         );
       });
 
-      req.write(postData);
-      req.end();
+      request.write(postData);
+      request.end();
     });
 
-    if (res.status >= 200 && res.status < 300) {
+    if (response.status >= 200 && response.status < 300) {
       console.log(
-        `[sendDataToRoom] Dane wysłane do ${ROOM_SERVER_URL}, status: ${res.status}`
+        `[sendDataToRoom] Dane wysłane do ${ROOM_SERVER_URL}, status: ${response.status}`
       );
     } else {
       console.warn(
-        `[sendDataToRoom] Serwer odpowiedział statusem ${res.status}, treść: ${res.body}`
+        `[sendDataToRoom] Serwer odpowiedział statusem ${response.status}, treść: ${response.body}`
       );
     }
   } catch (error) {
@@ -1493,8 +1309,8 @@ async function start() {
         gpsFixMaxAgeMs: GPS_FIX_MAX_AGE_MS,
         ipGeoFallback: ENABLE_IP_GEO_FALLBACK,
 
-        isarsoftPreset: CONFIG.defaultPreset,
-        isarsoftClasses: CONFIG.defaultClasses,
+        isarsoftClasses: CONFIG.objectClasses,
+        isarsoftCounterMode: 'count_live',
 
         acceptedApplicationStatus: ONLINE_STATUS,
         requireRecentOnline: REQUIRE_RECENT_ONLINE,
