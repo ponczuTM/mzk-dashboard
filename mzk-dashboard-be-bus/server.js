@@ -6,6 +6,15 @@ const { URL, URLSearchParams } = require('url');
 const { SerialPort } = require('serialport');
 const { GPS } = require('gps');
 
+/*
+  Ten klient:
+  - pobiera wszystkie aplikacje ObjectFlow z Isarsoft,
+  - wysyła dane WYŁĄCZNIE z aplikacji o statusie ONLINE,
+  - ignoruje Paused, Offline, Error, zatrzymane i historyczne aplikacje,
+  - domyślnie liczy tylko PERSON, bez HEAD,
+  - dodatkowo wymaga świeżego last_online, aby odrzucić stare wpisy.
+*/
+
 const PC_ID = Number(process.env.PC_ID || 1);
 const PC_NAME = process.env.PC_NAME || 'linia_nr_1';
 
@@ -19,8 +28,33 @@ const GPS_PORT_PATH = process.env.GPS_PORT_PATH || '/dev/ttyUSB0';
 const GPS_BAUD_RATE = Number(process.env.GPS_BAUD_RATE || 9600);
 const GPS_FIX_MAX_AGE_MS = Number(process.env.GPS_FIX_MAX_AGE_MS || 30 * 1000);
 const GPS_REOPEN_DELAY_MS = Number(process.env.GPS_REOPEN_DELAY_MS || 10 * 1000);
+
 const GEO_FALLBACK_URL = process.env.GEO_FALLBACK_URL || 'http://ip-api.com/json/';
 const ENABLE_IP_GEO_FALLBACK = process.env.ENABLE_IP_GEO_FALLBACK !== 'false';
+
+/*
+  ONLINE jest jedynym akceptowanym statusem.
+
+  API Isarsoft zwróciło w Twoich logach:
+  - Paused
+  - Online
+
+  Normalizacja zamienia "Online" na "ONLINE", więc aplikacja Office
+  przejdzie filtr, a wszystkie Paused zostaną pominięte.
+*/
+const ONLINE_STATUS = 'ONLINE';
+
+/*
+  Czy aplikacja ma mieć świeży status last_online.
+  Domyślnie: tak.
+
+  Jeśli Isarsoft odświeża last_online rzadziej niż raz na 2 minuty,
+  zwiększ wartość przez ISARSOFT_APP_ONLINE_MAX_AGE_MS.
+*/
+const REQUIRE_RECENT_ONLINE = process.env.ISARSOFT_REQUIRE_RECENT_ONLINE !== 'false';
+const APP_ONLINE_MAX_AGE_MS = Number(
+  process.env.ISARSOFT_APP_ONLINE_MAX_AGE_MS || 2 * 60 * 1000
+);
 
 const CONFIG = {
   baseUrl: process.env.ISARSOFT_BASE_URL || 'https://localhost:8443',
@@ -33,60 +67,45 @@ const CONFIG = {
   password: process.env.ISARSOFT_PASSWORD || 'perception',
   verifyTls: process.env.ISARSOFT_VERIFY_TLS === 'true',
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS || 30000),
+
+  /*
+    LAST_1_DAY oznacza zsumowane przejścia z ostatnich 24 godzin.
+
+    Jeśli potrzebujesz sumy tylko z ostatniej godziny, uruchom:
+    ISARSOFT_PRESET=LAST_1_HOUR node server.js
+  */
   defaultPreset: process.env.ISARSOFT_PRESET || 'LAST_1_DAY',
+
+  /*
+    PERSON zamiast PERSON,HEAD, aby nie ryzykować podwójnego liczenia:
+    tej samej osoby jako pełnej sylwetki i jako głowy.
+  */
   defaultClasses: (process.env.ISARSOFT_CLASSES || 'PERSON')
     .split(',')
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean),
 };
 
-/*
- * Bezpieczna konfiguracja:
- * Domyślnie nic nie jest wysyłane, dopóki jawnie nie wskażesz aplikacji
- * w ISARSOFT_ALLOWED_APP_UUIDS albo ISARSOFT_ALLOWED_APP_NAMES.
- *
- * Przykłady:
- * ISARSOFT_ALLOWED_APP_UUIDS=uuid-aplikacji-1,uuid-aplikacji-2
- * ISARSOFT_ALLOWED_APP_NAMES=wejście biuro,linia nr 1
- */
-const ALLOWED_APP_UUIDS = new Set(
-  (process.env.ISARSOFT_ALLOWED_APP_UUIDS || '')
-    .split(',')
-    .map((x) => x.trim())
-    .filter(Boolean)
-);
-
-const ALLOWED_APP_NAMES = (process.env.ISARSOFT_ALLOWED_APP_NAMES || '')
-  .split(',')
-  .map((x) => x.trim().toLowerCase())
-  .filter(Boolean);
-
-const REQUIRE_APP_ALLOWLIST = process.env.ISARSOFT_REQUIRE_APP_ALLOWLIST !== 'false';
-
-const ACTIVE_APP_STATUSES = (process.env.ISARSOFT_ACTIVE_STATUSES || 'ONLINE,RUNNING,ACTIVE')
-  .split(',')
-  .map((x) => x.trim().toUpperCase())
-  .filter(Boolean);
-
-const REQUIRE_STATUS_MATCH = process.env.ISARSOFT_REQUIRE_STATUS_MATCH === 'true';
-const REQUIRE_RECENT_ONLINE = process.env.ISARSOFT_REQUIRE_RECENT_ONLINE === 'true';
-const APP_ONLINE_MAX_AGE_MS = Number(
-  process.env.ISARSOFT_APP_ONLINE_MAX_AGE_MS || 2 * 60 * 1000
-);
-
 let currentLatitude = null;
 let currentLongitude = null;
 let currentAltitude = null;
+
 let gpsFix = false;
 let gpsEnabled = false;
-let lastGpsLogTime = 0;
+let gpsSource = 'none';
+
 let lastValidGpsAt = 0;
 let lastNmeaAt = 0;
-let gpsSource = 'none';
+let lastGpsLogTime = 0;
+
 let serialPortRef = null;
 let reopenTimer = null;
+
 let refreshInProgress = false;
 let sendInProgress = false;
+
+let cachedData = null;
+let lastRefreshSuccess = null;
 
 let ipGeoCache = {
   latitude: null,
@@ -99,25 +118,25 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function toArray(v) {
-  return Array.isArray(v) ? v : [];
+function toArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
-function lower(v) {
-  return String(v || '').toLowerCase();
+function lower(value) {
+  return String(value || '').toLowerCase();
 }
 
-function normalizeStatus(v) {
-  return String(v || '').trim().toUpperCase();
+function normalizeStatus(value) {
+  return String(value || '').trim().toUpperCase();
 }
 
-function num(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
+function num(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function sumBy(arr, fn) {
-  return toArray(arr).reduce((acc, item) => acc + num(fn(item)), 0);
+function sumBy(array, mapper) {
+  return toArray(array).reduce((total, item) => total + num(mapper(item)), 0);
 }
 
 function safeJson(text) {
@@ -129,16 +148,16 @@ function safeJson(text) {
 }
 
 function parseDateMs(value) {
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
+  const result = Date.parse(value);
+  return Number.isFinite(result) ? result : null;
 }
 
-function isValidCoordinate(lat, lon) {
+function isValidCoordinate(latitude, longitude) {
   return (
-    Number.isFinite(lat) &&
-    Number.isFinite(lon) &&
-    Math.abs(lat) <= 90 &&
-    Math.abs(lon) <= 180
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    Math.abs(latitude) <= 90 &&
+    Math.abs(longitude) <= 180
   );
 }
 
@@ -150,50 +169,65 @@ function hasFreshGpsFix() {
   );
 }
 
-function appMatchesAllowlist(app) {
-  if (!REQUIRE_APP_ALLOWLIST) return true;
+/*
+  Jedyny filtr aplikacji:
+  - status musi być ONLINE,
+  - opcjonalnie last_online musi być świeże.
 
-  if (ALLOWED_APP_UUIDS.has(String(app?.uuid || ''))) return true;
+  Nie ma allowlisty UUID, nazw ani plików konfiguracyjnych.
+*/
+function isApplicationOnline(app) {
+  if (normalizeStatus(app?.status) !== ONLINE_STATUS) {
+    return false;
+  }
 
-  const name = lower(app?.name);
-  return ALLOWED_APP_NAMES.some((allowedName) => name.includes(allowedName));
-}
-
-function appMatchesStatus(app) {
-  if (!REQUIRE_STATUS_MATCH) return true;
-  return ACTIVE_APP_STATUSES.includes(normalizeStatus(app?.status));
-}
-
-function appHasRecentOnline(app) {
-  if (!REQUIRE_RECENT_ONLINE) return true;
+  if (!REQUIRE_RECENT_ONLINE) {
+    return true;
+  }
 
   const lastOnlineMs = parseDateMs(app?.last_online);
-  if (!lastOnlineMs) return false;
+
+  if (!lastOnlineMs) {
+    return false;
+  }
 
   const ageMs = Date.now() - lastOnlineMs;
+
+  /*
+    Dopuszczamy maksymalnie 60 sekund różnicy, jeśli zegar Isarsoft
+    jest minimalnie do przodu względem zegara urządzenia.
+  */
   return ageMs >= -60 * 1000 && ageMs <= APP_ONLINE_MAX_AGE_MS;
 }
 
-function getAppExclusionReasons(app) {
-  const reasons = [];
+function getOfflineReason(app) {
+  const status = normalizeStatus(app?.status);
 
-  if (!appMatchesAllowlist(app)) {
-    reasons.push('not-on-allowlist');
+  if (status !== ONLINE_STATUS) {
+    return `status=${status || 'BRAK'} (wymagany ONLINE)`;
   }
 
-  if (!appMatchesStatus(app)) {
-    reasons.push(`status-not-active:${normalizeStatus(app?.status) || 'EMPTY'}`);
+  if (!REQUIRE_RECENT_ONLINE) {
+    return null;
   }
 
-  if (!appHasRecentOnline(app)) {
-    reasons.push('last-online-not-recent');
+  const lastOnlineMs = parseDateMs(app?.last_online);
+
+  if (!lastOnlineMs) {
+    return 'brak poprawnego last_online';
   }
 
-  return reasons;
-}
+  const ageMs = Date.now() - lastOnlineMs;
 
-function isApplicationSelected(app) {
-  return getAppExclusionReasons(app).length === 0;
+  if (ageMs < -60 * 1000) {
+    return `last_online jest w przyszłości (${app.last_online})`;
+  }
+
+  if (ageMs > APP_ONLINE_MAX_AGE_MS) {
+    return `last_online za stare (${app.last_online})`;
+  }
+
+  return null;
 }
 
 const httpsAgent = new https.Agent({
@@ -218,10 +252,13 @@ function requestRaw(urlString, options = {}, body = null) {
       },
       (res) => {
         let raw = '';
+
         res.setEncoding('utf8');
+
         res.on('data', (chunk) => {
           raw += chunk;
         });
+
         res.on('end', () => {
           resolve({
             ok: res.statusCode >= 200 && res.statusCode < 300,
@@ -234,20 +271,31 @@ function requestRaw(urlString, options = {}, body = null) {
       }
     );
 
-    req.on('timeout', () =>
-      req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`))
-    );
+    req.on('timeout', () => {
+      req.destroy(new Error(`Timeout after ${CONFIG.requestTimeoutMs}ms`));
+    });
+
     req.on('error', reject);
 
-    if (body) req.write(body);
+    if (body) {
+      req.write(body);
+    }
+
     req.end();
   });
 }
 
-let tokenCache = { token: null, expiresAt: 0 };
+let tokenCache = {
+  token: null,
+  expiresAt: 0,
+};
 
 async function getToken(force = false) {
-  if (!force && tokenCache.token && Date.now() < tokenCache.expiresAt - 15000) {
+  if (
+    !force &&
+    tokenCache.token &&
+    Date.now() < tokenCache.expiresAt - 15000
+  ) {
     return tokenCache.token;
   }
 
@@ -271,8 +319,11 @@ async function getToken(force = false) {
   );
 
   const json = res.json();
+
   if (!res.ok || !json?.access_token) {
-    throw new Error(`Token request failed: ${res.status} ${res.statusText} ${res.text}`);
+    throw new Error(
+      `Token request failed: ${res.status} ${res.statusText} ${res.text}`
+    );
   }
 
   tokenCache = {
@@ -284,7 +335,7 @@ async function getToken(force = false) {
 }
 
 async function graphql(query, variables = null, retry = true) {
-  const token = await getToken(false);
+  const token = await getToken();
   const payload = JSON.stringify({ query, variables });
 
   const res = await requestRaw(
@@ -309,7 +360,9 @@ async function graphql(query, variables = null, retry = true) {
   }
 
   if (!res.ok) {
-    throw new Error(`GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text}`);
+    throw new Error(
+      `GraphQL HTTP error: ${res.status} ${res.statusText} ${res.text}`
+    );
   }
 
   if (!json) {
@@ -329,7 +382,9 @@ query {
     types {
       name
       kind
-      enumValues { name }
+      enumValues {
+        name
+      }
     }
   }
 }
@@ -347,10 +402,26 @@ query {
       updated_at
       status
       last_online
-      camera { uuid name }
-      model { uuid name }
-      lines { uuid name tags coordinates }
-      areas { uuid name tags coordinates }
+      camera {
+        uuid
+        name
+      }
+      model {
+        uuid
+        name
+      }
+      lines {
+        uuid
+        name
+        tags
+        coordinates
+      }
+      areas {
+        uuid
+        name
+        tags
+        coordinates
+      }
     }
   }
 }
@@ -365,7 +436,10 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
       name
       status
       last_online
-      camera { uuid name }
+      camera {
+        uuid
+        name
+      }
       lines {
         uuid
         name
@@ -405,40 +479,64 @@ query($app: String!, $range: TimeRangeInput!, $classes: [ObjectClassInput!]!) {
 
 const QUERY_ALL_CAMERAS = `
 query {
-  allCameras { uuid name }
+  allCameras {
+    uuid
+    name
+  }
 }
 `;
 
 const QUERY_LICENSE = `
 query {
-  getLicenseStatus { valid }
+  getLicenseStatus {
+    valid
+  }
 }
 `;
 
 function getEnumValues(schema, typeName) {
-  const type = toArray(schema?.types).find((x) => x.name === typeName);
-  return toArray(type?.enumValues).map((x) => x.name).filter(Boolean);
+  const type = toArray(schema?.types).find((item) => item.name === typeName);
+
+  return toArray(type?.enumValues)
+    .map((item) => item.name)
+    .filter(Boolean);
 }
 
 function normalizePreset(input, allowed) {
   const fallback = CONFIG.defaultPreset;
-  if (!input) return allowed.includes(fallback) ? fallback : allowed[0] || 'LAST_1_DAY';
+
+  if (!input) {
+    return allowed.includes(fallback)
+      ? fallback
+      : allowed[0] || 'LAST_1_DAY';
+  }
 
   const raw = String(input).trim().toUpperCase();
-  if (allowed.includes(raw)) return raw;
+
+  if (allowed.includes(raw)) {
+    return raw;
+  }
 
   const collapsed = raw.replace(/[_\s-]/g, '');
-  const found = allowed.find((x) => x.replace(/[_\s-]/g, '') === collapsed);
-  return found || (allowed.includes(fallback) ? fallback : allowed[0]) || 'LAST_1_DAY';
+
+  const found = allowed.find(
+    (item) => item.replace(/[_\s-]/g, '') === collapsed
+  );
+
+  return (
+    found ||
+    (allowed.includes(fallback) ? fallback : allowed[0]) ||
+    'LAST_1_DAY'
+  );
 }
 
 function parseClasses(input) {
-  const raw = (input || CONFIG.defaultClasses.join(','))
+  const classes = (input || CONFIG.defaultClasses.join(','))
     .split(',')
-    .map((x) => x.trim().toUpperCase())
+    .map((item) => item.trim().toUpperCase())
     .filter(Boolean);
 
-  return raw.length ? raw : CONFIG.defaultClasses;
+  return classes.length ? classes : CONFIG.defaultClasses;
 }
 
 function classInputs(classes) {
@@ -449,48 +547,59 @@ function flattenRows(rows) {
   if (Array.isArray(rows) && rows.length > 0 && Array.isArray(rows[0])) {
     return rows.flat();
   }
+
   return toArray(rows);
 }
 
 function summarizeBuckets(rows) {
   const raw = flattenRows(rows);
+
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
     last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    total_in: sumBy(raw, (x) => x?.count_in),
-    total_out: sumBy(raw, (x) => x?.count_out),
+    total_in: sumBy(raw, (item) => item?.count_in),
+    total_out: sumBy(raw, (item) => item?.count_out),
     raw,
   };
 }
 
 function summarizeAreaBuckets(rows) {
   const raw = flattenRows(rows);
+
   return {
     buckets: raw.length,
     first_bucket: raw[0]?.time_bucket || null,
     last_bucket: raw[raw.length - 1]?.time_bucket || null,
-    avg_min: raw.length ? sumBy(raw, (x) => x?.count_min) / raw.length : 0,
-    avg_avg: raw.length ? sumBy(raw, (x) => x?.count_avg) / raw.length : 0,
-    avg_max: raw.length ? sumBy(raw, (x) => x?.count_max) / raw.length : 0,
-    total_samples: sumBy(raw, (x) => x?.number_of_samples),
+    avg_min: raw.length
+      ? sumBy(raw, (item) => item?.count_min) / raw.length
+      : 0,
+    avg_avg: raw.length
+      ? sumBy(raw, (item) => item?.count_avg) / raw.length
+      : 0,
+    avg_max: raw.length
+      ? sumBy(raw, (item) => item?.count_max) / raw.length
+      : 0,
+    total_samples: sumBy(raw, (item) => item?.number_of_samples),
     raw,
   };
 }
 
 function summarizeLive(rows) {
   const raw = flattenRows(rows);
+
   return {
-    total_in: sumBy(raw, (x) => x?.count_in),
-    total_out: sumBy(raw, (x) => x?.count_out),
+    total_in: sumBy(raw, (item) => item?.count_in),
+    total_out: sumBy(raw, (item) => item?.count_out),
     raw,
   };
 }
 
 function summarizeAreaLive(rows) {
   const raw = flattenRows(rows);
+
   return {
-    total_count: sumBy(raw, (x) => x?.count),
+    total_count: sumBy(raw, (item) => item?.count),
     raw,
   };
 }
@@ -507,72 +616,90 @@ async function collectAllData(filters = {}) {
 
   try {
     const schemaData = await graphql(QUERY_SCHEMA);
-    const enumVals = getEnumValues(schemaData?.__schema, 'TimeRangePreset');
-    if (enumVals.length) allowedPresets = enumVals;
-  } catch (err) {
-    console.warn('[collectAllData] Nie udało się pobrać enumów, używam domyślnych:', err.message);
+    const enumValues = getEnumValues(schemaData?.__schema, 'TimeRangePreset');
+
+    if (enumValues.length) {
+      allowedPresets = enumValues;
+    }
+  } catch (error) {
+    console.warn(
+      '[collectAllData] Nie udało się pobrać enumów, używam domyślnych:',
+      error.message
+    );
   }
 
   const preset = normalizePreset(filters.preset, allowedPresets);
   const classes = parseClasses(filters.class);
-  const range = { time_range_preset: preset };
+
+  const range = {
+    time_range_preset: preset,
+  };
+
   const classesVar = classInputs(classes);
 
   let allObjectFlowApps = [];
+
   try {
     const appsData = await graphql(QUERY_OBJECTFLOW_APPS);
+
     allObjectFlowApps = toArray(appsData?.allApplications).filter(
-      (x) => x.__typename === 'ObjectFlow'
+      (app) => app.__typename === 'ObjectFlow'
     );
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania aplikacji:', err.message);
-    throw err;
+  } catch (error) {
+    console.error('[collectAllData] Błąd pobierania aplikacji:', error.message);
+    throw error;
   }
 
-  console.log(`[collectAllData] Wszystkie aplikacje ObjectFlow: ${allObjectFlowApps.length}`);
+  console.log(
+    `[collectAllData] Wszystkie aplikacje ObjectFlow: ${allObjectFlowApps.length}`
+  );
+
   for (const app of allObjectFlowApps) {
     console.log(
       `[Isarsoft] uuid=${app.uuid} | name="${app.name}" | status="${app.status}" | last_online="${app.last_online}" | camera="${app.camera?.name || '-'}"`
     );
   }
 
-  const prefilteredApps = allObjectFlowApps.filter((app) => {
-    if (filters.app && !lower(app.name).includes(lower(filters.app))) return false;
-    if (filters.camera && !lower(app.camera?.name).includes(lower(filters.camera))) return false;
-    return true;
-  });
+  let visibleApps = allObjectFlowApps;
 
-  const selectedApps = [];
+  if (filters.app) {
+    visibleApps = visibleApps.filter((app) =>
+      lower(app.name).includes(lower(filters.app))
+    );
+  }
+
+  if (filters.camera) {
+    visibleApps = visibleApps.filter((app) =>
+      lower(app.camera?.name).includes(lower(filters.camera))
+    );
+  }
+
+  const onlineApps = [];
   const excludedApps = [];
 
-  for (const app of prefilteredApps) {
-    const reasons = getAppExclusionReasons(app);
-    if (reasons.length) {
-      excludedApps.push({ app, reasons });
+  for (const app of visibleApps) {
+    const reason = getOfflineReason(app);
+
+    if (reason) {
+      excludedApps.push({ app, reason });
     } else {
-      selectedApps.push(app);
+      onlineApps.push(app);
     }
   }
 
   console.log(
-    `[collectAllData] Wybrane aplikacje: ${selectedApps.length}; pominięte: ${excludedApps.length}; requireAllowlist=${REQUIRE_APP_ALLOWLIST}; requireStatus=${REQUIRE_STATUS_MATCH}; requireRecentOnline=${REQUIRE_RECENT_ONLINE}`
+    `[collectAllData] ONLINE: ${onlineApps.length}; pominięte: ${excludedApps.length}; wymagany status: ${ONLINE_STATUS}; requireRecentOnline=${REQUIRE_RECENT_ONLINE}`
   );
 
   for (const item of excludedApps) {
     console.log(
-      `[collectAllData] Pominięto "${item.app.name}" (${item.app.uuid}): ${item.reasons.join(', ')}`
-    );
-  }
-
-  if (REQUIRE_APP_ALLOWLIST && ALLOWED_APP_UUIDS.size === 0 && ALLOWED_APP_NAMES.length === 0) {
-    console.warn(
-      '[collectAllData] ISARSOFT_ALLOWED_APP_UUIDS / ISARSOFT_ALLOWED_APP_NAMES nie ustawiono. Ze względów bezpieczeństwa wysyłam 0 aplikacji.'
+      `[collectAllData] Pominięto "${item.app.name}" (${item.app.uuid}): ${item.reason}`
     );
   }
 
   const detailedApps = [];
 
-  for (const app of selectedApps) {
+  for (const app of onlineApps) {
     try {
       const one = await graphql(QUERY_ONE_APP_COUNTS, {
         app: app.uuid,
@@ -581,6 +708,7 @@ async function collectAllData(filters = {}) {
       });
 
       const objectFlow = one?.getApplication;
+
       if (!objectFlow || objectFlow.__typename !== 'ObjectFlow') {
         detailedApps.push({
           uuid: app.uuid,
@@ -595,50 +723,74 @@ async function collectAllData(filters = {}) {
           area_totals: null,
           _error: 'Aplikacja nie została zwrócona jako ObjectFlow',
         });
+
         continue;
       }
 
-      const recheckedApp = {
+      /*
+        Weryfikacja statusu drugi raz po pobraniu szczegółów.
+        Gdy aplikacja zostanie zatrzymana pomiędzy zapytaniami,
+        nie trafi do raportu.
+      */
+      const appAfterRead = {
         ...app,
         status: objectFlow.status ?? app.status,
         last_online: objectFlow.last_online ?? app.last_online,
       };
-      const recheckReasons = getAppExclusionReasons(recheckedApp);
-      if (recheckReasons.length) {
+
+      const currentReason = getOfflineReason(appAfterRead);
+
+      if (currentReason) {
         console.warn(
-          `[collectAllData] "${app.name}" nie spełnia już warunków po odczycie: ${recheckReasons.join(', ')}`
+          `[collectAllData] Aplikacja "${app.name}" zmieniła stan podczas odczytu: ${currentReason}`
         );
-        excludedApps.push({ app: recheckedApp, reasons: recheckReasons });
+
+        excludedApps.push({
+          app: appAfterRead,
+          reason: `zmiana stanu po odczycie: ${currentReason}`,
+        });
+
         continue;
       }
 
       let lines = toArray(objectFlow.lines);
+
       if (filters.line) {
-        lines = lines.filter((l) => lower(l.name).includes(lower(filters.line)));
+        lines = lines.filter((line) =>
+          lower(line.name).includes(lower(filters.line))
+        );
       }
 
       const mappedLines = lines.map((line) => {
         const data = summarizeBuckets(line.count_data);
         const live = summarizeLive(line.count_live);
+
         return {
           uuid: line.uuid,
           name: line.name,
           tags: toArray(line.tags),
           coordinates: toArray(line.coordinates),
-          totals: { in: data.total_in, out: data.total_out },
+          totals: {
+            in: data.total_in,
+            out: data.total_out,
+          },
           live,
           data,
         };
       });
 
       let areas = toArray(objectFlow.areas);
+
       if (filters.area) {
-        areas = areas.filter((a) => lower(a.name).includes(lower(filters.area)));
+        areas = areas.filter((area) =>
+          lower(area.name).includes(lower(filters.area))
+        );
       }
 
       const mappedAreas = areas.map((area) => {
         const data = summarizeAreaBuckets(area.count_data);
         const live = summarizeAreaLive(area.count_live);
+
         return {
           uuid: area.uuid,
           name: area.name,
@@ -655,21 +807,28 @@ async function collectAllData(filters = {}) {
         };
       });
 
-      const totalIn = sumBy(mappedLines, (x) => x.totals.in);
-      const totalOut = sumBy(mappedLines, (x) => x.totals.out);
+      const totalIn = sumBy(mappedLines, (line) => line.totals.in);
+      const totalOut = sumBy(mappedLines, (line) => line.totals.out);
+
       const areaMin = mappedAreas.length
-        ? sumBy(mappedAreas, (x) => x.totals.min) / mappedAreas.length
+        ? sumBy(mappedAreas, (area) => area.totals.min) / mappedAreas.length
         : 0;
+
       const areaAvg = mappedAreas.length
-        ? sumBy(mappedAreas, (x) => x.totals.avg) / mappedAreas.length
+        ? sumBy(mappedAreas, (area) => area.totals.avg) / mappedAreas.length
         : 0;
+
       const areaMax = mappedAreas.length
-        ? sumBy(mappedAreas, (x) => x.totals.max) / mappedAreas.length
+        ? sumBy(mappedAreas, (area) => area.totals.max) / mappedAreas.length
         : 0;
-      const areaCount = sumBy(mappedAreas, (x) => x.live.total_count);
+
+      const areaCount = sumBy(
+        mappedAreas,
+        (area) => area.live.total_count
+      );
 
       console.log(
-        `[collectAllData] WYBRANA "${app.name}" (${app.uuid}): IN=${totalIn}, OUT=${totalOut}, liveArea=${areaCount}, lines=${mappedLines.length}, areas=${mappedAreas.length}`
+        `[collectAllData] ONLINE "${app.name}" (${app.uuid}): IN=${totalIn}, OUT=${totalOut}, liveArea=${areaCount}, lines=${mappedLines.length}, areas=${mappedAreas.length}`
       );
 
       for (const line of mappedLines) {
@@ -682,19 +841,31 @@ async function collectAllData(filters = {}) {
         uuid: app.uuid,
         name: app.name,
         tags: toArray(app.tags),
-        status: recheckedApp.status || null,
-        last_online: recheckedApp.last_online || null,
+        status: appAfterRead.status || null,
+        last_online: appAfterRead.last_online || null,
         camera: objectFlow.camera || app.camera || null,
         model: app.model || null,
         created_at: app.created_at || null,
         updated_at: app.updated_at || null,
         lines: mappedLines,
         areas: mappedAreas,
-        totals: { in: totalIn, out: totalOut },
-        area_totals: { min: areaMin, avg: areaAvg, max: areaMax, count: areaCount },
+        totals: {
+          in: totalIn,
+          out: totalOut,
+        },
+        area_totals: {
+          min: areaMin,
+          avg: areaAvg,
+          max: areaMax,
+          count: areaCount,
+        },
       });
-    } catch (err) {
-      console.error(`[collectAllData] Błąd dla aplikacji ${app.uuid} (${app.name}):`, err.message);
+    } catch (error) {
+      console.error(
+        `[collectAllData] Błąd dla aplikacji ${app.uuid} (${app.name}):`,
+        error.message
+      );
+
       detailedApps.push({
         uuid: app.uuid,
         name: app.name,
@@ -706,28 +877,31 @@ async function collectAllData(filters = {}) {
         areas: [],
         totals: null,
         area_totals: null,
-        _error: err.message,
+        _error: error.message,
       });
     }
   }
 
   let allCameras = [];
+
   try {
     const camerasData = await graphql(QUERY_ALL_CAMERAS);
     allCameras = toArray(camerasData?.allCameras);
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania kamer:', err.message);
+  } catch (error) {
+    console.error('[collectAllData] Błąd pobierania kamer:', error.message);
   }
 
   let licenseStatus = null;
+
   try {
     const licenseData = await graphql(QUERY_LICENSE);
     licenseStatus = licenseData?.getLicenseStatus || null;
-  } catch (err) {
-    console.error('[collectAllData] Błąd pobierania licencji:', err.message);
+  } catch (error) {
+    console.error('[collectAllData] Błąd pobierania licencji:', error.message);
   }
 
   let mqttSettings = null;
+
   try {
     const mqttData = await graphql(`
       query {
@@ -740,10 +914,12 @@ async function collectAllData(filters = {}) {
         }
       }
     `);
+
     mqttSettings = mqttData?.getMQTTSettings || null;
   } catch {}
 
   let kafkaSettings = null;
+
   try {
     const kafkaData = await graphql(`
       query {
@@ -755,10 +931,13 @@ async function collectAllData(filters = {}) {
         }
       }
     `);
+
     kafkaSettings = kafkaData?.getKafkaSettings || null;
   } catch {}
 
-  const successfulApps = detailedApps.filter((app) => !app._error && app.totals);
+  const successfulApps = detailedApps.filter(
+    (app) => !app._error && app.totals
+  );
 
   const lineRows = successfulApps.flatMap((app) =>
     app.lines.map((line) => ({
@@ -778,7 +957,10 @@ async function collectAllData(filters = {}) {
       last_bucket: line.data.last_bucket,
     }))
   );
-  lineRows.sort((a, b) => b.total_out - a.total_out || b.total_in - a.total_in);
+
+  lineRows.sort(
+    (a, b) => b.total_out - a.total_out || b.total_in - a.total_in
+  );
 
   const areaRows = successfulApps.flatMap((app) =>
     app.areas.map((area) => ({
@@ -796,11 +978,13 @@ async function collectAllData(filters = {}) {
       buckets: area.data.buckets,
     }))
   );
+
   areaRows.sort((a, b) => b.avg_avg - a.avg_avg);
 
   return {
     ok: true,
     generated_at: nowIso(),
+
     filters: {
       preset,
       class: classes.join(','),
@@ -808,44 +992,57 @@ async function collectAllData(filters = {}) {
       camera: filters.camera || '',
       line: filters.line || '',
       area: filters.area || '',
-      require_app_allowlist: REQUIRE_APP_ALLOWLIST,
-      allowed_app_uuids: [...ALLOWED_APP_UUIDS],
-      allowed_app_names: ALLOWED_APP_NAMES,
-      require_status_match: REQUIRE_STATUS_MATCH,
-      active_statuses: ACTIVE_APP_STATUSES,
+      accepted_status: ONLINE_STATUS,
       require_recent_online: REQUIRE_RECENT_ONLINE,
       online_max_age_ms: APP_ONLINE_MAX_AGE_MS,
     },
+
     applications_summary: {
       all_objectflow_apps: allObjectFlowApps.length,
-      selected_apps: successfulApps.length,
-      excluded_apps: excludedApps.map(({ app, reasons }) => ({
+      online_apps: successfulApps.length,
+
+      excluded_apps: excludedApps.map(({ app, reason }) => ({
         uuid: app.uuid,
         name: app.name,
         status: app.status || null,
         last_online: app.last_online || null,
         camera_name: app.camera?.name || null,
-        reasons,
+        reason,
       })),
+
       read_errors: detailedApps
         .filter((app) => app._error)
-        .map((app) => ({ uuid: app.uuid, name: app.name, error: app._error })),
+        .map((app) => ({
+          uuid: app.uuid,
+          name: app.name,
+          error: app._error,
+        })),
     },
+
     available_presets: allowedPresets,
+
     totals: {
       objectflow_apps: successfulApps.length,
-      selected_in: sumBy(successfulApps, (x) => x.totals.in),
-      selected_out: sumBy(successfulApps, (x) => x.totals.out),
+      selected_in: sumBy(successfulApps, (app) => app.totals.in),
+      selected_out: sumBy(successfulApps, (app) => app.totals.out),
+
       selected_area_avg: successfulApps.length
-        ? sumBy(successfulApps, (x) => x.area_totals.avg) / successfulApps.length
+        ? sumBy(successfulApps, (app) => app.area_totals.avg) /
+          successfulApps.length
         : 0,
-      selected_area_count: sumBy(successfulApps, (x) => x.area_totals.count),
+
+      selected_area_count: sumBy(
+        successfulApps,
+        (app) => app.area_totals.count
+      ),
     },
-    applications: detailedApps,
+
+    applications: successfulApps,
     lines: lineRows,
     areas: areaRows,
     cameras: allCameras,
     license: licenseStatus,
+
     integrations: {
       mqtt: mqttSettings,
       kafka: kafkaSettings,
@@ -853,41 +1050,51 @@ async function collectAllData(filters = {}) {
   };
 }
 
-let cachedData = null;
-let lastRefreshSuccess = null;
-
 async function refreshCache() {
   if (refreshInProgress) {
-    console.warn('[refreshCache] Poprzednie odświeżanie nadal trwa, pomijam kolejne.');
+    console.warn(
+      '[refreshCache] Poprzednie odświeżanie nadal trwa, pomijam kolejne.'
+    );
     return;
   }
 
   refreshInProgress = true;
+
   try {
     console.log('[refreshCache] Odświeżanie danych z Isarsoft...');
+
     const data = await collectAllData();
+
     cachedData = data;
     lastRefreshSuccess = nowIso();
+
     console.log(
-      `[refreshCache] Dane odświeżone. Wybranych aplikacji: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}, osoby w obszarach live: ${data.totals.selected_area_count}`
+      `[refreshCache] Dane odświeżone. Aplikacje ONLINE: ${data.totals.objectflow_apps}, IN: ${data.totals.selected_in}, OUT: ${data.totals.selected_out}, osoby w obszarach live: ${data.totals.selected_area_count}`
     );
-  } catch (err) {
-    console.error('[refreshCache] Błąd odświeżania:', err.message);
+  } catch (error) {
+    console.error('[refreshCache] Błąd odświeżania:', error.message);
   } finally {
     refreshInProgress = false;
   }
 }
 
 function scheduleSerialReopen() {
-  if (reopenTimer) return;
+  if (reopenTimer) {
+    return;
+  }
 
   reopenTimer = setTimeout(() => {
     reopenTimer = null;
+
     if (serialPortRef && !serialPortRef.isOpen) {
       console.log('[GPS] Próba ponownego otwarcia portu...');
-      serialPortRef.open((err) => {
-        if (err) {
-          console.error(`[GPS] Ponowne otwarcie nieudane: ${err.message}`);
+
+      serialPortRef.open((error) => {
+        if (error) {
+          console.error(
+            `[GPS] Ponowne otwarcie nieudane: ${error.message}`
+          );
+
           scheduleSerialReopen();
         }
       });
@@ -896,14 +1103,15 @@ function scheduleSerialReopen() {
 }
 
 function updateGpsFromState(gps, reason) {
-  const lat = Number(gps?.state?.lat);
-  const lon = Number(gps?.state?.lon);
-  const alt = Number(gps?.state?.alt);
+  const latitude = Number(gps?.state?.lat);
+  const longitude = Number(gps?.state?.lon);
+  const altitude = Number(gps?.state?.alt);
 
-  if (isValidCoordinate(lat, lon)) {
-    currentLatitude = lat;
-    currentLongitude = lon;
-    currentAltitude = Number.isFinite(alt) ? alt : null;
+  if (isValidCoordinate(latitude, longitude)) {
+    currentLatitude = latitude;
+    currentLongitude = longitude;
+    currentAltitude = Number.isFinite(altitude) ? altitude : null;
+
     gpsFix = true;
     lastValidGpsAt = Date.now();
     gpsSource = reason || 'gps';
@@ -916,39 +1124,51 @@ function initGps() {
   gps.on('data', (data) => {
     lastNmeaAt = Date.now();
 
-    if (data?.valid === false) return;
+    if (data?.valid === false) {
+      return;
+    }
 
     if (data.type === 'GGA') {
       if (data.quality !== undefined && data.quality > 0) {
         updateGpsFromState(gps, 'gps-gga');
+
         console.log(
           `[GPS] Fix GGA: lat=${currentLatitude}, lon=${currentLongitude}, alt=${currentAltitude}`
         );
       }
+
       return;
     }
 
     if (data.type === 'RMC') {
       if (data.status === 'active' || data.status === 'A') {
         updateGpsFromState(gps, 'gps-rmc');
-        console.log(`[GPS] Fix RMC: lat=${currentLatitude}, lon=${currentLongitude}`);
+
+        console.log(
+          `[GPS] Fix RMC: lat=${currentLatitude}, lon=${currentLongitude}`
+        );
       }
+
       return;
     }
 
     if (data.type === 'GLL') {
       if (data.status === 'active' || data.status === 'A') {
         updateGpsFromState(gps, 'gps-gll');
-        console.log(`[GPS] Fix GLL: lat=${currentLatitude}, lon=${currentLongitude}`);
+
+        console.log(
+          `[GPS] Fix GLL: lat=${currentLatitude}, lon=${currentLongitude}`
+        );
       }
+
       return;
     }
 
     updateGpsFromState(gps, 'gps-state');
   });
 
-  gps.on('error', (err) => {
-    console.error('[GPS] Błąd parsera NMEA:', err.message);
+  gps.on('error', (error) => {
+    console.error('[GPS] Błąd parsera NMEA:', error.message);
   });
 
   const serialPort = new SerialPort({
@@ -964,56 +1184,82 @@ function initGps() {
   serialPortRef = serialPort;
 
   serialPort.on('open', () => {
-    console.log(`[GPS] Port ${GPS_PORT_PATH} otwarty, prędkość ${GPS_BAUD_RATE} bps`);
+    console.log(
+      `[GPS] Port ${GPS_PORT_PATH} otwarty, prędkość ${GPS_BAUD_RATE} bps`
+    );
+
     gpsEnabled = true;
   });
 
   let rawDataBuffer = '';
+
   serialPort.on('data', (chunk) => {
     try {
-      const str = chunk.toString('utf8');
-      rawDataBuffer += str;
+      const text = chunk.toString('utf8');
+
+      rawDataBuffer += text;
 
       if (rawDataBuffer.length > 1024) {
-        const sample = rawDataBuffer.slice(0, 200).replace(/\r?\n/g, '\\n');
+        const sample = rawDataBuffer
+          .slice(0, 200)
+          .replace(/\r?\n/g, '\\n');
+
         console.log(`[GPS] Próbka surowych danych: ${sample}...`);
+
         rawDataBuffer = '';
       }
 
-      gps.updatePartial(str);
-    } catch (err) {
-      console.error('[GPS] Błąd przetwarzania danych z portu:', err.message);
+      gps.updatePartial(text);
+    } catch (error) {
+      console.error(
+        '[GPS] Błąd przetwarzania danych z portu:',
+        error.message
+      );
     }
   });
 
-  serialPort.on('error', (err) => {
-    console.error(`[GPS] Błąd portu ${GPS_PORT_PATH}: ${err.message}`);
+  serialPort.on('error', (error) => {
+    console.error(`[GPS] Błąd portu ${GPS_PORT_PATH}: ${error.message}`);
+
     gpsEnabled = false;
     gpsFix = false;
+
     scheduleSerialReopen();
   });
 
   serialPort.on('close', () => {
     console.warn(`[GPS] Port ${GPS_PORT_PATH} zamknięty`);
+
     gpsEnabled = false;
     gpsFix = false;
+
     scheduleSerialReopen();
   });
 
-  serialPort.open((err) => {
-    if (err) {
-      console.error(`[GPS] Nie udało się otworzyć portu ${GPS_PORT_PATH}: ${err.message}`);
+  serialPort.open((error) => {
+    if (error) {
+      console.error(
+        `[GPS] Nie udało się otworzyć portu ${GPS_PORT_PATH}: ${error.message}`
+      );
+
       gpsEnabled = false;
+
       scheduleSerialReopen();
     }
   });
 }
 
 async function getIpFallbackLocation() {
-  if (!ENABLE_IP_GEO_FALLBACK) return null;
+  if (!ENABLE_IP_GEO_FALLBACK) {
+    return null;
+  }
 
   const cacheFresh = Date.now() - ipGeoCache.fetchedAt < 10 * 60 * 1000;
-  if (cacheFresh && isValidCoordinate(ipGeoCache.latitude, ipGeoCache.longitude)) {
+
+  if (
+    cacheFresh &&
+    isValidCoordinate(ipGeoCache.latitude, ipGeoCache.longitude)
+  ) {
     return {
       latitude: ipGeoCache.latitude,
       longitude: ipGeoCache.longitude,
@@ -1031,25 +1277,40 @@ async function getIpFallbackLocation() {
     });
 
     const json = res.json();
-    if (!res.ok || !json) throw new Error(`HTTP ${res.status}`);
 
-    const lat = Number(json.lat ?? json.latitude);
-    const lon = Number(json.lon ?? json.longitude);
-    if (!isValidCoordinate(lat, lon)) {
+    if (!res.ok || !json) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const latitude = Number(json.lat ?? json.latitude);
+    const longitude = Number(json.lon ?? json.longitude);
+
+    if (!isValidCoordinate(latitude, longitude)) {
       throw new Error('Brak poprawnych współrzędnych w odpowiedzi fallback');
     }
 
     ipGeoCache = {
-      latitude: lat,
-      longitude: lon,
+      latitude,
+      longitude,
       fetchedAt: Date.now(),
       source: 'ip-geolocation',
     };
 
-    console.warn(`[GPS] Używam fallback IP geolocation: lat=${lat}, lon=${lon}`);
-    return { latitude: lat, longitude: lon, source: 'ip-geolocation' };
-  } catch (err) {
-    console.error('[GPS] Fallback IP geolocation nieudany:', err.message);
+    console.warn(
+      `[GPS] Używam fallback IP geolocation: lat=${latitude}, lon=${longitude}`
+    );
+
+    return {
+      latitude,
+      longitude,
+      source: 'ip-geolocation',
+    };
+  } catch (error) {
+    console.error(
+      '[GPS] Fallback IP geolocation nieudany:',
+      error.message
+    );
+
     return null;
   }
 }
@@ -1065,6 +1326,7 @@ async function resolveLocationForPayload() {
   }
 
   const fallback = await getIpFallbackLocation();
+
   if (fallback) {
     return {
       latitude: fallback.latitude,
@@ -1083,32 +1345,48 @@ async function resolveLocationForPayload() {
     };
   }
 
-  return { latitude: 0, longitude: 0, source: 'none', gpsFix: false };
+  return {
+    latitude: 0,
+    longitude: 0,
+    source: 'none',
+    gpsFix: false,
+  };
 }
 
 async function sendDataToRoom() {
   if (sendInProgress) {
-    console.warn('[sendDataToRoom] Poprzednia wysyłka nadal trwa, pomijam kolejną.');
+    console.warn(
+      '[sendDataToRoom] Poprzednia wysyłka nadal trwa, pomijam kolejną.'
+    );
+
     return;
   }
 
   if (!cachedData) {
     console.warn('[sendDataToRoom] Brak danych w cache, pomijam wysyłkę.');
+
     return;
   }
 
   sendInProgress = true;
+
   try {
     const location = await resolveLocationForPayload();
+
     const payload = {
       pcId: PC_ID,
       pcName: PC_NAME,
       timestamp: nowIso(),
+
       latitude: location.latitude,
       longitude: location.longitude,
       locationSource: location.source,
       gpsFix: location.gpsFix,
-      lastValidGpsAt: lastValidGpsAt ? new Date(lastValidGpsAt).toISOString() : null,
+
+      lastValidGpsAt: lastValidGpsAt
+        ? new Date(lastValidGpsAt).toISOString()
+        : null,
+
       lastRefreshSuccess,
       data: cachedData,
     };
@@ -1138,29 +1416,45 @@ async function sendDataToRoom() {
         },
         (response) => {
           let raw = '';
+
           response.setEncoding('utf8');
+
           response.on('data', (chunk) => {
             raw += chunk;
           });
-          response.on('end', () => resolve({ status: response.statusCode, body: raw }));
+
+          response.on('end', () => {
+            resolve({
+              status: response.statusCode,
+              body: raw,
+            });
+          });
         }
       );
 
       req.on('error', reject);
-      req.on('timeout', () =>
-        req.destroy(new Error('Timeout wysyłania do serwera pokojowego'))
-      );
+
+      req.on('timeout', () => {
+        req.destroy(
+          new Error('Timeout wysyłania do serwera pokojowego')
+        );
+      });
+
       req.write(postData);
       req.end();
     });
 
     if (res.status >= 200 && res.status < 300) {
-      console.log(`[sendDataToRoom] Dane wysłane do ${ROOM_SERVER_URL}, status: ${res.status}`);
+      console.log(
+        `[sendDataToRoom] Dane wysłane do ${ROOM_SERVER_URL}, status: ${res.status}`
+      );
     } else {
-      console.warn(`[sendDataToRoom] Serwer odpowiedział statusem ${res.status}, treść: ${res.body}`);
+      console.warn(
+        `[sendDataToRoom] Serwer odpowiedział statusem ${res.status}, treść: ${res.body}`
+      );
     }
-  } catch (err) {
-    console.error('[sendDataToRoom] Błąd wysyłania:', err.message);
+  } catch (error) {
+    console.error('[sendDataToRoom] Błąd wysyłania:', error.message);
   } finally {
     sendInProgress = false;
   }
@@ -1168,12 +1462,16 @@ async function sendDataToRoom() {
 
 function logGpsStatus() {
   const now = Date.now();
-  if (now - lastGpsLogTime > 10000) {
-    lastGpsLogTime = now;
-    console.log(
-      `[GPS] Status: enabled=${gpsEnabled}, fix=${hasFreshGpsFix()}, source=${gpsSource}, lat=${currentLatitude}, lon=${currentLongitude}, lastNmeaAt=${lastNmeaAt ? new Date(lastNmeaAt).toISOString() : 'BRAK'}`
-    );
+
+  if (now - lastGpsLogTime <= 10000) {
+    return;
   }
+
+  lastGpsLogTime = now;
+
+  console.log(
+    `[GPS] Status: enabled=${gpsEnabled}, fix=${hasFreshGpsFix()}, source=${gpsSource}, lat=${currentLatitude}, lon=${currentLongitude}, lastNmeaAt=${lastNmeaAt ? new Date(lastNmeaAt).toISOString() : 'BRAK'}`
+  );
 }
 
 async function start() {
@@ -1182,24 +1480,26 @@ async function start() {
       {
         ok: true,
         message: 'Isarsoft PC Client started',
+
         pcId: PC_ID,
         pcName: PC_NAME,
         roomServerUrl: ROOM_SERVER_URL,
+
         refreshIntervalMs: REFRESH_INTERVAL_MS,
         sendIntervalMs: SEND_INTERVAL_MS,
+
         gpsPort: GPS_PORT_PATH,
         gpsBaudRate: GPS_BAUD_RATE,
         gpsFixMaxAgeMs: GPS_FIX_MAX_AGE_MS,
         ipGeoFallback: ENABLE_IP_GEO_FALLBACK,
+
         isarsoftPreset: CONFIG.defaultPreset,
         isarsoftClasses: CONFIG.defaultClasses,
-        requireAppAllowlist: REQUIRE_APP_ALLOWLIST,
-        allowedAppUuids: [...ALLOWED_APP_UUIDS],
-        allowedAppNames: ALLOWED_APP_NAMES,
-        requireStatusMatch: REQUIRE_STATUS_MATCH,
-        activeAppStatuses: ACTIVE_APP_STATUSES,
+
+        acceptedApplicationStatus: ONLINE_STATUS,
         requireRecentOnline: REQUIRE_RECENT_ONLINE,
         appOnlineMaxAgeMs: APP_ONLINE_MAX_AGE_MS,
+
         time: nowIso(),
       },
       null,
@@ -1208,22 +1508,26 @@ async function start() {
   );
 
   initGps();
+
   setInterval(logGpsStatus, 5000);
 
   await refreshCache();
+
   setInterval(() => {
-    refreshCache().catch((err) => {
-      console.error('[refreshCache] Błąd cykliczny:', err.message);
+    refreshCache().catch((error) => {
+      console.error('[refreshCache] Błąd cykliczny:', error.message);
     });
   }, REFRESH_INTERVAL_MS);
 
   setInterval(() => {
-    sendDataToRoom().catch((err) => {
-      console.error('[sendDataToRoom] Błąd cykliczny:', err.message);
+    sendDataToRoom().catch((error) => {
+      console.error('[sendDataToRoom] Błąd cykliczny:', error.message);
     });
   }, SEND_INTERVAL_MS);
 
   await sendDataToRoom();
 }
 
-start().catch((err) => console.error('[start] Błąd krytyczny:', err));
+start().catch((error) => {
+  console.error('[start] Błąd krytyczny:', error);
+});
