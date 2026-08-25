@@ -26,6 +26,7 @@ import {
   LogOut,
   TimerReset,
   CircleAlert,
+  WifiOff,
 } from 'lucide-react';
 import styles from './Dashboard.module.css';
 
@@ -97,8 +98,12 @@ const Dashboard = () => {
         if (previousVehicle && vehicleNames.includes(previousVehicle)) {
           return previousVehicle;
         }
-  
-        return vehicleNames[0] || '';
+
+        const firstOnlineName = nextVehicles.find(
+          (vehicle) => vehicle.is_online !== false
+        )?.pcName;
+
+        return firstOnlineName || vehicleNames[0] || '';
       });
     } catch (err) {
       setError(err.message || 'Nie udało się pobrać danych dashboardu.');
@@ -205,6 +210,15 @@ const Dashboard = () => {
     return Math.round(total / recentTrips.length);
   }, [recentTrips]);
 
+  // Pojazd OFFLINE = brak telemetrii od ponad 10 minut (patrz be-server/functions.js#isVehicleOnline).
+  const vehicleOnlineMap = useMemo(() => {
+    const map = {};
+    vehicles.forEach((vehicle) => {
+      map[vehicle.pcName] = vehicle.is_online !== false;
+    });
+    return map;
+  }, [vehicles]);
+
   const occupancyRows = useMemo(() => {
     return Object.values(currentStatusMap)
       .map((status) => {
@@ -213,18 +227,27 @@ const Dashboard = () => {
         return {
           pcName: status.pcName,
           lineNumber: status.line_number || status.line_id || '',
-          currentOccupancy: Math.max(0, Number(passengers.current_occupancy || 0)),
+          // Suma IN - Suma OUT z najnowszego pakietu. Ujemne wartości są
+          // akceptowalne (np. pasażerowie wsiedli przed startem systemu).
+          currentOccupancy: Number(passengers.current_occupancy || 0),
           deltaIn: Number(passengers.delta_in || 0),
           deltaOut: Number(passengers.delta_out || 0),
           resetDetected: Boolean(passengers.reset_detected),
-          updatedAt: status.updated_at || status.received_at || null,
+          // received_at = czas faktycznego odebrania pakietu telemetrii;
+          // updated_at odświeża się też przy cyklicznej reanalizie co 5s
+          // (bez nowych danych), więc pokazywałby nieaktualne dane jako "świeże".
+          updatedAt: status.received_at || status.updated_at || null,
+          isOnline: vehicleOnlineMap[status.pcName] !== false,
         };
       })
       .sort((a, b) => (a.pcName || '').localeCompare(b.pcName || ''));
-  }, [currentStatusMap]);
+  }, [currentStatusMap, vehicleOnlineMap]);
 
   const totalOnboard = useMemo(
-    () => occupancyRows.reduce((sum, row) => sum + row.currentOccupancy, 0),
+    () =>
+      occupancyRows
+        .filter((row) => row.isOnline)
+        .reduce((sum, row) => sum + row.currentOccupancy, 0),
     [occupancyRows]
   );
 
@@ -332,11 +355,20 @@ const Dashboard = () => {
                 value={selectedVehicle}
                 onChange={handleVehicleChange}
               >
-                {vehicleOptions.map((vehicle) => (
-                  <option key={vehicle} value={vehicle}>
-                    {vehicle}
-                  </option>
-                ))}
+                {vehicleOptions.map((vehicle) => {
+                  const online = vehicleOnlineMap[vehicle] !== false;
+                  return (
+                    <option
+                      key={vehicle}
+                      value={vehicle}
+                      disabled={!online}
+                      style={online ? undefined : { color: '#9ca3af' }}
+                    >
+                      {vehicle}
+                      {online ? '' : ' (offline)'}
+                    </option>
+                  );
+                })}
               </select>
 
               <ChevronDown className={styles.selectIcon} aria-hidden="true" />
@@ -417,7 +449,13 @@ const Dashboard = () => {
           {occupancyRows.length > 0 ? (
             <div className={styles.occupancyGrid}>
               {occupancyRows.map((row) => (
-                <article key={row.pcName} className={styles.occupancyCard}>
+                <article
+                  key={row.pcName}
+                  className={`${styles.occupancyCard} ${
+                    row.isOnline ? '' : styles.occupancyCardOffline
+                  }`.trim()}
+                  aria-disabled={!row.isOnline}
+                >
                   <div className={styles.occupancyCardHeader}>
                     <span className={styles.occupancyVehicle}>
                       <BusFront className={styles.occupancyVehicleIcon} />
@@ -425,14 +463,24 @@ const Dashboard = () => {
                       {row.lineNumber ? ` · ${row.lineNumber}` : ''}
                     </span>
 
-                    {row.resetDetected && (
+                    {!row.isOnline ? (
                       <span
-                        className={styles.occupancyResetBadge}
-                        title="Wykryto reset licznika kamery — przyrost policzony od zera"
+                        className={styles.occupancyOfflineBadge}
+                        title="Brak telemetrii od ponad 10 minut"
                       >
-                        <AlertTriangle className={styles.occupancyResetIcon} />
-                        Reset
+                        <WifiOff className={styles.occupancyOfflineIcon} />
+                        Offline
                       </span>
+                    ) : (
+                      row.resetDetected && (
+                        <span
+                          className={styles.occupancyResetBadge}
+                          title="Wykryto reset licznika kamery — przyrost policzony od zera"
+                        >
+                          <AlertTriangle className={styles.occupancyResetIcon} />
+                          Reset
+                        </span>
+                      )
                     )}
                   </div>
 

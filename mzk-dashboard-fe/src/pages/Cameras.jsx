@@ -47,7 +47,9 @@ const Cameras = () => {
 
     try {
       const vehData = await api.getVehicles();
-      const vehiclesList = vehData.vehicles || [];
+      // Pojazdy OFFLINE (brak telemetrii > 10 min) są całkowicie usuwane
+      // z listy, żeby operator nie analizował nieaktualnych danych.
+      const vehiclesList = (vehData.vehicles || []).filter((vehicle) => vehicle.is_online !== false);
       setVehicles(vehiclesList);
 
       const statusPromises = vehiclesList.map((vehicle) =>

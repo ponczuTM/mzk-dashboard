@@ -343,7 +343,10 @@ export const BackendProvider = ({ children, baseUrl }) => {
 
     try {
       const data = await api.getVehicles();
-      const next = data.vehicles || [];
+      // Pojazdy OFFLINE (brak telemetrii > 10 min, patrz be-server) są tu
+      // odfiltrowywane — konsumenci tego stanu (Mapa, Dyspozytura) nie mają
+      // pokazywać nieaktualnych pojazdów w selektorach ani widokach.
+      const next = (data.vehicles || []).filter((vehicle) => vehicle.is_online !== false);
 
       setVehicles(next);
 

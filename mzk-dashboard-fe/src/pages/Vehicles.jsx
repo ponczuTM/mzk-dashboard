@@ -18,7 +18,9 @@ const Vehicles = () => {
     setLoading(true);
     try {
       const data = await api.getVehicles();
-      const list = data.vehicles || [];
+      // Pojazdy OFFLINE (brak telemetrii > 10 min) są całkowicie usuwane
+      // z listy, żeby operator nie analizował nieaktualnych danych.
+      const list = (data.vehicles || []).filter((vehicle) => vehicle.is_online !== false);
       setVehicles(list);
       if (list.length > 0 && !selectedVehicle) {
         setSelectedVehicle(list[0].pcName);

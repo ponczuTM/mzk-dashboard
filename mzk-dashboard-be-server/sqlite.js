@@ -12,6 +12,9 @@ const SYNC_INTERVAL_MS = Number(process.env.ROOM_SYNC_INTERVAL_MS || 5000);
 const MAX_BODY_BYTES = Number(process.env.ROOM_MAX_BODY_BYTES || 100 * 1024 * 1024);
 const GEOFENCE_RADIUS_METERS = Number(process.env.ROOM_GEOFENCE_RADIUS_METERS || 55);
 const PUNCTUALITY_TOLERANCE_SECONDS = Number(process.env.ROOM_PUNCTUALITY_TOLERANCE_SECONDS || 60);
+// Pojazd uznajemy za OFFLINE, jeśli od ostatniego odebranego pakietu telemetrii
+// minęło więcej niż ten czas (patrz functions.js#isVehicleOnline).
+const VEHICLE_OFFLINE_THRESHOLD_MS = Number(process.env.ROOM_VEHICLE_OFFLINE_THRESHOLD_MS || 10 * 60 * 1000);
 const FRAME_HISTORY_LIMIT_IN_DB = Number(process.env.ROOM_FRAME_HISTORY_LIMIT_IN_DB || 50000);
 const DAY_TYPES = ['weekday', 'weekend', 'holiday'];
 const DAY_TYPES_UPPER = ['WEEKDAY', 'WEEKEND', 'HOLIDAY'];
@@ -464,6 +467,7 @@ module.exports = {
   DAY_TYPES_UPPER,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
+  VEHICLE_OFFLINE_THRESHOLD_MS,
   FRAME_HISTORY_LIMIT_IN_DB,
   SYNC_INTERVAL_MS,
   DB_FILE,

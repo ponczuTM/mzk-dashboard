@@ -289,6 +289,40 @@
   box-shadow: 0 4px 8px rgba(15, 23, 42, 0.06), 0 14px 36px rgba(15, 23, 42, 0.09);
 }
 
+/* --- Pojazd OFFLINE: wyszarzony i całkowicie nieklikalny --- */
+.occupancyCardOffline {
+  opacity: 0.5;
+  filter: grayscale(1);
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.occupancyCardOffline:hover {
+  border-color: var(--border-soft);
+  transform: none;
+  box-shadow: none;
+}
+
+.occupancyOfflineBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.occupancyOfflineIcon {
+  width: 12px;
+  height: 12px;
+}
+
 .occupancyCardHeader {
   display: flex;
   align-items: center;

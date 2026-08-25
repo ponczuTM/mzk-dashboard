@@ -12,6 +12,7 @@ const {
   dbState,
   GEOFENCE_RADIUS_METERS,
   PUNCTUALITY_TOLERANCE_SECONDS,
+  VEHICLE_OFFLINE_THRESHOLD_MS,
   formatDateKey,
   getPolishPublicHolidayKeys,
   haversineMeters,
@@ -156,6 +157,18 @@ function sanitizeFileSegment(value) {
 
 function secondsSinceMidnight(date) {
   return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+// Pojazd uznajemy za OFFLINE, jeśli od ostatniego odebranego pakietu
+// telemetrii (vehicles.last_seen) minęło więcej niż VEHICLE_OFFLINE_THRESHOLD_MS.
+function isVehicleOnline(lastSeenIso, referenceDate) {
+  if (!lastSeenIso) return false;
+
+  const lastSeenMs = new Date(lastSeenIso).getTime();
+  if (!Number.isFinite(lastSeenMs)) return false;
+
+  const nowMs = (referenceDate || new Date()).getTime();
+  return (nowMs - lastSeenMs) <= VEHICLE_OFFLINE_THRESHOLD_MS;
 }
 
 // --------------------- CZAS ---------------------
@@ -714,7 +727,13 @@ function processPassengerCounts(deviceId, rawIn, rawOut, receivedAtIso) {
       previous.last_in, previous.last_out, currentIn, currentOut
     );
 
-    const nextOccupancy = previous.current_occupancy + deltaIn - deltaOut;
+    // Aktualna liczba osób na pokładzie = Suma IN - Suma OUT z NAJNOWSZEGO
+    // pakietu (nie skumulowana delta z poprzednich pakietów). Ujemne wartości
+    // są dopuszczalne (np. gdy część pasażerów wsiadła przed startem systemu).
+    // Dzięki temu reset licznika kamery (patrz computePassengerDelta) nie
+    // zniekształca bieżącego obłożenia — ono zawsze odpowiada literalnie
+    // ostatniemu odebranemu pakietowi telemetrii.
+    const nextOccupancy = currentIn - currentOut;
     const nextTotalIn = previous.total_in + deltaIn;
     const nextTotalOut = previous.total_out + deltaOut;
 
@@ -1135,7 +1154,15 @@ function analyzeVehiclePayload(payload, metadata, appendTripEvent) {
   const currentSeconds = secondsSinceMidnight(now);
   const quality = extractCameraQuality(payload, null);
 
-  upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, Boolean(assignment));
+  // upsertVehicle aktualizuje vehicles.last_seen — musi się wykonać TYLKO dla
+  // świeżo odebranego pakietu (appendTripEvent=true). Cykliczna reanaliza co
+  // SYNC_INTERVAL_MS (appendTripEvent=false) odtwarza ten sam zapisany payload
+  // bez żadnych nowych danych z pojazdu — jeśli wołałaby upsertVehicle, co
+  // 5 sekund odświeżałaby last_seen "z powietrza" i pojazd NIGDY nie
+  // przechodziłby w status OFFLINE, nawet gdy realnie przestał wysyłać dane.
+  if (appendTripEvent) {
+    upsertVehicle(pcName, pcId, coordinates, timestamp, nowIso, payload, metadata, Boolean(assignment));
+  }
 
   const baseStatus = {
     pcName,
@@ -1529,6 +1556,7 @@ module.exports = {
   normalizeUuid,
   sanitizeFileSegment,
   secondsSinceMidnight,
+  isVehicleOnline,
   validateTimeHHMM,
   normalizeTimeHHMM,
   normalizeTimeToHHMMSS,

@@ -42,7 +42,8 @@ const {
   timeToSeconds,
   getRouteStopsCumulative,
   secondsToHHMM,
-  buildVehicleDaySequence
+  buildVehicleDaySequence,
+  isVehicleOnline
 } = funcs;
 
 function generateId() {
@@ -945,6 +946,8 @@ async function handleVehicles(req, res) {
     ORDER BY v.pcName COLLATE NOCASE
   `).all();
 
+  const now = new Date();
+
   const vehicles = rows.map(row => {
     const metadata = jsonParse(row.metadata, {});
     return {
@@ -959,7 +962,9 @@ async function handleVehicles(req, res) {
       brigade: metadata.brigade || '',
       status: row.status || null,
       punctuality_status: row.punctuality_status || null,
-      status_updated_at: row.status_updated_at || null
+      status_updated_at: row.status_updated_at || null,
+      // Pojazd OFFLINE = brak telemetrii od ponad 10 minut, patrz functions.js#isVehicleOnline.
+      is_online: isVehicleOnline(row.last_seen, now)
     };
   });
 

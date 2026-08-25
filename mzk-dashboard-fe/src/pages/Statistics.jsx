@@ -21,7 +21,9 @@ const Statistics = () => {
   const loadVehicles = useCallback(async () => {
     try {
       const vehData = await api.getVehicles();
-      setVehicles(vehData.vehicles || []);
+      // Pojazdy OFFLINE (brak telemetrii > 10 min) są całkowicie usuwane
+      // z filtra pojazdu, żeby operator nie analizował nieaktualnych danych.
+      setVehicles((vehData.vehicles || []).filter((vehicle) => vehicle.is_online !== false));
     } catch (err) {
       console.error('Błąd ładowania pojazdów:', err);
     }
